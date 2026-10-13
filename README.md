@@ -45,3 +45,6 @@ offscreen (the map is mounted over the core `DataPC.forge` next to it).
   decodes to its exact length; keys are at 60 frames per second of `Length`;
   91% of TrackIDs are skeleton BoneIDs; decoded keys are continuous
   (median step 0.8-7.7 degrees for all but Quat16).
+  `acbmp animplay <forge> <name> out.png` samples a clip on its best-matching
+  skeleton and draws stick figures (verified: a 2.2 s air assassination
+  plays correctly on UCMA_Altair).

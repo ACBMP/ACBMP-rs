@@ -92,6 +92,17 @@ enum Cmd {
         #[arg(long, env = "ACBMP_SCHEMAS")]
         schemas: PathBuf,
     },
+    /// Play an animation on its best-matching skeleton; draw stick figures
+    Animplay {
+        forge: PathBuf,
+        /// Animation name (substring)
+        name: String,
+        out: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        #[arg(long, default_value_t = 8)]
+        frames: usize,
+    },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
     /// Count sub-objects per type hash across every .data entry
@@ -113,6 +124,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
+        Cmd::Animplay { forge, name, out, schemas, frames } => animplay(forge, &name, out, schemas, frames)?,
         Cmd::Animstats { forge, schemas } => animstats(forge, schemas)?,
         Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
         Cmd::Shaders { forge, name, schemas, top } => shaders(forge, &name, schemas, top)?,
@@ -574,5 +586,87 @@ fn animstats(forge: PathBuf, schemas: PathBuf) -> anyhow::Result<()> {
     for (k, n) in rows {
         println!("{n:9}  {k}");
     }
+    Ok(())
+}
+
+fn animplay(forge: PathBuf, needle: &str, out: PathBuf, schemas: PathBuf, frames: usize) -> anyhow::Result<()> {
+    use acb_anim::pose::{Clip, Skeleton};
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let anims = archive.uids_of("Animation");
+    let uid = anims
+        .iter()
+        .find(|u| archive.loc(**u).is_some_and(|l| l.name == needle))
+        .or_else(|| anims.iter().find(|u| archive.loc(**u).is_some_and(|l| l.name.contains(needle))))
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("no animation matching {needle}"))?;
+    let clip = Clip::load(&archive, uid).ok_or_else(|| anyhow::anyhow!("animation did not decode"))?;
+    let skeleton = archive
+        .uids_of("Skeleton")
+        .into_iter()
+        .filter_map(|s| Skeleton::load(&archive, s))
+        .max_by_key(|s| (clip.bone_coverage(s), s.bones.len()))
+        .ok_or_else(|| anyhow::anyhow!("no skeleton"))?;
+    println!(
+        "{} ({:.2}s, {} tracks) on {} ({} bones, {} tracks matched)",
+        archive.loc(uid).unwrap().name,
+        clip.length,
+        clip.tracks.len(),
+        archive.loc(skeleton.uid).map(|l| l.name.as_str()).unwrap_or("?"),
+        skeleton.bones.len(),
+        clip.bone_coverage(&skeleton)
+    );
+
+    // world-space joint positions per frame
+    let poses: Vec<Vec<glam::Vec3>> = (0..frames)
+        .map(|i| {
+            let t = clip.length * i as f32 / (frames.max(2) - 1) as f32;
+            skeleton.globals(&clip.sample(&skeleton, t)).iter().map(|m| m.w_axis.truncate()).collect()
+        })
+        .collect();
+    let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+    for p in poses.iter().flatten() {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    let cell = 220usize;
+    let (w, h) = (cell * frames, cell * 2);
+    let mut img = vec![255u8; w * h * 4];
+    let span = (hi - lo).max_element().max(0.01);
+    let mut line = |x0: f32, y0: f32, x1: f32, y1: f32, c: [u8; 3]| {
+        let n = ((x1 - x0).abs().max((y1 - y0).abs()) as usize).max(1);
+        for k in 0..=n {
+            let t = k as f32 / n as f32;
+            let (x, y) = ((x0 + (x1 - x0) * t) as isize, (y0 + (y1 - y0) * t) as isize);
+            if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                let o = (y as usize * w + x as usize) * 4;
+                img[o..o + 3].copy_from_slice(&c);
+            }
+        }
+    };
+    for (f, joints) in poses.iter().enumerate() {
+        for (row, (ax, color)) in [(0usize, [200u8, 40, 40]), (1usize, [40u8, 60, 200])].into_iter().enumerate() {
+            // row 0: front view (x right, z up); row 1: side view (y right, z up)
+            let map = |p: glam::Vec3| {
+                let u = if ax == 0 { p.x - lo.x } else { p.y - lo.y };
+                let v = p.z - lo.z;
+                (
+                    (f * cell) as f32 + 10.0 + u / span * (cell as f32 - 20.0),
+                    (row * cell) as f32 + cell as f32 - 10.0 - v / span * (cell as f32 - 20.0),
+                )
+            };
+            for (i, b) in skeleton.bones.iter().enumerate() {
+                if let Some(pi) = b.parent {
+                    let (a, c) = (map(joints[pi]), map(joints[i]));
+                    line(a.0, a.1, c.0, c.1, color);
+                }
+            }
+        }
+    }
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&out)?), w as u32, h as u32);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(&img)?;
+    println!("wrote {}", out.display());
     Ok(())
 }
