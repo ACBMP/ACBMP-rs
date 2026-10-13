@@ -177,19 +177,12 @@ fn digest(path: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A map forge plus the core `DataPC.forge` next to it, which holds the
-/// shared materials, texture sets and templates maps refer to.
-fn open_map<'s>(map: &std::path::Path, schema: &'s anvil_schema::Schema) -> anyhow::Result<acb_world::Archive<'s>> {
-    let core = map.with_file_name("DataPC.forge");
-    let paths: Vec<&std::path::Path> = if core.exists() && core != map { vec![map, &core] } else { vec![map] };
-    Ok(acb_world::Archive::open_many(&paths, schema)?)
+fn load_schema(dir: &std::path::Path) -> anyhow::Result<anvil_schema::Schema> {
+    Ok(acb_world::load_schema(dir)?)
 }
 
-/// ACB's schema with its nameless placeholders filled from Revelations'.
-fn load_schema(dir: &std::path::Path) -> anyhow::Result<anvil_schema::Schema> {
-    let acb = anvil_schema::Schema::load(dir.join("ACB_MP.schema"))?;
-    let acr = anvil_schema::Schema::load(dir.join("ACR_MP.schema"))?;
-    Ok(acb.with_placeholders_filled(&acr))
+fn open_map<'s>(map: &std::path::Path, schema: &'s anvil_schema::Schema) -> anyhow::Result<acb_world::Archive<'s>> {
+    Ok(acb_world::open_map(map, schema)?)
 }
 
 fn fastload(path: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {

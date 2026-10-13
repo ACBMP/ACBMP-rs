@@ -1,0 +1,21 @@
+[package]
+name = "acb-viewer"
+version = "0.1.0"
+description = "Interactive fly-through viewer for ACB maps"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "acb-viewer"
+path = "src/main.rs"
+
+[dependencies]
+acb-world.workspace = true
+acb-render.workspace = true
+anvil-schema.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+winit = "0.30"
+glam = "0.34.1"
+pollster = "1.0.1"

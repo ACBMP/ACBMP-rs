@@ -32,3 +32,6 @@ rendering the GLB in Blender.
 `acbmp shot <map.forge> out.png --eye x,y,z --target x,y,z` renders a frame
 offscreen (the map is mounted over the core `DataPC.forge` next to it).
 `acbmp meshes` and `acbmp dump <forge> <name>` help inspect content.
+- `acb-viewer`: interactive fly-through (WASD, Space/C, right mouse to look,
+  Shift faster, wheel sets speed). `acb-viewer <map.forge> --schemas <dir>`.
+  San Donato: 1.2M triangles at a vsynced 60 fps on an RX 580.

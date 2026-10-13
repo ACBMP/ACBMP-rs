@@ -45,7 +45,9 @@ pub struct Loc {
 pub struct Archive<'s> {
     schema: &'s Schema,
     codec: Codec<'s>,
-    field_hashes: HashMap<&'s str, u32>,
+    /// (type hash, property name) -> property name hash, resolved against
+    /// the type's own property chain: the name table alone is ambiguous.
+    field_hashes: RefCell<HashMap<(u32, String), Option<u32>>>,
     forges: Vec<RefCell<Forge>>,
     index: HashMap<u32, Loc>,
     /// uids in archive order
@@ -99,11 +101,10 @@ impl<'s> Archive<'s> {
             }
             forges.push(RefCell::new(forge));
         }
-        let field_hashes = schema.names.iter().map(|(h, n)| (n.as_str(), *h)).collect();
         Ok(Self {
             schema,
             codec: Codec::new(schema),
-            field_hashes,
+            field_hashes: RefCell::default(),
             forges,
             index,
             order,
@@ -165,7 +166,22 @@ impl<'s> Archive<'s> {
 
     /// Field of a decoded object by property name.
     pub fn field<'o>(&self, o: &'o Obj, name: &str) -> Option<&'o Value> {
-        o.field(*self.field_hashes.get(name)?)
+        let key = (o.type_hash, name.to_owned());
+        let cached = self.field_hashes.borrow().get(&key).copied();
+        let h = match cached {
+            Some(h) => h,
+            None => {
+                let h = self
+                    .schema
+                    .property_chain(o.type_hash)
+                    .into_iter()
+                    .find(|p| self.schema.name(p.name_hash) == Some(name))
+                    .map(|p| p.name_hash);
+                self.field_hashes.borrow_mut().insert(key, h);
+                h
+            }
+        };
+        o.field(h?)
     }
 
     pub fn is_type(&self, o: &Obj, type_name: &str) -> bool {
@@ -281,4 +297,21 @@ impl Archive<'_> {
         let tex = self.field(&set.obj, "Maps")?.items().get(slot)?.target_id()?;
         (self.type_name(tex)? == "TextureMap").then_some(tex)
     }
+}
+
+/// ACB's schema with its nameless placeholders filled from Revelations'
+/// (`ACB_MP.schema` + `ACR_MP.schema` in `dir`): the layout retail ACB data
+/// actually uses.
+pub fn load_schema(dir: &Path) -> Result<Schema, anvil_schema::Error> {
+    let acb = Schema::load(dir.join("ACB_MP.schema"))?;
+    let acr = Schema::load(dir.join("ACR_MP.schema"))?;
+    Ok(acb.with_placeholders_filled(&acr))
+}
+
+/// A map forge mounted over the core `DataPC.forge` next to it, which holds
+/// the shared materials, texture sets and templates maps refer to.
+pub fn open_map<'s>(map: &Path, schema: &'s Schema) -> Result<Archive<'s>, Error> {
+    let core = map.with_file_name("DataPC.forge");
+    let paths: Vec<&Path> = if core.exists() && core != map { vec![map, &core] } else { vec![map] };
+    Archive::open_many(&paths, schema)
 }
