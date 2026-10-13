@@ -184,6 +184,37 @@ enum Tail {
     /// Fixed bytes (ShaderPermutation / LightingShaderPermutation reserve
     /// 8 bytes of runtime pointers).
     Fixed(usize),
+    /// Animation: compressed key-frame tracks (see [`anim_track_len`]).
+    AnimTracks,
+    /// AnimTrackEvent (`AnimTrack::KeyTimesOnlyCustomSerializeFastLoad`):
+    /// u16 count, then count x u16 key times.
+    KeyTimes,
+}
+
+/// Compressed value size per compression, in descriptor-table order
+/// (descriptor index / 3): QuatNone, Quat16, Quat24, Quat32, Quat48, Quat64,
+/// QuatZFloat8, QuatZFloat16, Quat96, Vector3None, Vector332, Vector348,
+/// FloatNone, Float8, Float16, Byte (linear), Byte (lowest), Byte (nearest).
+pub const ANIM_VALUE_SIZES: [usize; 18] = [16, 2, 3, 4, 6, 8, 1, 2, 12, 12, 4, 6, 4, 1, 2, 1, 1, 1];
+
+/// Descriptor index of a built-in (permanent) track, followed by its id.
+pub const ANIM_BUILTIN_TRACK: u8 = 0xfe;
+
+/// Bytes of one serialized track after its descriptor byte, following
+/// `AnimTrackDescriptorTyped<Format, ...>::CustomSerializeFastLoad`:
+/// `u32 alloc, u32 keys`, then key times by format (index % 3):
+/// 8and8 = (keys-1) x u8, Var16 = (keys-1) x u16, Bitmap = u8 len (low 6
+/// bits) + len bytes; then keys x compressed value.
+pub fn anim_track_len(descriptor: u8, data: &[u8]) -> Option<usize> {
+    let d = descriptor as usize;
+    let size = *ANIM_VALUE_SIZES.get(d / 3)?;
+    let keys = u32::from_le_bytes(data.get(4..8)?.try_into().ok()?) as usize;
+    let times = match d % 3 {
+        0 => keys.saturating_sub(1),
+        1 => 2 * keys.saturating_sub(1),
+        _ => 1 + (*data.get(8)? as usize & 0x3f),
+    };
+    Some(8 + times + keys * size)
 }
 
 struct Level<'s> {
@@ -216,6 +247,8 @@ impl<'s> Codec<'s> {
             ("ObjectWayPoint", || Tail::Links),
             ("ShaderPermutation", || Tail::Fixed(8)),
             ("LightingShaderPermutation", || Tail::Fixed(8)),
+            ("Animation", || Tail::AnimTracks),
+            ("AnimTrackEvent", || Tail::KeyTimes),
         ] {
             if let Some(h) = schema.hash_of(name) {
                 tails.insert(h, t);
@@ -321,6 +354,24 @@ impl<'s> Codec<'s> {
                     }
                     Tail::Fixed(n) => {
                         r.take(*n, path)?;
+                    }
+                    Tail::KeyTimes => {
+                        let b = r.take(2, path)?;
+                        let n = u16::from_le_bytes([b[0], b[1]]) as usize;
+                        r.take(2 * n, path)?;
+                    }
+                    Tail::AnimTracks => {
+                        let n = r.u32(path)?;
+                        for _ in 0..n {
+                            let d = r.u8(path)?;
+                            if d == ANIM_BUILTIN_TRACK {
+                                r.u32(path)?;
+                                continue;
+                            }
+                            let len = anim_track_len(d, &r.d[r.p..])
+                                .ok_or_else(|| r.err(format!("bad anim track descriptor {d}"), path))?;
+                            r.take(len, path)?;
+                        }
                     }
                 }
                 obj.custom = Some(r.d[start..r.p].to_vec());

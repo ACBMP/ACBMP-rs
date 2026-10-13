@@ -19,6 +19,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
+name = "acb-anim"
+version = "0.1.0"
+dependencies = [
+ "acb-world",
+ "anvil-fastload",
+ "glam",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "acb-render"
 version = "0.1.0"
 dependencies = [
@@ -58,6 +68,7 @@ dependencies = [
 name = "acbmp-cli"
 version = "0.1.0"
 dependencies = [
+ "acb-anim",
  "acb-render",
  "acb-world",
  "anvil-fastload",

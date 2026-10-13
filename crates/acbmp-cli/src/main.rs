@@ -86,6 +86,12 @@ enum Cmd {
         #[arg(long)]
         sample_dir: Option<PathBuf>,
     },
+    /// Census of animation track types, frame rate and bone mapping
+    Animstats {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+    },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
     /// Count sub-objects per type hash across every .data entry
@@ -107,6 +113,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
+        Cmd::Animstats { forge, schemas } => animstats(forge, schemas)?,
         Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
         Cmd::Shaders { forge, name, schemas, top } => shaders(forge, &name, schemas, top)?,
         Cmd::Dump { forge, name, schemas } => dump(forge, &name, schemas)?,
@@ -459,6 +466,113 @@ fn shaderlab(forge: PathBuf, schemas: PathBuf, sample_dir: Option<PathBuf>) -> a
     rows.sort_by(|a, b| b.1.cmp(&a.1));
     for (msg, n) in rows.into_iter().take(15) {
         println!("{n:7}  {msg}");
+    }
+    Ok(())
+}
+
+fn animstats(forge: PathBuf, schemas: PathBuf) -> anyhow::Result<()> {
+    use acb_anim::{parse_tracks, Track};
+    use anvil_fastload::Value;
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+
+    // every BoneID of every skeleton
+    let mut bones = std::collections::HashSet::new();
+    for uid in archive.uids_of("Skeleton") {
+        let Ok(r) = archive.root(uid) else { continue };
+        for b in archive.field(&r.obj, "Bones").map(|v| v.items()).unwrap_or_default().iter().filter_map(Value::as_obj) {
+            if let Some(id) = archive.field(b, "BoneID").and_then(Value::as_u32) {
+                bones.insert(id);
+            }
+        }
+    }
+
+    let mut kinds: std::collections::BTreeMap<String, usize> = Default::default();
+    let (mut anims, mut failed, mut tracks, mut builtin) = (0, 0, 0, 0);
+    let (mut id_match, mut id_total, mut mapping_mismatch) = (0, 0, 0);
+    let mut fps_samples = Vec::new();
+    let (mut quats, mut bad_quats) = (0usize, 0usize);
+    let mut unmatched_ids: HashMap<u32, usize> = HashMap::new();
+    let mut continuity: std::collections::BTreeMap<String, Vec<f32>> = Default::default();
+    for uid in archive.uids_of("Animation") {
+        let Ok(r) = archive.root(uid) else { failed += 1; continue };
+        let Some(tail) = &r.obj.custom else { failed += 1; continue };
+        let Ok(ts) = parse_tracks(tail) else { failed += 1; continue };
+        anims += 1;
+        let ids: Vec<u32> = archive
+            .field(&r.obj, "AnimTrackData")
+            .and_then(Value::as_obj)
+            .and_then(|d| archive.field(d, "AnimTrackDataMapping"))
+            .map(|v| v.items().iter().filter_map(Value::as_obj).filter_map(|m| archive.field(m, "TrackID").and_then(Value::as_u32)).collect())
+            .unwrap_or_default();
+        if ids.len() != ts.len() {
+            mapping_mismatch += 1;
+        }
+        for id in &ids {
+            id_total += 1;
+            if bones.contains(id) {
+                id_match += 1;
+            } else {
+                *unmatched_ids.entry(*id).or_default() += 1;
+            }
+        }
+        let length = archive.field(&r.obj, "Length").and_then(Value::as_f32s).and_then(|v| v.first().copied()).unwrap_or(0.0);
+        let mut max_t = 0;
+        for t in &ts {
+            tracks += 1;
+            match t {
+                Track::Builtin(_) => builtin += 1,
+                Track::Data(d) => {
+                    *kinds.entry(format!("{:?}/{:?}", d.compression, d.format)).or_default() += 1;
+                    max_t = max_t.max(d.times.last().copied().unwrap_or(0));
+                    if let Some(qs) = d.quats() {
+                        let steps = continuity.entry(format!("{:?}", d.compression)).or_default();
+                        for (i, q) in qs.iter().enumerate() {
+                            quats += 1;
+                            if (q.length() - 1.0).abs() > 0.01 {
+                                bad_quats += 1;
+                            }
+                            if i > 0 {
+                                // angle between consecutive keys, degrees
+                                steps.push(qs[i - 1].dot(*q).abs().min(1.0).acos().to_degrees() * 2.0);
+                            }
+                        }
+                    }
+                    if let Some(vs) = d.vec3s() {
+                        let steps = continuity.entry(format!("{:?} (m)", d.compression)).or_default();
+                        for w in vs.windows(2) {
+                            steps.push(w[0].distance(w[1]));
+                        }
+                    }
+                }
+            }
+        }
+        if length > 0.1 && max_t > 0 {
+            fps_samples.push(max_t as f32 / length);
+        }
+    }
+    fps_samples.sort_by(|a, b| a.total_cmp(b));
+    let median = fps_samples.get(fps_samples.len() / 2).copied().unwrap_or(0.0);
+    println!("{anims} animations ({failed} failed), {tracks} tracks ({builtin} built-in), {} skeleton bone ids", bones.len());
+    println!("frames per Length unit: median {median:.2} (p10 {:.2}, p90 {:.2})",
+        fps_samples.get(fps_samples.len() / 10).copied().unwrap_or(0.0),
+        fps_samples.get(fps_samples.len() * 9 / 10).copied().unwrap_or(0.0));
+    println!("TrackID matches a BoneID: {id_match}/{id_total}; mapping/track count mismatches: {mapping_mismatch}");
+    let mut top: Vec<_> = unmatched_ids.into_iter().collect();
+    top.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("most common unmatched TrackIDs: {:?}", top.iter().take(8).map(|(i, n)| format!("{i:#010x} x{n} {}", schema.name_or_hash(*i))).collect::<Vec<_>>());
+    println!("decoded quats {quats}, off unit length {bad_quats}");
+    println!("consecutive-key steps (rotations in degrees, vectors in metres):");
+    for (k, mut v) in continuity {
+        v.sort_by(|a, b| a.total_cmp(b));
+        let at = |f: f32| v.get(((v.len() as f32 * f) as usize).min(v.len().saturating_sub(1))).copied().unwrap_or(0.0);
+        let big = v.iter().filter(|&&x| x > 45.0).count();
+        println!("  {k:22} n {:8}  median {:8.3}  p99 {:8.3}  >45: {:.2}%", v.len(), at(0.5), at(0.99), 100.0 * big as f32 / v.len().max(1) as f32);
+    }
+    let mut rows: Vec<_> = kinds.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    for (k, n) in rows {
+        println!("{n:9}  {k}");
     }
     Ok(())
 }

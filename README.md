@@ -39,3 +39,9 @@ offscreen (the map is mounted over the core `DataPC.forge` next to it).
   disassembler and WGSL translator. `acbmp shaderlab <forge>` translates every
   MaterialTemplate permutation and validates it with naga: 100% of the unique
   shaders in DataPC.forge (5,796) and every MP map forge pass.
+- `acb-anim`: animation track stream (54 track types: 18 compressions x 3
+  key-time formats), all quaternion/vector/float decompressors.
+  `acbmp animstats <forge>`: every one of the core forge's 15,254 animations
+  decodes to its exact length; keys are at 60 frames per second of `Length`;
+  91% of TrackIDs are skeleton BoneIDs; decoded keys are continuous
+  (median step 0.8-7.7 degrees for all but Quat16).
