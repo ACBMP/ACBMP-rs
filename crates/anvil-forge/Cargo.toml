@@ -1,0 +1,11 @@
+[package]
+name = "anvil-forge"
+version = "0.1.0"
+description = "Reader for Anvil (scimitar) .forge archives and their .data resource containers"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lzokay-native = "0.1.0"
+thiserror.workspace = true

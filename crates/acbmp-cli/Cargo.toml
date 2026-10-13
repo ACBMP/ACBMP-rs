@@ -1,0 +1,16 @@
+[package]
+name = "acbmp-cli"
+version = "0.1.0"
+description = "Developer CLI for inspecting ACB MP game data"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "acbmp"
+path = "src/main.rs"
+
+[dependencies]
+anvil-forge.workspace = true
+anyhow.workspace = true
+clap.workspace = true
