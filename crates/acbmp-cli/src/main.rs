@@ -35,6 +35,38 @@ enum Cmd {
         #[arg(long, env = "ACBMP_SCHEMAS")]
         schemas: PathBuf,
     },
+    /// Render one frame of a map offscreen to a PNG
+    Shot {
+        forge: PathBuf,
+        out: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Camera position, world metres (Z up)
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true, default_values_t = [60.0, -80.0, 45.0])]
+        eye: Vec<f32>,
+        /// Point the camera looks at
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true, default_values_t = [0.0, 0.0, 0.0])]
+        target: Vec<f32>,
+        #[arg(long, default_value_t = 1600)]
+        width: u32,
+        #[arg(long, default_value_t = 900)]
+        height: u32,
+    },
+    /// List placed meshes, tallest first
+    Meshes {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+    },
+    /// Print the top-level fields of root objects whose name contains a string
+    Dump {
+        forge: PathBuf,
+        name: String,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+    },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
     /// Count sub-objects per type hash across every .data entry
@@ -56,6 +88,11 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
+        Cmd::Dump { forge, name, schemas } => dump(forge, &name, schemas)?,
+        Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
+        Cmd::Shot { forge, out, schemas, eye, target, width, height } => {
+            shot(forge, out, schemas, &eye, &target, width, height)?
+        }
         Cmd::Gltf { forge, out, schemas } => {
             let t0 = Instant::now();
             let schema = load_schema(&schemas)?;
@@ -140,6 +177,14 @@ fn digest(path: PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A map forge plus the core `DataPC.forge` next to it, which holds the
+/// shared materials, texture sets and templates maps refer to.
+fn open_map<'s>(map: &std::path::Path, schema: &'s anvil_schema::Schema) -> anyhow::Result<acb_world::Archive<'s>> {
+    let core = map.with_file_name("DataPC.forge");
+    let paths: Vec<&std::path::Path> = if core.exists() && core != map { vec![map, &core] } else { vec![map] };
+    Ok(acb_world::Archive::open_many(&paths, schema)?)
+}
+
 /// ACB's schema with its nameless placeholders filled from Revelations'.
 fn load_schema(dir: &std::path::Path) -> anyhow::Result<anvil_schema::Schema> {
     let acb = anvil_schema::Schema::load(dir.join("ACB_MP.schema"))?;
@@ -182,6 +227,105 @@ fn fastload(path: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
     rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
     for (h, (ok, bad, err)) in rows.into_iter().take(top) {
         println!("{bad:6} failed {ok:6} ok  {:28} {}", schema.name_or_hash(h), err.unwrap_or_default());
+    }
+    Ok(())
+}
+
+fn shot(
+    forge: PathBuf,
+    out: PathBuf,
+    schemas: PathBuf,
+    eye: &[f32],
+    target: &[f32],
+    width: u32,
+    height: u32,
+) -> anyhow::Result<()> {
+    let t0 = Instant::now();
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    let (device, queue) = pollster::block_on(acb_render::headless_device())?;
+    let r = acb_render::Renderer::new(device, queue, acb_render::wgpu::TextureFormat::Rgba8UnormSrgb);
+    let (scene, s) = acb_render::Scene::load(&r, &archive)?;
+    println!(
+        "{} meshes ({} skipped), {} instances, {} triangles, {} materials (blend modes {:?}, {} disabled submeshes), {} textures ({} missing), {:.1}s",
+        s.meshes, s.skipped_meshes, s.instances, s.triangles, s.materials, s.blend_modes, s.disabled_submeshes, s.textures, s.missing_textures,
+        t0.elapsed().as_secs_f64()
+    );
+    let camera = acb_render::Camera {
+        eye: glam::Vec3::from_slice(eye),
+        target: glam::Vec3::from_slice(target),
+        fov_y: 60f32.to_radians(),
+        aspect: width as f32 / height as f32,
+    };
+    let rgba = acb_render::render_to_rgba(&r, &scene, &camera, width, height);
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&out)?), width, height);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(&rgba)?;
+    println!("wrote {}", out.display());
+    Ok(())
+}
+
+fn meshes(forge: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let name = |uid: u32| archive.loc(uid).map(|l| l.name.clone()).unwrap_or_else(|| format!("{uid:#010x}"));
+    let mut rows = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for inst in archive.instances() {
+        if !seen.insert(inst.mesh) {
+            continue;
+        }
+        let Some(m) = archive.static_mesh(inst.mesh)? else { continue };
+        let (lo, hi) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
+            ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])])
+        });
+        let mats: Vec<String> = m
+            .submeshes
+            .iter()
+            .map(|s| {
+                let tex = archive.material(s.material).and_then(|x| x.diffuse);
+                format!("{}{}", name(s.material), if tex.is_some() { "" } else { " (no diffuse)" })
+            })
+            .collect();
+        rows.push((hi[2] - lo[2], hi[0] - lo[0], hi[1] - lo[1], name(inst.mesh), mats));
+    }
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (h, w, d, n, mats) in rows.into_iter().take(top) {
+        println!("{h:7.1} x {w:7.1} x {d:7.1}  {n}  [{}]", mats.join(", "));
+    }
+    Ok(())
+}
+
+fn dump(forge: PathBuf, needle: &str, schemas: PathBuf) -> anyhow::Result<()> {
+    use anvil_fastload::Value;
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let mut uids: Vec<u32> = schema
+        .types
+        .keys()
+        .flat_map(|h| archive.uids_of(&schema.name_or_hash(*h)))
+        .filter(|u| archive.loc(*u).is_some_and(|l| l.name.contains(needle)))
+        .collect();
+    uids.sort();
+    for uid in uids.into_iter().take(8) {
+        let root = archive.root(uid)?;
+        println!("== {uid:#010x} {} ({})", archive.loc(uid).unwrap().name, archive.type_name(uid).unwrap_or_default());
+        for (h, v) in &root.obj.fields {
+            let text = match v {
+                Value::Raw(b) if b.len() <= 4 => format!("{}", v.as_u32().unwrap_or(0)),
+                Value::Raw(b) => format!("{:?}", v.as_f32s().unwrap_or_default().iter().take(16).collect::<Vec<_>>()).chars().take(120).collect::<String>() + if b.len() > 64 { "..." } else { "" },
+                Value::Ref { id, .. } | Value::Handle { id, .. } => {
+                    format!("-> {id:#010x} {}", archive.loc(*id).map(|l| l.name.as_str()).unwrap_or("?"))
+                }
+                Value::Ptr { obj: Some(o), .. } | Value::Object(o) => format!("<{}>", schema.name_or_hash(o.type_hash)),
+                Value::Ptr { link, .. } => format!("ptr {link:?}"),
+                Value::Str(b) => format!("{:?}", String::from_utf8_lossy(b)),
+                Value::Packed { elem_size, data } => format!("[{} x {elem_size}B]", data.len() / elem_size.max(&1)),
+                Value::Array(items) => format!("[{} items]", items.len()),
+            };
+            println!("  {:28} {text}", schema.name_or_hash(*h));
+        }
     }
     Ok(())
 }

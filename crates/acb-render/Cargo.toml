@@ -1,0 +1,15 @@
+[package]
+name = "acb-render"
+version = "0.1.0"
+description = "wgpu renderer for ACB maps"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+acb-world.workspace = true
+anyhow.workspace = true
+bytemuck = { version = "1.25.2", features = ["derive"] }
+glam = { version = "0.34.1", features = ["bytemuck"] }
+pollster = "1.0.1"
+wgpu = "30.0.1"

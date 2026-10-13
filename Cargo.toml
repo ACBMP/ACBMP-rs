@@ -12,6 +12,7 @@ anvil-forge = { path = "crates/anvil-forge" }
 anvil-schema = { path = "crates/anvil-schema" }
 anvil-fastload = { path = "crates/anvil-fastload" }
 acb-world = { path = "crates/acb-world" }
+acb-render = { path = "crates/acb-render" }
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }

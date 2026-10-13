@@ -26,3 +26,9 @@ The `.schema` files come from anvilforge-py and are not vendored here.
 `acbmp gltf <forge> <out.glb>` exports a map's static geometry. San Donato:
 1,971 instances of 280 meshes, 317k triangles, in 0.6 s; layout checked by
 rendering the GLB in Blender.
+- `acb-render`: wgpu renderer (instanced static meshes, native BC textures,
+  opaque / alpha-test / blended passes, placeholder sun + fog shading)
+
+`acbmp shot <map.forge> out.png --eye x,y,z --target x,y,z` renders a frame
+offscreen (the map is mounted over the core `DataPC.forge` next to it).
+`acbmp meshes` and `acbmp dump <forge> <name>` help inspect content.
