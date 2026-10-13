@@ -58,6 +58,69 @@ pub enum Value {
     Array(Vec<Value>),
 }
 
+impl Value {
+    /// Unsigned integer of a 1-, 2- or 4-byte raw value.
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Value::Raw(b) => match b.len() {
+                1 => Some(b[0] as u32),
+                2 => Some(u16::from_le_bytes([b[0], b[1]]) as u32),
+                4 => Some(u32::from_le_bytes(b[..4].try_into().unwrap())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        self.as_u32().map(|v| v != 0)
+    }
+
+    /// Floats of a FLOAT/vector/matrix raw value.
+    pub fn as_f32s(&self) -> Option<Vec<f32>> {
+        match self {
+            Value::Raw(b) if b.len() % 4 == 0 => {
+                Some(b.chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect())
+            }
+            _ => None,
+        }
+    }
+
+    /// Bytes of a packed primitive array or a raw value.
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Packed { data, .. } | Value::Raw(data) | Value::Str(data) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// The object held inline by an OBJECT, pointer or reference.
+    pub fn as_obj(&self) -> Option<&Obj> {
+        match self {
+            Value::Object(o) => Some(o),
+            Value::Ptr { obj: Some(o), .. } | Value::Ref { obj: Some(o), .. } => Some(o),
+            _ => None,
+        }
+    }
+
+    /// Id a reference, handle or linked pointer points at (0 = none).
+    pub fn target_id(&self) -> Option<u32> {
+        match self {
+            Value::Ref { id, .. } | Value::Handle { id, .. } => Some(*id).filter(|&i| i != 0),
+            Value::Ptr { link: Some(id), .. } => Some(*id).filter(|&i| i != 0),
+            Value::Ptr { obj: Some(o), .. } => Some(o.id),
+            _ => None,
+        }
+    }
+
+    pub fn items(&self) -> &[Value] {
+        match self {
+            Value::Array(v) => v,
+            _ => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DynProp {
     pub name_hash: u32,

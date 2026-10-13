@@ -20,3 +20,9 @@ exactly on DataPC.forge (19,526 decoded, 489,403 incl. nested) and San Donato
 hand-written serializers and stay opaque for now.
 
 The `.schema` files come from anvilforge-py and are not vendored here.
+- `acb-world`: uid index over a forge, entity instances (Visual -> LOD0 mesh),
+  static meshes (vertex formats 3/4), textures (BGRA8/BC1-3 mip chains)
+
+`acbmp gltf <forge> <out.glb>` exports a map's static geometry. San Donato:
+1,971 instances of 280 meshes, 317k triangles, in 0.6 s; layout checked by
+rendering the GLB in Blender.

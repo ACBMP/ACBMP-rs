@@ -5,6 +5,8 @@ use std::time::Instant;
 use anvil_forge::{DataFile, Forge};
 use clap::{Parser, Subcommand};
 
+mod gltf;
+
 #[derive(Parser)]
 #[command(name = "acbmp", about = "Inspect ACB MP game data")]
 struct Cli {
@@ -25,6 +27,13 @@ enum Cmd {
         /// Rows to print
         #[arg(long, default_value_t = 30)]
         top: usize,
+    },
+    /// Export a map's static geometry as binary glTF
+    Gltf {
+        forge: PathBuf,
+        out: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
     },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
@@ -47,6 +56,16 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
+        Cmd::Gltf { forge, out, schemas } => {
+            let t0 = Instant::now();
+            let schema = load_schema(&schemas)?;
+            let archive = acb_world::Archive::open(&forge, &schema)?;
+            let s = gltf::export(&archive, &out)?;
+            println!(
+                "{} instances of {} meshes ({} skipped: skinned or empty), {} triangles, {:.1}s",
+                s.instances, s.meshes, s.skipped_meshes, s.triangles, t0.elapsed().as_secs_f64()
+            );
+        }
         Cmd::Fastload { forge, schemas, top } => fastload(forge, schemas, top)?,
     }
     Ok(())

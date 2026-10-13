@@ -1,0 +1,13 @@
+[package]
+name = "acb-world"
+version = "0.1.0"
+description = "ACB map content: object index over a forge, entities, static meshes, textures"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anvil-forge.workspace = true
+anvil-schema.workspace = true
+anvil-fastload.workspace = true
+thiserror.workspace = true
