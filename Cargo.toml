@@ -13,6 +13,7 @@ anvil-schema = { path = "crates/anvil-schema" }
 anvil-fastload = { path = "crates/anvil-fastload" }
 acb-world = { path = "crates/acb-world" }
 acb-render = { path = "crates/acb-render" }
+d3d9-shader = { path = "crates/d3d9-shader" }
 thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }

@@ -1,0 +1,10 @@
+[package]
+name = "d3d9-shader"
+version = "0.1.0"
+description = "Direct3D 9 shader model 3 bytecode parser and WGSL translator"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true

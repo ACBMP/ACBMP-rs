@@ -181,6 +181,9 @@ enum Tail {
     WayPoint,
     /// ObjectWayPoint: u8 count, (u16, u16) links.
     Links,
+    /// Fixed bytes (ShaderPermutation / LightingShaderPermutation reserve
+    /// 8 bytes of runtime pointers).
+    Fixed(usize),
 }
 
 struct Level<'s> {
@@ -211,6 +214,8 @@ impl<'s> Codec<'s> {
             ("NavMeshTriangle", (|| Tail::NavMeshTriangle) as fn() -> Tail),
             ("WayPoint", || Tail::WayPoint),
             ("ObjectWayPoint", || Tail::Links),
+            ("ShaderPermutation", || Tail::Fixed(8)),
+            ("LightingShaderPermutation", || Tail::Fixed(8)),
         ] {
             if let Some(h) = schema.hash_of(name) {
                 tails.insert(h, t);
@@ -313,6 +318,9 @@ impl<'s> Codec<'s> {
                     Tail::Links => {
                         let n = r.u8(path)? as usize;
                         r.take(4 * n, path)?;
+                    }
+                    Tail::Fixed(n) => {
+                        r.take(*n, path)?;
                     }
                 }
                 obj.custom = Some(r.d[start..r.p].to_vec());

@@ -67,6 +67,25 @@ enum Cmd {
         #[arg(long, env = "ACBMP_SCHEMAS")]
         schemas: PathBuf,
     },
+    /// Summarize a MaterialTemplate's compiled shader permutations
+    Shaders {
+        forge: PathBuf,
+        /// Template name (substring)
+        name: String,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        #[arg(long, default_value_t = 6)]
+        top: usize,
+    },
+    /// Translate every shader permutation in a forge to WGSL and validate it
+    Shaderlab {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Write the first failing shader's disassembly and WGSL here
+        #[arg(long)]
+        sample_dir: Option<PathBuf>,
+    },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
     /// Count sub-objects per type hash across every .data entry
@@ -88,6 +107,8 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
+        Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
+        Cmd::Shaders { forge, name, schemas, top } => shaders(forge, &name, schemas, top)?,
         Cmd::Dump { forge, name, schemas } => dump(forge, &name, schemas)?,
         Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height } => {
@@ -319,6 +340,125 @@ fn dump(forge: PathBuf, needle: &str, schemas: PathBuf) -> anyhow::Result<()> {
             };
             println!("  {:28} {text}", schema.name_or_hash(*h));
         }
+    }
+    Ok(())
+}
+
+fn shaders(forge: PathBuf, needle: &str, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
+    use anvil_fastload::Value;
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    for uid in archive.uids_of("MaterialTemplate") {
+        let name = &archive.loc(uid).unwrap().name;
+        if !name.contains(needle) {
+            continue;
+        }
+        let root = archive.root(uid)?;
+        println!("== {uid:#010x} {name}");
+        for which in ["CompiledTemplatePrimary", "CompiledTemplateSecondary"] {
+            let Some(ct) = archive.field(&root.obj, which).and_then(Value::as_obj) else { continue };
+            for list in ["VertexShaderPermutations", "PixelShaderPermutations", "LightingPermutations"] {
+                let perms = archive.field(ct, list).map(|v| v.items()).unwrap_or_default();
+                println!("  {which}.{list}: {}", perms.len());
+                for p in perms.iter().filter_map(Value::as_obj).take(top) {
+                    let key = archive.field(p, "ShaderKey").and_then(Value::as_u32).unwrap_or(0);
+                    let code = archive.field(p, "CompiledCode").and_then(Value::as_bytes).unwrap_or_default();
+                    let ver = code.get(..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+                    let params: Vec<String> = archive.field(p, "Parameters")
+                        .map(|v| v.items())
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(Value::as_obj)
+                        .map(|q| {
+                            let id = archive.field(q, "PropertyID").and_then(Value::as_u32).unwrap_or(0);
+                            let c = archive.field(q, "ConstantIndex").and_then(Value::as_u32).unwrap_or(0);
+                            let n = archive.field(q, "NbVectors").and_then(Value::as_u32).unwrap_or(0);
+                            let t = archive.field(q, "Type").and_then(Value::as_u32).unwrap_or(0);
+                            format!("{}@{c}x{n}t{t}", schema.name_or_hash(id))
+                        })
+                        .collect();
+                    println!("    key {key:#010x} code {} B ver {ver:#010x} params {}", code.len(), params.join(" "));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn shaderlab(forge: PathBuf, schemas: PathBuf, sample_dir: Option<PathBuf>) -> anyhow::Result<()> {
+    use anvil_fastload::Value;
+    let t0 = Instant::now();
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    let mut validator = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
+    let (mut total, mut parsed, mut translated, mut valid) = (0usize, 0usize, 0usize, 0usize);
+    let mut errors: HashMap<String, usize> = HashMap::new();
+    let mut seen_bytes = std::collections::HashSet::new();
+    let mut samples = 0;
+    for uid in archive.uids_of("MaterialTemplate") {
+        let Ok(root) = archive.root(uid) else { continue };
+        for which in ["CompiledTemplatePrimary", "CompiledTemplateSecondary"] {
+            let Some(ct) = archive.field(&root.obj, which).and_then(Value::as_obj) else { continue };
+            for list in ["VertexShaderPermutations", "PixelShaderPermutations", "LightingPermutations"] {
+                for p in archive.field(ct, list).map(|v| v.items()).unwrap_or_default().iter().filter_map(Value::as_obj) {
+                    let Some(code) = archive.field(p, "CompiledCode").and_then(Value::as_bytes) else { continue };
+                    if code.is_empty() || !seen_bytes.insert(code.to_vec()) {
+                        continue;
+                    }
+                    total += 1;
+                    let mut fail = |kind: &str, msg: String, prog: Option<&d3d9_shader::Program>, wgsl: Option<&str>| {
+                        let key: String = format!("{kind}: {msg}").chars().take(110).collect();
+                        *errors.entry(key).or_default() += 1;
+                        if let (Some(dir), true) = (&sample_dir, samples < 12) {
+                            samples += 1;
+                            let _ = std::fs::create_dir_all(dir);
+                            let base = dir.join(format!("fail{samples:02}"));
+                            let _ = std::fs::write(base.with_extension("txt"), format!("{msg}\n\n{}", prog.map(|p| p.to_string()).unwrap_or_default()));
+                            if let Some(w) = wgsl {
+                                let _ = std::fs::write(base.with_extension("wgsl"), w);
+                            }
+                        }
+                    };
+                    let prog = match d3d9_shader::parse(code) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            fail("parse", e.to_string(), None, None);
+                            continue;
+                        }
+                    };
+                    parsed += 1;
+                    let t = match d3d9_shader::wgsl::translate(&prog, &Default::default()) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            fail("translate", e.to_string(), Some(&prog), None);
+                            continue;
+                        }
+                    };
+                    translated += 1;
+                    let module = match naga::front::wgsl::parse_str(&t.wgsl) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            fail("wgsl", e.message().to_string(), Some(&prog), Some(&t.wgsl));
+                            continue;
+                        }
+                    };
+                    match validator.validate(&module) {
+                        Ok(_) => valid += 1,
+                        Err(e) => fail("validate", format!("{}", e.as_inner()), Some(&prog), Some(&t.wgsl)),
+                    }
+                }
+            }
+        }
+    }
+    println!(
+        "{total} unique shaders: {parsed} parsed, {translated} translated, {valid} valid WGSL ({:.1}%), {:.1}s",
+        100.0 * valid as f64 / total.max(1) as f64,
+        t0.elapsed().as_secs_f64()
+    );
+    let mut rows: Vec<_> = errors.into_iter().collect();
+    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    for (msg, n) in rows.into_iter().take(15) {
+        println!("{n:7}  {msg}");
     }
     Ok(())
 }

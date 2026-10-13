@@ -22,3 +22,5 @@ acb-render.workspace = true
 png = "0.18.1"
 pollster = "1.0.1"
 glam = "0.34.1"
+d3d9-shader.workspace = true
+naga = { version = "30", features = ["wgsl-in"] }

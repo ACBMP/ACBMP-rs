@@ -35,3 +35,7 @@ offscreen (the map is mounted over the core `DataPC.forge` next to it).
 - `acb-viewer`: interactive fly-through (WASD, Space/C, right mouse to look,
   Shift faster, wheel sets speed). `acb-viewer <map.forge> --schemas <dir>`.
   San Donato: 1.2M triangles at a vsynced 60 fps on an RX 580.
+- `d3d9-shader`: SM3 bytecode parser (incl. CTAB constant tables),
+  disassembler and WGSL translator. `acbmp shaderlab <forge>` translates every
+  MaterialTemplate permutation and validates it with naga: 100% of the unique
+  shaders in DataPC.forge (5,796) and every MP map forge pass.
