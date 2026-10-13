@@ -1,0 +1,10 @@
+[package]
+name = "anvil-schema"
+version = "0.1.0"
+description = "Loader for Anvil SCHM reflection schemas (type and property layouts)"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "anvil-fastload"
+version = "0.1.0"
+description = "Schema-driven decoder for Anvil FastLoad object payloads"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anvil-schema.workspace = true
+thiserror.workspace = true

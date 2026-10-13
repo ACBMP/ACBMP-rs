@@ -6,7 +6,9 @@ version = 4
 name = "acbmp-cli"
 version = "0.1.0"
 dependencies = [
+ "anvil-fastload",
  "anvil-forge",
+ "anvil-schema",
  "anyhow",
  "clap",
 ]
@@ -62,10 +64,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "anvil-fastload"
+version = "0.1.0"
+dependencies = [
+ "anvil-schema",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "anvil-forge"
 version = "0.1.0"
 dependencies = [
  "lzokay-native",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "anvil-schema"
+version = "0.1.0"
+dependencies = [
  "thiserror 2.0.21",
 ]
 

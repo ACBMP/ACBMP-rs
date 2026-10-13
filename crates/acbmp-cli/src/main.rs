@@ -16,6 +16,16 @@ struct Cli {
 enum Cmd {
     /// List the entries of a forge archive
     Ls { forge: PathBuf },
+    /// Decode every sub-object with the schema; report results per type
+    Fastload {
+        forge: PathBuf,
+        /// Directory holding ACB_MP.schema and ACR_MP.schema
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Rows to print
+        #[arg(long, default_value_t = 30)]
+        top: usize,
+    },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
     /// Count sub-objects per type hash across every .data entry
@@ -37,6 +47,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
+        Cmd::Fastload { forge, schemas, top } => fastload(forge, schemas, top)?,
     }
     Ok(())
 }
@@ -106,6 +117,52 @@ fn digest(path: PathBuf) -> anyhow::Result<()> {
                 std::io::Write::write_all(&mut w, &o.payload)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// ACB's schema with its nameless placeholders filled from Revelations'.
+fn load_schema(dir: &std::path::Path) -> anyhow::Result<anvil_schema::Schema> {
+    let acb = anvil_schema::Schema::load(dir.join("ACB_MP.schema"))?;
+    let acr = anvil_schema::Schema::load(dir.join("ACR_MP.schema"))?;
+    Ok(acb.with_placeholders_filled(&acr))
+}
+
+fn fastload(path: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
+    let t0 = Instant::now();
+    let schema = load_schema(&schemas)?;
+    let codec = anvil_fastload::Codec::new(&schema);
+    let mut forge = Forge::open(&path)?;
+    let entries = forge.entries().to_vec();
+    // type -> (ok, failed, first error)
+    let mut per_type: HashMap<u32, (usize, usize, Option<String>)> = HashMap::new();
+    let mut nested = 0usize;
+    for e in entries.iter().filter(|e| !e.is_metafile()) {
+        for o in DataFile::parse(&forge.read(e)?)?.objects {
+            let slot = per_type.entry(o.type_hash).or_default();
+            match codec.decode(&o.payload) {
+                Ok(root) => {
+                    slot.0 += 1;
+                    root.obj.walk(&mut |_| nested += 1);
+                }
+                Err(err) => {
+                    slot.1 += 1;
+                    slot.2.get_or_insert_with(|| err.to_string());
+                }
+            }
+        }
+    }
+    let ok: usize = per_type.values().map(|v| v.0).sum();
+    let bad: usize = per_type.values().map(|v| v.1).sum();
+    println!(
+        "{ok} decoded ({nested} objects incl. nested), {bad} failed, {} types, {:.1}s",
+        per_type.len(),
+        t0.elapsed().as_secs_f64()
+    );
+    let mut rows: Vec<_> = per_type.into_iter().filter(|r| r.1 .1 > 0).collect();
+    rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    for (h, (ok, bad, err)) in rows.into_iter().take(top) {
+        println!("{bad:6} failed {ok:6} ok  {:28} {}", schema.name_or_hash(h), err.unwrap_or_default());
     }
     Ok(())
 }
