@@ -381,8 +381,22 @@ its exact byte length and by key continuity (`acbmp animstats`).
   its last frame, landing clip at touchdown, then the run at the matching
   phase. Kind by height/distance (up > 0.3 m, down < -1 m; 050/300/550 by
   < 2.5 / < 4 m). Chains naturally (post -> stairs on San Donato).
-- Open: run turns, climbing/hanging (wall clips), the real HumanGround
-  state machine.
+- Climbing (`acb-viewer/src/climb.rs`): guidance edges with a horizontal
+  face normal are holds (wall = that normal; `top` if the other face is
+  up). On-wall pose `xx_climb_wait_1m`: hands 0.5 m ahead and 1.6 m above
+  the entity (`acbmp posebounds`). Walking into a wall with a hold 1.3-2.6
+  m up within 0.9 m mounts (`xx_h_wait_hipm_footl_tr_climbing_1m`, root
+  +0.6 m). W/S/A/D look for the next hold on the same wall plane 0.5-2 m
+  away and play `xx_h_climb_1m_tr_climb_{u,d,l,r}_{l,r}hand_{2,3}` +
+  `xx_h_climb_..._{2,3}` + `..._tr_climb_1m` (class 2 = 1.2 m up / 1.5 m
+  side, 3 = 1.8 m), carrying the entity in proportion to the clip's root
+  progress. Up with no hold above a `top` edge hops onto the roof (jump
+  up_050 landing); down with nothing below lets go (fall). Hanging
+  (`hangwall`, `hangfree`), corner turns and `xx_h_hangwall_tr_passover_*`
+  are not used yet; `xx_l_climb_1m_to_groundentry_*` steps off at the
+  bottom.
+- Open: run turns, hanging, the real HumanGround state machine, camera
+  near walls.
 - `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and
   never present, so they work with the window hidden and are repeatable.
   `--input "0=w,shift 1.5= 2=d"` scripts held keys over simulated time.

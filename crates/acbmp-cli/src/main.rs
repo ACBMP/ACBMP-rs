@@ -113,6 +113,19 @@ enum Cmd {
         #[arg(long)]
         obj: Option<PathBuf>,
     },
+    /// Bone extents of a character posed by a clip (entity space)
+    Posebounds {
+        forge: PathBuf,
+        /// EntityBuilder
+        builder: String,
+        clip: String,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        #[arg(long, env = "ACBMP_EXE")]
+        exe: PathBuf,
+        #[arg(long, default_value_t = 0.0)]
+        t: f32,
+    },
     /// Census of the map's rigid bodies and shapes; optionally export them
     Collision {
         forge: PathBuf,
@@ -287,6 +300,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Cloth { forge, name, schemas, character: None } => cloth(forge, &name, schemas)?,
         Cmd::Navmesh { forge, schemas, obj } => navmesh(forge, schemas, obj)?,
         Cmd::Guidance { forge, schemas, obj } => guidance(forge, schemas, obj)?,
+        Cmd::Posebounds { forge, builder, clip, schemas, exe, t } => posebounds(forge, &builder, &clip, schemas, exe, t)?,
         Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
         Cmd::Pick { forge, schemas, eye, target, width, height, px } => pick(forge, schemas, &eye, &target, width, height, &px)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
@@ -884,6 +898,31 @@ fn guidance(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::R
             writeln!(w, "l {} {}", 2 * i + 1, 2 * i + 2)?;
         }
         println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+fn posebounds(forge: PathBuf, builder: &str, clip: &str, schemas: PathBuf, exe: PathBuf, t: f32) -> anyhow::Result<()> {
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    let c = acb_anim::character::Character::load_built(&archive, find_uid(&archive, "EntityBuilder", builder)?)
+        .ok_or_else(|| anyhow::anyhow!("not a character"))?;
+    let builtins = acb_anim::BuiltinTracks::from_executable(&std::fs::read(&exe)?);
+    let clip = acb_anim::pose::Clip::load_with(&archive, find_uid(&archive, "Animation", clip)?, builtins.as_ref())
+        .ok_or_else(|| anyhow::anyhow!("clip"))?;
+    let g = c.skeleton.globals(&clip.sample(&c.skeleton, t));
+    let p: Vec<glam::Vec3> = g.iter().map(|m| m.w_axis.truncate()).collect();
+    let top = p.iter().enumerate().max_by(|a, b| a.1.z.total_cmp(&b.1.z)).unwrap();
+    let front = p.iter().enumerate().max_by(|a, b| a.1.y.total_cmp(&b.1.y)).unwrap();
+    let low = p.iter().enumerate().min_by(|a, b| a.1.z.total_cmp(&b.1.z)).unwrap();
+    let id = |i: usize| c.skeleton.bones[i].id;
+    println!("highest bone {:#010x} at {:.2?}", id(top.0), top.1.to_array());
+    println!("lowest bone {:#010x} at {:.2?}", id(low.0), low.1.to_array());
+    println!("most forward bone {:#010x} at {:.2?}", id(front.0), front.1.to_array());
+    let mut zs: Vec<(f32, usize)> = p.iter().enumerate().map(|(i, v)| (v.z, i)).collect();
+    zs.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (z, i) in zs.iter().take(6) {
+        println!("  {:#010x} z {z:.2} at {:.2?}", id(*i), p[*i].to_array());
     }
     Ok(())
 }

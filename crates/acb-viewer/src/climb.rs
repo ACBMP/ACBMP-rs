@@ -1,0 +1,210 @@
+//! Wall climbing on freerun guidance edges.
+//!
+//! On the wall the character hangs from a hold on an edge with the
+//! `xx_climb_wait_1m` pose: hands about 0.5 m ahead of and 1.6 m above the
+//! entity, facing the wall. Moves between holds play the game's triples
+//! (`xx_h_climb_1m_tr_climb_{u,d,l,r}_{l,r}hand_N`, `xx_h_climb_..._N`,
+//! `..._tr_climb_1m`; N = 2 moves 1.2 m up / 1.5 m sideways, 3 moves
+//! 1.8 m) with the entity carried from hold to hold in proportion to the
+//! clip's own root progress, so any spacing works. Mounting from the
+//! ground is `xx_h_wait_hipm_footl_tr_climbing_1m`.
+
+use acb_anim::pose::{Clip, Skeleton};
+use acb_anim::BuiltinTracks;
+use acb_world::Archive;
+use glam::{Vec2, Vec3};
+
+/// Hands relative to the entity in the wall pose (forward, up).
+pub const HAND_FORWARD: f32 = 0.5;
+pub const HAND_UP: f32 = 1.6;
+
+/// A guidance edge as a climbing surface.
+#[derive(Clone, Copy, Debug)]
+pub struct Hold {
+    pub a: Vec3,
+    pub b: Vec3,
+    /// Outward horizontal normal of the wall below the edge.
+    pub wall: Vec2,
+    /// The edge has walkable ground on top.
+    pub top: bool,
+}
+
+pub struct ClimbClips {
+    pub mount: Clip,
+    pub wait: Clip,
+    /// [up, down, left, right] x [class 2, class 3] x (into, move, out)
+    pub moves: [[(Clip, Clip, Clip); 2]; 4],
+}
+
+impl ClimbClips {
+    pub fn load(archive: &Archive, builtins: Option<&BuiltinTracks>) -> anyhow::Result<ClimbClips> {
+        let uids = archive.uids_of("Animation");
+        let load = |name: &str| {
+            uids.iter()
+                .copied()
+                .find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(name)))
+                .and_then(|u| Clip::load_with(archive, u, builtins))
+                .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))
+        };
+        let triple = |dir: &str, hand: &str, n: u32| -> anyhow::Result<(Clip, Clip, Clip)> {
+            Ok((
+                load(&format!("xx_h_climb_1m_tr_climb_{dir}_{hand}_{n}"))?,
+                load(&format!("xx_h_climb_{dir}_{hand}_{n}"))?,
+                load(&format!("xx_h_climb_{dir}_{hand}_{n}_tr_climb_1m"))?,
+            ))
+        };
+        let pair = |dir: &str, hand: &str| -> anyhow::Result<[(Clip, Clip, Clip); 2]> { Ok([triple(dir, hand, 2)?, triple(dir, hand, 3)?]) };
+        Ok(ClimbClips {
+            mount: load("xx_h_wait_hipm_footl_tr_climbing_1m")?,
+            wait: load("xx_climb_wait_1m")?,
+            moves: [pair("u", "lhand")?, pair("d", "lhand")?, pair("l", "lhand")?, pair("r", "rhand")?],
+        })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+enum Phase {
+    /// Getting onto the wall: clip time.
+    Mount(f32),
+    Wait(f32),
+    /// Move direction, size class, stage 0..3, stage time, entity at start
+    /// and end.
+    Move { dir: usize, class: usize, stage: usize, t: f32, from: Vec3, to: Vec3, hold: Hold },
+}
+
+pub struct Climb {
+    pub hold: Hold,
+    /// Entity position and facing (yaw, entity +Y = (-sin, cos)).
+    pub pos: Vec3,
+    pub yaw: f32,
+    phase: Phase,
+    from: Vec3,
+}
+
+/// Facing into a wall with outward normal `n`.
+fn yaw_into(n: Vec2) -> f32 {
+    n.x.atan2(-n.y)
+}
+
+/// Entity position that puts the hands on `hold_point` of a wall facing `n`.
+pub fn entity_for(hold_point: Vec3, n: Vec2) -> Vec3 {
+    hold_point + (n * HAND_FORWARD).extend(0.0) - Vec3::Z * HAND_UP
+}
+
+impl Hold {
+    /// The point of the edge nearest `p` horizontally.
+    pub fn nearest(&self, p: Vec3) -> Vec3 {
+        let ab = self.b - self.a;
+        let t = if ab.truncate().length_squared() > 1e-6 {
+            ((p - self.a).truncate().dot(ab.truncate()) / ab.truncate().length_squared()).clamp(0.05, 0.95)
+        } else {
+            0.5
+        };
+        self.a + ab * t
+    }
+}
+
+/// Where the clip's root has got to between its start and end, 0..1.
+fn progress(c: &Clip, t: f32) -> f32 {
+    let end = c.root_motion(c.length).w_axis.truncate();
+    let now = c.root_motion(t.min(c.length)).w_axis.truncate();
+    if end.length() < 1e-3 {
+        (t / c.length.max(1e-3)).min(1.0)
+    } else {
+        (now.dot(end) / end.length_squared()).clamp(0.0, 1.0)
+    }
+}
+
+pub enum Outcome {
+    Climbing,
+    /// Reached the top: hop onto the ground at this point.
+    TopOut(Vec3),
+    /// Let go.
+    Drop,
+}
+
+impl Climb {
+    /// Starts climbing at `hold` from a character standing at `pos`.
+    pub fn mount(hold: Hold, pos: Vec3) -> Climb {
+        let yaw = yaw_into(hold.wall);
+        Climb { hold, pos, yaw, phase: Phase::Mount(0.0), from: pos }
+    }
+
+    /// Advances; `want` is the stick direction (up/down/left/right on the
+    /// wall) and `find` looks for the next hold from a point in a
+    /// direction. Returns the pose and what happened.
+    pub fn update(
+        &mut self,
+        clips: &ClimbClips,
+        sk: &Skeleton,
+        want: Option<Dir>,
+        find: &dyn Fn(Vec3, Vec2, Dir) -> Option<(Hold, Vec3)>,
+        dt: f32,
+    ) -> (Vec<(Vec3, glam::Quat)>, Outcome) {
+        let n = self.hold.wall;
+        let hand = self.pos - (n * HAND_FORWARD).extend(0.0) + Vec3::Z * HAND_UP;
+        match &mut self.phase {
+            Phase::Mount(t) => {
+                *t += dt;
+                let c = &clips.mount;
+                let target = entity_for(self.hold.nearest(self.from), n);
+                self.pos = self.from.lerp(target, progress(c, *t));
+                let pose = c.sample(sk, t.min(c.length));
+                if *t >= c.length {
+                    self.pos = target;
+                    self.phase = Phase::Wait(0.0);
+                }
+                (pose, Outcome::Climbing)
+            }
+            Phase::Wait(t) => {
+                *t += dt;
+                let pose = clips.wait.sample(sk, *t % clips.wait.length.max(1e-3));
+                let Some(dir) = want else { return (pose, Outcome::Climbing) };
+                match find(hand, n, dir) {
+                    Some((hold, point)) => {
+                        let to = entity_for(point, hold.wall);
+                        let dist = (to - self.pos).length();
+                        let class = usize::from(dist > 1.5);
+                        let d = [Dir::Up, Dir::Down, Dir::Left, Dir::Right].iter().position(|x| *x == dir).unwrap();
+                        self.phase = Phase::Move { dir: d, class, stage: 0, t: 0.0, from: self.pos, to, hold };
+                        (pose, Outcome::Climbing)
+                    }
+                    None if dir == Dir::Up && self.hold.top => {
+                        // over the top onto the ground behind the edge
+                        let ground = self.hold.nearest(hand) - (n * 0.6).extend(0.0);
+                        (pose, Outcome::TopOut(ground))
+                    }
+                    None if dir == Dir::Down => (pose, Outcome::Drop),
+                    None => (pose, Outcome::Climbing),
+                }
+            }
+            Phase::Move { dir, class, stage, t, from, to, hold } => {
+                *t += dt;
+                let triple = &clips.moves[*dir][*class];
+                let c = [&triple.0, &triple.1, &triple.2][*stage];
+                if *stage == 1 {
+                    self.pos = from.lerp(*to, progress(c, *t));
+                }
+                let pose = c.sample(sk, t.min(c.length));
+                if *t >= c.length {
+                    *t = 0.0;
+                    *stage += 1;
+                    if *stage == 3 {
+                        self.pos = *to;
+                        self.hold = *hold;
+                        self.yaw = yaw_into(hold.wall);
+                        self.phase = Phase::Wait(0.0);
+                    }
+                }
+                (pose, Outcome::Climbing)
+            }
+        }
+    }
+}

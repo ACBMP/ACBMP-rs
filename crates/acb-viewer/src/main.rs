@@ -6,6 +6,7 @@
 //! `--play` hands the first one to the keyboard: WASD walk relative to the
 //! camera, Shift runs, Space sprints, right mouse orbits, the wheel zooms.
 
+mod climb;
 mod crowd;
 mod ground;
 mod kill;
@@ -24,6 +25,7 @@ use acb_anim::BuiltinTracks;
 use acb_render::{wgpu, Camera, Renderer, Scene, DEPTH_FORMAT};
 use clap::Parser;
 use glam::{Mat4, Quat, Vec2, Vec3};
+use climb::{Climb, ClimbClips, Dir, Outcome};
 use crowd::{Agent, Nav};
 use ground::Ground;
 use kill::KillClips;
@@ -129,6 +131,7 @@ struct Player {
     /// Height the current fall started at.
     fall_from: f32,
     kill: Option<PlayerKill>,
+    climb: Option<Climb>,
     cam_yaw: f32,
     cam_pitch: f32,
     cam_dist: f32,
@@ -258,6 +261,7 @@ struct Gfx {
     ground: Option<Ground>,
     crowd: Option<Crowd>,
     kills: Option<KillClips>,
+    climbs: Option<ClimbClips>,
 }
 
 struct App {
@@ -273,8 +277,9 @@ struct App {
     start: Instant,
     /// `--input` events not yet applied.
     script: Vec<(f32, HashSet<KeyCode>)>,
-    /// Kill clips between loading and `Gfx`.
+    /// Kill and climb clips between loading and `Gfx`.
     kills: Option<KillClips>,
+    climbs: Option<ClimbClips>,
     /// Simulated seconds since start (fixed 60 Hz steps in --capture runs).
     sim_time: f32,
 }
@@ -348,9 +353,15 @@ impl App {
             if let Some(z) = g.floor_below(p.pos + Vec3::Z * 1.0) {
                 p.pos.z = z;
             }
+            if std::env::var_os("ACBMP_TRACE").is_some() {
+                for (spot, face) in g.mount_spots(p.pos, 5) {
+                    eprintln!("mount spot {:.2} {:.2} {:.2} facing {:.2} {:.2}", spot.x, spot.y, spot.z, face.x, face.y);
+                }
+            }
         }
         let kills = self.kills.take();
-        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip, loco, ground, crowd, kills });
+        let climbs = self.climbs.take();
+        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip, loco, ground, crowd, kills, climbs });
         self.start = Instant::now();
         self.sim_time = 0.0;
         Ok(())
@@ -394,6 +405,7 @@ impl App {
             None
         };
         self.kills = if self.args.play { KillClips::load(archive, builtins.as_ref(), &self.args.characters[0]) } else { None };
+        self.climbs = if self.args.play { Some(ClimbClips::load(archive, builtins.as_ref())?) } else { None };
         if self.args.play && self.kills.is_none() {
             eprintln!("{}: no ground kill clips", self.args.characters[0]);
         }
@@ -488,6 +500,7 @@ impl App {
                     vel: Vec3::ZERO,
                     fall_from: at.z,
                     kill: None,
+                    climb: None,
                     cam_yaw: self.fly.yaw,
                     cam_pitch: -0.25,
                     cam_dist: 3.5,
@@ -632,6 +645,54 @@ impl App {
             }
             return;
         }
+        // on a wall: climb
+        if let (Some(cl), Some(cc), Some(ground)) = (&mut p.climb, &g.climbs, &g.ground) {
+            let want = if k(KeyCode::KeyW) {
+                Some(Dir::Up)
+            } else if k(KeyCode::KeyS) {
+                Some(Dir::Down)
+            } else if k(KeyCode::KeyA) {
+                Some(Dir::Left)
+            } else if k(KeyCode::KeyD) {
+                Some(Dir::Right)
+            } else {
+                None
+            };
+            let c = g.actors[0].character.clone();
+            let find = |hand: Vec3, n: Vec2, d: Dir| ground.next_hold(hand, n, d);
+            let (pose, outcome) = cl.update(cc, &c.skeleton, want, &find, dt);
+            p.pos = cl.pos;
+            p.yaw = cl.yaw;
+            let wall = cl.hold.wall;
+            match outcome {
+                Outcome::Climbing => {}
+                Outcome::TopOut(spot) => {
+                    p.climb = None;
+                    p.loco.resume(pose.clone());
+                    if let Some(z) = ground.floor_below(spot + Vec3::Z * 1.0) {
+                        let target = spot.with_z(z);
+                        let d = target - p.pos;
+                        let t = 0.45;
+                        p.vel = (d.truncate() / t).extend((d.z + 0.05 + 0.5 * GRAVITY * t * t) / t);
+                        p.fall_from = target.z;
+                        p.loco.start_jump(clips, &c.skeleton, 0);
+                    }
+                }
+                Outcome::Drop => {
+                    p.climb = None;
+                    p.loco.resume(pose.clone());
+                    p.loco.start_fall();
+                    p.vel = (wall * 1.0).extend(0.0);
+                    p.fall_from = p.pos.z;
+                }
+            }
+            let world = p.entity();
+            let globals = c.skeleton.globals(&pose);
+            if let Some(actor) = g.actors.first_mut() {
+                pose_actor(&mut g.scene, &g.renderer, actor, &globals, world, dt);
+            }
+            return;
+        }
         let actor = &g.actors[0];
         let fwd = Vec2::new(p.cam_yaw.cos(), p.cam_yaw.sin());
         let right = Vec2::new(fwd.y, -fwd.x);
@@ -672,8 +733,17 @@ impl App {
                 // pressing into a wall: ease out of the cycle instead of
                 // running on the spot (the run lean would put the head through)
                 let len = delta.length();
-                if up.is_none() && len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3 {
+                let blocked = len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3;
+                if up.is_none() && blocked {
                     p.loco.blocked(dt);
+                }
+                // walked into a wall with a hold above: climb it
+                if blocked && dir != Vec2::ZERO && g.climbs.is_some() {
+                    if let Some(hold) = ground.mount_hold(p.pos, fwd) {
+                        p.climb = Some(Climb::mount(hold, p.pos));
+                        p.vel = Vec3::ZERO;
+                        return;
+                    }
                 }
                 // freerun: over a gap instead of dropping into it
                 let across = (ledge && running).then(|| jump_target(ground, p.pos, fwd)).flatten();
@@ -1005,6 +1075,7 @@ fn main() -> anyhow::Result<()> {
         start: Instant::now(),
         sim_time: 0.0,
         kills: None,
+        climbs: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
