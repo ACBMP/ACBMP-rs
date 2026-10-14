@@ -448,10 +448,19 @@ impl App {
         let t = self.sim_time;
         let wander = self.args.wander;
         let skip = usize::from(self.player.is_some());
+        // everyone's position, for the crowd's separation (2 m buckets)
+        let mut near: std::collections::HashMap<(i32, i32), Vec<Vec3>> = Default::default();
+        let bucket = |p: Vec3| ((p.x / 2.0).floor() as i32, (p.y / 2.0).floor() as i32);
+        for p in g.actors.iter().map(|a| a.entity.w_axis.truncate()).chain(self.player.as_ref().map(|p| p.pos)) {
+            near.entry(bucket(p)).or_default().push(p);
+        }
         for a in g.actors.iter_mut().skip(skip) {
             let c = &a.character;
             if let (Some(agent), Some(crowd)) = (&mut a.agent, &g.crowd) {
-                let pose = agent.update(&crowd.nav, &crowd.idle, &crowd.walk, &c.skeleton, dt);
+                let (bx, by) = bucket(agent.pos);
+                let others: Vec<Vec3> =
+                    (-1..=1).flat_map(|x| (-1..=1).map(move |y| (bx + x, by + y))).filter_map(|k| near.get(&k)).flatten().copied().collect();
+                let pose = agent.update(&crowd.nav, &crowd.idle, &crowd.walk, &c.skeleton, &others, dt);
                 a.entity = agent.entity();
                 let globals = c.skeleton.globals(&pose);
                 let world = a.entity * a.model;

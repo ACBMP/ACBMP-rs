@@ -309,8 +309,9 @@ impl Agent {
         Mat4::from_rotation_translation(Quat::from_rotation_z(self.yaw), self.pos)
     }
 
-    /// One step: plans, walks the path, returns the pose.
-    pub fn update(&mut self, nav: &Nav, idle: &Clip, walk: &Clip, sk: &Skeleton, dt: f32) -> Vec<(Vec3, Quat)> {
+    /// One step: plans, walks the path, keeps clear of `others` (people
+    /// nearby), returns the pose.
+    pub fn update(&mut self, nav: &Nav, idle: &Clip, walk: &Clip, sk: &Skeleton, others: &[Vec3], dt: f32) -> Vec<(Vec3, Quat)> {
         if self.path.is_empty() {
             self.wait -= dt;
             if self.wait <= 0.0 {
@@ -346,7 +347,16 @@ impl Agent {
             }
         }
         let fwd = Vec2::new(-self.yaw.sin(), self.yaw.cos());
-        let step = fwd * pace * self.speed * dt;
+        // separation: shoulder room of 0.7 m, mostly sideways
+        let mut push = Vec2::ZERO;
+        for o in others {
+            let d = (self.pos - *o).truncate();
+            let len = d.length();
+            if len > 1e-3 && len < 0.7 && (self.pos.z - o.z).abs() < 1.5 {
+                push += d / len * (0.7 - len);
+            }
+        }
+        let step = fwd * pace * self.speed * dt + (push * 3.0 * dt).clamp_length_max(1.5 * dt);
         let moved = self.pos + step.extend(0.0);
         // stay on the navmesh; follow its height
         match nav.locate(moved + Vec3::Z * 0.5) {

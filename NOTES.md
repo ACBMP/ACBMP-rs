@@ -139,8 +139,16 @@ as such; the rest is read from decompiled code and not yet exercised.
   overlapping border edges (T-junctions between meshes): San Donato 8321
   triangles, main component 7809. Other maps split into many components
   (rooftop islands, reached by climbing). `acbmp navmesh <map> [--obj]`.
-- Viewer `--crowd N`: NPCs on the main component, A* over triangles via
-  crossing points, idle/walk blend at the walk clip's root speed.
+- `CrowdFlow` components (59 on San Donato, 610 m of lanes):
+  `NavFlowPointsLocal[i].FlowPosition` (entity-local polyline),
+  `FlowWidth` (2-7 m), `BiDirectionalFlag` (else first -> last),
+  `Weight`, `Head/TailConnectingNavFlows` (entities of the lanes joining at
+  the first / last point), `Wander`, `Filter`, plus navmesh triangle and
+  waypoint refs. `Archive::crowd_flows`.
+- Viewer `--crowd N`: NPCs walk the lanes (lateral offset, weighted next
+  lane, one-way lanes entered at their head, 15% pause at lane ends) or,
+  without lanes, A* over navmesh triangles; idle/walk blend at the walk
+  clip's root speed; 0.7 m separation from each other and the player.
 
 ## Animation
 
