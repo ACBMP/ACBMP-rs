@@ -277,12 +277,18 @@ its exact byte length and by key continuity (`acbmp animstats`).
     place); from sprint `xx_h_sprintstop_foot{l,r}` (0.4 s, 1.33 m). The foot
     is the variant whose first frame is nearest the current pose.
   - standing with input > 60 degrees away:
-    `xx_h_wait_hipm_footl_to_h_waitturn_{left,right}_{090,180}_footl`
-    (0.2 s) + `xx_h_waitturn_..._footl_tr_h_wait_hipm_foot{l|r}` (0.4 s).
+    `xx_l_wait_hipm_footl_to_l_waitturn_{left,right}_{090,180}_footl`
+    (0.4 s) + `xx_l_waitturn_..._footl_tr_l_wait_hipm_foot{l|r}` (0.8 s); the
+    `h_` set is the same shape at half the length.
     The `_to_` clip's root track turns 90/180 degrees between 0.05 and
     0.1 s but its pose stays in the starting frame (Reference bone yaw
     70 -> 137 for left 90; the follow-up starts at 47 = 137 - 90), so the
     heading is applied when it ends. Stop clips' poses do follow their root.
+  - standing with input in front: `xx_l_wait_footl_tr_l_walk_footr`
+    (0.8 s, to 1.82 m/s) or `xx_l_wait_footl_tr_h_jog_footr` (0.73 s, to
+    3.23 m/s), steered by the controller, cancelled on release; the cycle
+    then continues at speed 1 / 1.6 from the phase whose pose is nearest
+    the clip's last frame (32-sample search; a fixed phase fits badly).
   - `xx_h_runturn180_*` have no root yaw at all: the engine turns the
     entity itself (not used yet).
   - Cross-fades of 0.15 s from the last displayed pose.
@@ -300,8 +306,7 @@ its exact byte length and by key continuity (`acbmp animstats`).
   `--at x,y,z` starts the player elsewhere; `ACBMP_TRACE=1` prints its
   state four times a simulated second. Roof at (-31.3, 42.0, 7.5) next to
   the San Donato spawn plaza drops 4.5 m.
-- Open: start transitions (`xx_h_wait_foot*_tr_*`), run turns, the real
-  HumanGround state machine.
+- Open: run turns, jumping, climbing, the real HumanGround state machine.
 - `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and
   never present, so they work with the window hidden and are repeatable.
   `--input "0=w,shift 1.5= 2=d"` scripts held keys over simulated time.

@@ -50,6 +50,8 @@ enum Id {
     TurnSettle(usize),
     /// walk, run: into the fall pose (held on its last frame)
     Fall(usize),
+    /// from the wait into walk, jog (ending on the right foot)
+    Start(usize),
     /// soft/hard/damage x (to wait, to jog)
     Land(usize),
 }
@@ -66,6 +68,7 @@ pub struct Clips {
     turn_settle: [Clip; 4],
     fall: [Clip; 2],
     land: [Clip; 6],
+    start: [Clip; 2],
 }
 
 impl Clips {
@@ -80,11 +83,11 @@ impl Clips {
         };
         let pair = |f: &dyn Fn(&str) -> String| -> anyhow::Result<[Clip; 2]> { Ok([load(&f("l"))?, load(&f("r"))?]) };
         let turns = [("left", "090"), ("right", "090"), ("left", "180"), ("right", "180")];
-        let turn = |i: usize| load(&format!("xx_h_wait_hipm_footl_to_h_waitturn_{}_{}_footl", turns[i].0, turns[i].1));
+        let turn = |i: usize| load(&format!("xx_l_wait_hipm_footl_to_l_waitturn_{}_{}_footl", turns[i].0, turns[i].1));
         // left turns end on the left foot, right turns on the right
         let settle = |i: usize| {
             let end = if turns[i].0 == "left" { "l" } else { "r" };
-            load(&format!("xx_h_waitturn_{}_{}_footl_tr_h_wait_hipm_foot{end}", turns[i].0, turns[i].1))
+            load(&format!("xx_l_waitturn_{}_{}_footl_tr_l_wait_hipm_foot{end}", turns[i].0, turns[i].1))
         };
         Ok(Clips {
             idle: load("xx_l_wait_hipm_footl")?,
@@ -99,6 +102,7 @@ impl Clips {
             sprint_stop: pair(&|f| format!("xx_h_sprintstop_foot{f}"))?,
             turn: [turn(0)?, turn(1)?, turn(2)?, turn(3)?],
             turn_settle: [settle(0)?, settle(1)?, settle(2)?, settle(3)?],
+            start: [load("xx_l_wait_footl_tr_l_walk_footr")?, load("xx_l_wait_footl_tr_h_jog_footr")?],
             fall: [load("xx_l_walklowfall_footl_tr_fall")?, load("xx_h_runlowfall_footl_tr_fall")?],
             land: [
                 load("xx_h_landing_forward_soft_footl_tr_h_wait_footl_a")?,
@@ -127,17 +131,38 @@ impl Clips {
             Id::Turn(i) => &self.turn[i],
             Id::TurnSettle(i) => &self.turn_settle[i],
             Id::Fall(i) => &self.fall[i],
+            Id::Start(i) => &self.start[i],
             Id::Land(i) => &self.land[i],
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Cancel {
+    /// Stops give way to new input at once.
+    OnInput,
+    /// Starts give way to releasing the input.
+    OnRelease,
+    /// Turns and landings play out.
+    Never,
 }
 
 /// A one-shot sequence of clips played back to back.
 struct Action {
     queue: Vec<Id>,
     t: f32,
-    /// Stops give way to new input at once; turns finish first.
-    interruptible: bool,
+    cancel: Cancel,
+    /// The controller keeps turning the facing toward the input.
+    steer: bool,
+    /// Cycle speed to continue with when it ends (at the best-matching
+    /// phase); the second value is unused.
+    end: (f32, f32),
+}
+
+impl Action {
+    fn new(queue: Vec<Id>, cancel: Cancel) -> Self {
+        Action { queue, t: 0.0, cancel, steer: false, end: (0.0, 0.0) }
+    }
 }
 
 pub struct Locomotion {
@@ -212,8 +237,9 @@ impl Locomotion {
             2
         };
         self.speed = if moving { 2.0 } else { 0.0 };
-        self.phase = 0.0;
-        self.start(Action { queue: vec![Id::Land(severity * 2 + usize::from(moving))], t: 0.0, interruptible: false });
+        let mut a = Action::new(vec![Id::Land(severity * 2 + usize::from(moving))], Cancel::Never);
+        a.end = (self.speed, 0.5);
+        self.start(a);
     }
 
     /// The character ran into something: drop toward idle.
@@ -234,12 +260,19 @@ impl Locomotion {
             let pose = self.faded(pose, dt);
             return Step { delta: Vec2::ZERO, pose };
         }
-        if self.action.as_ref().is_some_and(|a| a.interruptible) && want.is_some() {
+        let cancel = self.action.as_ref().map(|a| a.cancel);
+        if (cancel == Some(Cancel::OnInput) && want.is_some()) || (cancel == Some(Cancel::OnRelease) && want.is_none()) {
             self.action = None;
             self.fade = Some((self.last.clone(), FADE));
         }
         if self.action.is_none() {
-            self.maybe_start_action(clips, sk, want, *yaw);
+            self.maybe_start_action(clips, sk, want, gait, *yaw);
+        }
+        if let (Some(a), Some(w)) = (&self.action, want) {
+            if a.steer {
+                let turn = 7.0 * dt;
+                *yaw = wrap_angle(*yaw + wrap_angle(w - *yaw).clamp(-turn, turn));
+            }
         }
         let (delta, pose) = match self.action.is_some() {
             true => self.play_action(clips, sk, yaw, dt),
@@ -267,7 +300,7 @@ impl Locomotion {
         pose
     }
 
-    fn maybe_start_action(&mut self, clips: &Clips, sk: &Skeleton, want: Option<f32>, yaw: f32) {
+    fn maybe_start_action(&mut self, clips: &Clips, sk: &Skeleton, want: Option<f32>, gait: Gait, yaw: f32) {
         match want {
             // released while running: brake on the foot the pose is on
             None if self.speed >= 1.5 => {
@@ -282,7 +315,7 @@ impl Locomotion {
                 let queue = if sprint { vec![first(f)] } else { vec![first(f), Id::RunStopSettle(f)] };
                 self.speed = 0.0;
                 self.idle_time = 0.0;
-                self.start(Action { queue, t: 0.0, interruptible: true });
+                self.start(Action::new(queue, Cancel::OnInput));
             }
             // standing and asked to face well away: turn on the spot
             Some(w) if self.speed < 0.1 => {
@@ -294,7 +327,14 @@ impl Locomotion {
                         (true, true) => 2,
                         (false, true) => 3,
                     };
-                    self.start(Action { queue: vec![Id::Turn(i), Id::TurnSettle(i)], t: 0.0, interruptible: false });
+                    self.start(Action::new(vec![Id::Turn(i), Id::TurnSettle(i)], Cancel::Never));
+                } else {
+                    // set off: into the walk, or a jog that blends into the run
+                    let jog = gait != Gait::Walk;
+                    let mut a = Action::new(vec![Id::Start(usize::from(jog))], Cancel::OnRelease);
+                    a.steer = true;
+                    a.end = (if jog { 1.6 } else { 1.0 }, 0.5);
+                    self.start(a);
                 }
             }
             _ => {}
@@ -332,9 +372,10 @@ impl Locomotion {
         let clip = clips.get(a.queue[0]);
         let pose = clip.sample(sk, a.t);
         if a.t >= clip.length {
+            self.speed = a.end.0;
+            self.phase = if self.speed > 0.0 { matching_phase(clips, sk, self.speed, &pose) } else { 0.0 };
             self.action = None;
             self.fade = Some((pose.clone(), FADE));
-            self.phase = 0.0;
         }
         (moved, pose)
     }
@@ -347,13 +388,7 @@ impl Locomotion {
             let turn = 7.0 * dt;
             *yaw = wrap_angle(*yaw + wrap_angle(w - *yaw).clamp(-turn, turn));
         }
-        // neighbouring cycles by weight: (idle|walk|run, walk|run|sprint)
         let s = self.speed;
-        let (lo, hi, w) = match s {
-            s if s <= 1.0 => (Id::Idle, Id::Walk, s),
-            s if s <= 2.0 => (Id::Walk, Id::Run, s - 1.0),
-            s => (Id::Run, Id::Sprint, s - 2.0),
-        };
         let cycles = [(Id::Walk, w_of(s, 1.0)), (Id::Run, w_of(s, 2.0)), (Id::Sprint, w_of(s, 3.0))];
         let moving: f32 = cycles.iter().map(|c| c.1).sum();
         let p0 = self.phase;
@@ -367,20 +402,44 @@ impl Locomotion {
             let c = clips.get(id);
             step += c.root_step(p0 * c.length, self.phase * c.length) * w;
         }
-        let sample = |id: Id| match id {
-            Id::Idle => clips.idle.sample(sk, self.idle_time),
-            id => {
-                let c = clips.get(id);
-                c.sample(sk, self.phase * c.length)
-            }
-        };
-        let mut pose = sample(lo);
-        if w > 0.0 {
-            blend(&mut pose, &sample(hi), w);
-        }
+        let pose = cycle_pose(clips, sk, s, self.phase, self.idle_time);
         ((Quat::from_rotation_z(*yaw) * step).truncate(), pose)
     }
 }
+
+/// The cycle blend at `speed` and normalized `phase`: neighbouring cycles
+/// by weight (idle|walk|run, walk|run|sprint).
+fn cycle_pose(clips: &Clips, sk: &Skeleton, speed: f32, phase: f32, idle_time: f32) -> Pose {
+    let (lo, hi, w) = match speed {
+        s if s <= 1.0 => (Id::Idle, Id::Walk, s),
+        s if s <= 2.0 => (Id::Walk, Id::Run, s - 1.0),
+        s => (Id::Run, Id::Sprint, s - 2.0),
+    };
+    let sample = |id: Id| match id {
+        Id::Idle => clips.idle.sample(sk, idle_time),
+        id => {
+            let c = clips.get(id);
+            c.sample(sk, phase * c.length)
+        }
+    };
+    let mut pose = sample(lo);
+    if w > 0.0 {
+        blend(&mut pose, &sample(hi), w);
+    }
+    pose
+}
+
+/// Cycle phase whose pose at `speed` is nearest `pose` (32 samples).
+fn matching_phase(clips: &Clips, sk: &Skeleton, speed: f32, pose: &[(Vec3, Quat)]) -> f32 {
+    (0..32)
+        .map(|i| i as f32 / 32.0)
+        .min_by(|&a, &b| {
+            let d = |ph| pose_distance(pose, &cycle_pose(clips, sk, speed, ph, 0.0));
+            d(a).total_cmp(&d(b))
+        })
+        .unwrap_or(0.0)
+}
+
 
 /// Tent weight of the cycle centred on speed `at`.
 fn w_of(s: f32, at: f32) -> f32 {
