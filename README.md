@@ -21,13 +21,20 @@ hand-written serializers and stay opaque for now.
 
 The `.schema` files come from anvilforge-py and are not vendored here.
 - `acb-world`: uid index over a forge, entity instances (Visual -> LOD0 mesh),
-  static meshes (vertex formats 3/4), textures (BGRA8/BC1-3 mip chains)
+  static meshes (vertex formats 3/4), textures (BGRA8/BC1-3 mip chains),
+  material parameters (CRC32 property ids, TextureSelector resolution) and
+  compiled template permutations
 
 `acbmp gltf <forge> <out.glb>` exports a map's static geometry. San Donato:
 1,971 instances of 280 meshes, 317k triangles, in 0.6 s; layout checked by
 rendering the GLB in Blender.
 - `acb-render`: wgpu renderer (instanced static meshes, native BC textures,
-  opaque / alpha-test / blended passes, placeholder sun + fog shading)
+  opaque / alpha-test / blended passes). Materials are drawn with the game's
+  own translated vertex + lighting pixel shaders, fed the material's
+  parameters and textures from its template; anything that doesn't
+  translate falls back to a placeholder sun + fog shader (`--placeholder`
+  forces it). San Donato: all 202 material/format pairs on 29 programs.
+  `ACBMP_DEBUG_MATERIALS=1` prints each material's resolved parameters.
 
 `acbmp shot <map.forge> out.png --eye x,y,z --target x,y,z` renders a frame
 offscreen (the map is mounted over the core `DataPC.forge` next to it).

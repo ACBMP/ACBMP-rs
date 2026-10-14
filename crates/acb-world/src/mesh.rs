@@ -27,6 +27,11 @@ pub struct StaticMesh {
     pub colors: Option<Vec<[u8; 4]>>,
     pub indices: Vec<u32>,
     pub submeshes: Vec<Submesh>,
+    /// `MeshData.VertexFormat`; also the vertex shader key's high word.
+    pub format: u32,
+    pub stride: usize,
+    /// Undecoded vertex buffer, for the retail shaders.
+    pub raw: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +74,9 @@ impl Archive<'_> {
         let unorm = |b: u8| (b as f32 - 127.5) / 127.5;
         let mut m = StaticMesh {
             colors: has_color.then(|| Vec::with_capacity(n)),
+            format,
+            stride,
+            raw: vb[..n * stride].to_vec(),
             ..Default::default()
         };
         for v in vb.chunks_exact(stride) {

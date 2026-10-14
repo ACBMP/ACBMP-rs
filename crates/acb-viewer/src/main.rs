@@ -111,7 +111,7 @@ impl App {
         let t0 = Instant::now();
         let schema = Box::leak(Box::new(acb_world::load_schema(&self.args.schemas)?));
         let archive = acb_world::open_map(&self.args.map, schema)?;
-        let (scene, s) = Scene::load(&renderer, &archive)?;
+        let (scene, s) = Scene::load(&renderer, &archive, acb_render::ShadingMode::Retail)?;
         eprintln!(
             "{} meshes, {} instances, {} triangles, {} textures, loaded in {:.1}s",
             s.meshes, s.instances, s.triangles, s.textures, t0.elapsed().as_secs_f64()

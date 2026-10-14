@@ -4,6 +4,8 @@
 //! - group 0, binding 0 (vertex) / 1 (pixel): [`Consts`] uniform struct with
 //!   the stage's `c#` (256 / 224 vec4), `i#` and `b#` registers. The host
 //!   uploads `def` values too, so relative addressing sees them.
+//! - group 0, binding 2 (vertex) / 3 (pixel): optional per-material `c#`
+//!   registers ([`Options::material_consts`]), same struct layout.
 //! - group 1: sampler register `s#` is texture binding `2*s` and sampler
 //!   binding `2*s + 1` (vertex samplers start at binding 64).
 //! - vertex inputs and inter-stage varyings use the fixed locations of
@@ -77,6 +79,32 @@ pub struct Options {
     /// outside this set read as zero, since WGSL requires every fragment
     /// input to be produced by the vertex stage.
     pub available_varyings: Option<BTreeSet<(UsageKey, u32)>>,
+    /// Vertex shader only: attribute type per input location. D3D9's
+    /// non-normalized integer formats (SHORT4, UBYTE4) read as floats, while
+    /// WebGPU delivers them as integer vectors; such inputs are declared
+    /// with their integer type and converted. Default float.
+    pub input_kinds: BTreeMap<u32, InputKind>,
+    /// `c#` registers read from the material uniform (binding 2 / 3)
+    /// instead of the stage's constants.
+    pub material_consts: BTreeSet<u32>,
+    /// Vertex shader only: `c#` registers fed per instance from a vertex
+    /// attribute at the given location (e.g. world matrix rows).
+    pub instance_consts: BTreeMap<u32, u32>,
+    /// Pixel shader only: drop `oC#` writes at or above this index.
+    pub color_outputs: Option<u32>,
+    /// Pixel shader only: fixed-function alpha test, discarding when
+    /// `oC0.w` is below `.x` of this material register.
+    pub alpha_test: Option<u32>,
+    /// Pixel shader only: the target encodes sRGB, so convert the shader's
+    /// gamma-space `oC0` to linear (D3D9 blends and writes gamma values).
+    pub srgb_target: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputKind {
+    Float,
+    Sint,
+    Uint,
 }
 
 /// Orderable stand-in for [`Usage`] in sets.
@@ -107,6 +135,7 @@ const XYZW: [char; 4] = ['x', 'y', 'z', 'w'];
 
 struct Gen<'p> {
     p: &'p Program,
+    opts: &'p Options,
     stage: Stage,
     out: String,
     indent: usize,
@@ -181,6 +210,12 @@ impl Gen<'_> {
                 Some(r) => format!("{}.c[{}]", self.consts(), self.rel_index(r, num)?),
                 None => match self.defs.get(&num) {
                     Some(v) => vec4f(*v),
+                    None if self.stage == Stage::Vertex && self.opts.instance_consts.contains_key(&num) => {
+                        format!("vin.inst{}", self.opts.instance_consts[&num])
+                    }
+                    None if self.opts.material_consts.contains(&num) => {
+                        format!("{}m.c[{num}]", self.consts())
+                    }
                     None => format!("{}.c[{num}]", self.consts()),
                 },
             },
@@ -591,6 +626,7 @@ pub fn translate(p: &Program, opts: &Options) -> Result<Translated, Error> {
     let stage = p.stage();
     let mut g = Gen {
         p,
+        opts,
         stage,
         out: String::new(),
         indent: 1,
@@ -615,6 +651,9 @@ pub fn translate(p: &Program, opts: &Options) -> Result<Translated, Error> {
     w.push_str(&format!("{}>,\n    i: array<vec4<i32>, 16>,\n    b: array<vec4<u32>, 16>,\n}};\n", g.max_consts()));
     let (binding, cname) = if stage == Stage::Vertex { (0, "vsc") } else { (1, "psc") };
     writeln!(w, "@group(0) @binding({binding}) var<uniform> {cname}: Consts;").unwrap();
+    if !opts.material_consts.is_empty() || (stage == Stage::Pixel && opts.alpha_test.is_some()) {
+        writeln!(w, "@group(0) @binding({}) var<uniform> {cname}m: Consts;", binding + 2).unwrap();
+    }
 
     let mut samplers = Vec::new();
     for d in &p.decls {
@@ -655,14 +694,29 @@ pub fn translate(p: &Program, opts: &Options) -> Result<Translated, Error> {
                 let mask: String = XYZW.iter().zip(dst.mask).filter(|(_, m)| *m).map(|(c, _)| *c).collect();
                 if available {
                     let field = format!("in{loc}");
+                    let kind = if stage == Stage::Vertex {
+                        opts.input_kinds.get(&loc).copied().unwrap_or(InputKind::Float)
+                    } else {
+                        InputKind::Float
+                    };
+                    let ty = match kind {
+                        InputKind::Float => "f32",
+                        InputKind::Sint => "i32",
+                        InputKind::Uint => "u32",
+                    };
                     if !in_fields.iter().any(|f: &String| f.contains(&format!(" {field}:"))) {
-                        in_fields.push(format!("    @location({loc}) {field}: vec4<f32>,"));
+                        in_fields.push(format!("    @location({loc}) {field}: vec4<{ty}>,"));
                     }
+                    let value = if kind == InputKind::Float {
+                        format!("vin.{field}")
+                    } else {
+                        format!("vec4<f32>(vin.{field})")
+                    };
                     if mask.len() == 4 {
-                        in_copies.push(format!("    v{} = vin.{field};", dst.num));
+                        in_copies.push(format!("    v{} = {value};", dst.num));
                     } else {
                         for c in mask.chars() {
-                            in_copies.push(format!("    v{}.{c} = vin.{field}.{c};", dst.num));
+                            in_copies.push(format!("    v{}.{c} = {value}.{c};", dst.num));
                         }
                     }
                     inputs.push(IoSlot { usage: *usage, index: *index, location: loc });
@@ -676,6 +730,12 @@ pub fn translate(p: &Program, opts: &Options) -> Result<Translated, Error> {
                 }
             }
             _ => {}
+        }
+    }
+    if stage == Stage::Vertex {
+        let locs: BTreeSet<u32> = opts.instance_consts.values().copied().collect();
+        for loc in locs {
+            in_fields.push(format!("    @location({loc}) inst{loc}: vec4<f32>,"));
         }
     }
     let input_regs: BTreeSet<u32> = p
@@ -733,6 +793,7 @@ pub fn translate(p: &Program, opts: &Options) -> Result<Translated, Error> {
     } else {
         for (reg, num) in &g.outputs_written {
             match reg {
+                RegType::ColorOut if opts.color_outputs.is_some_and(|n| *num >= n) => {}
                 RegType::ColorOut => {
                     out_fields.push(format!("    @location({num}) c{num}: vec4<f32>,"));
                     out_copies.push(format!("    pout.c{num} = oc{num};"));
@@ -813,6 +874,14 @@ pub fn translate(p: &Program, opts: &Options) -> Result<Translated, Error> {
         writeln!(w, "    var {name}: vec4<f32> = {init};").unwrap();
     }
     w.push_str(&body);
+    if stage == Stage::Pixel && g.outputs_written.contains(&(RegType::ColorOut, 0)) {
+        if let Some(r) = opts.alpha_test {
+            writeln!(w, "    if oc0.w < pscm.c[{r}].x {{\n        discard;\n    }}").unwrap();
+        }
+        if opts.srgb_target {
+            writeln!(w, "    oc0 = vec4<f32>(pow(clamp(oc0.xyz, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(2.2)), oc0.w);").unwrap();
+        }
+    }
     let ret = if stage == Stage::Vertex { "vout" } else { "pout" };
     writeln!(w, "    var {ret}: {out_struct};").unwrap();
     for c in &out_copies {

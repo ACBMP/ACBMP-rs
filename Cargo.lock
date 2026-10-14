@@ -35,6 +35,7 @@ dependencies = [
  "acb-world",
  "anyhow",
  "bytemuck",
+ "d3d9-shader",
  "glam",
  "pollster",
  "wgpu",

@@ -51,6 +51,9 @@ enum Cmd {
         width: u32,
         #[arg(long, default_value_t = 900)]
         height: u32,
+        /// Draw with the placeholder shading instead of the retail shaders
+        #[arg(long)]
+        placeholder: bool,
     },
     /// List placed meshes, tallest first
     Meshes {
@@ -66,6 +69,9 @@ enum Cmd {
         name: String,
         #[arg(long, env = "ACBMP_SCHEMAS")]
         schemas: PathBuf,
+        /// Expand nested objects and arrays this many levels
+        #[arg(long, default_value_t = 0)]
+        depth: usize,
     },
     /// Summarize a MaterialTemplate's compiled shader permutations
     Shaders {
@@ -76,6 +82,12 @@ enum Cmd {
         schemas: PathBuf,
         #[arg(long, default_value_t = 6)]
         top: usize,
+        /// Print every field of each listed permutation
+        #[arg(long)]
+        fields: bool,
+        /// Disassemble permutations whose ShaderKey equals this value
+        #[arg(long, value_parser = parse_u32)]
+        disasm: Option<u32>,
     },
     /// Translate every shader permutation in a forge to WGSL and validate it
     Shaderlab {
@@ -127,11 +139,13 @@ fn main() -> anyhow::Result<()> {
         Cmd::Animplay { forge, name, out, schemas, frames } => animplay(forge, &name, out, schemas, frames)?,
         Cmd::Animstats { forge, schemas } => animstats(forge, schemas)?,
         Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
-        Cmd::Shaders { forge, name, schemas, top } => shaders(forge, &name, schemas, top)?,
-        Cmd::Dump { forge, name, schemas } => dump(forge, &name, schemas)?,
+        Cmd::Shaders { forge, name, schemas, top, fields, disasm } => shaders(forge, &name, schemas, top, fields, disasm)?,
+        Cmd::Dump { forge, name, schemas, depth } => dump(forge, &name, schemas, depth)?,
         Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
-        Cmd::Shot { forge, out, schemas, eye, target, width, height } => {
-            shot(forge, out, schemas, &eye, &target, width, height)?
+        Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
+            let shading =
+                if placeholder { acb_render::ShadingMode::Placeholder } else { acb_render::ShadingMode::Retail };
+            shot(forge, out, schemas, &eye, &target, width, height, shading)?
         }
         Cmd::Gltf { forge, out, schemas } => {
             let t0 = Instant::now();
@@ -264,6 +278,7 @@ fn fastload(path: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn shot(
     forge: PathBuf,
     out: PathBuf,
@@ -272,18 +287,25 @@ fn shot(
     target: &[f32],
     width: u32,
     height: u32,
+    shading: acb_render::ShadingMode,
 ) -> anyhow::Result<()> {
     let t0 = Instant::now();
     let schema = load_schema(&schemas)?;
     let archive = open_map(&forge, &schema)?;
     let (device, queue) = pollster::block_on(acb_render::headless_device())?;
     let r = acb_render::Renderer::new(device, queue, acb_render::wgpu::TextureFormat::Rgba8UnormSrgb);
-    let (scene, s) = acb_render::Scene::load(&r, &archive)?;
+    let (scene, s) = acb_render::Scene::load(&r, &archive, shading)?;
     println!(
         "{} meshes ({} skipped), {} instances, {} triangles, {} materials (blend modes {:?}, {} disabled submeshes), {} textures ({} missing), {:.1}s",
         s.meshes, s.skipped_meshes, s.instances, s.triangles, s.materials, s.blend_modes, s.disabled_submeshes, s.textures, s.missing_textures,
         t0.elapsed().as_secs_f64()
     );
+    if let Some(rs) = &s.retail {
+        println!(
+            "retail: {} materials over {} programs; fallbacks {:?}; unhandled globals {:?}",
+            rs.materials, rs.programs, rs.fallbacks, rs.unknown_globals
+        );
+    }
     let camera = acb_render::Camera {
         eye: glam::Vec3::from_slice(eye),
         target: glam::Vec3::from_slice(target),
@@ -330,10 +352,9 @@ fn meshes(forge: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn dump(forge: PathBuf, needle: &str, schemas: PathBuf) -> anyhow::Result<()> {
-    use anvil_fastload::Value;
+fn dump(forge: PathBuf, needle: &str, schemas: PathBuf, depth: usize) -> anyhow::Result<()> {
     let schema = load_schema(&schemas)?;
-    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let archive = open_map(&forge, &schema)?;
     let mut uids: Vec<u32> = schema
         .types
         .keys()
@@ -341,29 +362,59 @@ fn dump(forge: PathBuf, needle: &str, schemas: PathBuf) -> anyhow::Result<()> {
         .filter(|u| archive.loc(*u).is_some_and(|l| l.name.contains(needle)))
         .collect();
     uids.sort();
+    uids.dedup();
     for uid in uids.into_iter().take(8) {
         let root = archive.root(uid)?;
         println!("== {uid:#010x} {} ({})", archive.loc(uid).unwrap().name, archive.type_name(uid).unwrap_or_default());
-        for (h, v) in &root.obj.fields {
-            let text = match v {
-                Value::Raw(b) if b.len() <= 4 => format!("{}", v.as_u32().unwrap_or(0)),
-                Value::Raw(b) => format!("{:?}", v.as_f32s().unwrap_or_default().iter().take(16).collect::<Vec<_>>()).chars().take(120).collect::<String>() + if b.len() > 64 { "..." } else { "" },
-                Value::Ref { id, .. } | Value::Handle { id, .. } => {
-                    format!("-> {id:#010x} {}", archive.loc(*id).map(|l| l.name.as_str()).unwrap_or("?"))
-                }
-                Value::Ptr { obj: Some(o), .. } | Value::Object(o) => format!("<{}>", schema.name_or_hash(o.type_hash)),
-                Value::Ptr { link, .. } => format!("ptr {link:?}"),
-                Value::Str(b) => format!("{:?}", String::from_utf8_lossy(b)),
-                Value::Packed { elem_size, data } => format!("[{} x {elem_size}B]", data.len() / elem_size.max(&1)),
-                Value::Array(items) => format!("[{} items]", items.len()),
-            };
-            println!("  {:28} {text}", schema.name_or_hash(*h));
-        }
+        dump_obj(&archive, &schema, &root.obj, 1, depth);
     }
     Ok(())
 }
 
-fn shaders(forge: PathBuf, needle: &str, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
+fn dump_obj(archive: &acb_world::Archive, schema: &anvil_schema::Schema, o: &anvil_fastload::Obj, indent: usize, depth: usize) {
+    for (h, v) in &o.fields {
+        dump_value(archive, schema, &schema.name_or_hash(*h), v, indent, depth);
+    }
+    for d in o.dyn_props.iter().flatten() {
+        let label = format!("dyn {:#010x} {}", d.name_hash, schema.name_or_hash(d.object_hash));
+        dump_value(archive, schema, &label, &d.value, indent, depth);
+    }
+}
+
+fn dump_value(archive: &acb_world::Archive, schema: &anvil_schema::Schema, label: &str, v: &anvil_fastload::Value, indent: usize, depth: usize) {
+    use anvil_fastload::Value;
+    let pad = "  ".repeat(indent);
+    let text = match v {
+        Value::Raw(b) if b.len() <= 4 => format!("{}", v.as_u32().unwrap_or(0)),
+        Value::Raw(b) => format!("{:?}", v.as_f32s().unwrap_or_default().iter().take(16).collect::<Vec<_>>()).chars().take(120).collect::<String>() + if b.len() > 64 { "..." } else { "" },
+        Value::Ref { id, .. } | Value::Handle { id, .. } => {
+            format!("-> {id:#010x} {}", archive.loc(*id).map(|l| l.name.as_str()).unwrap_or("?"))
+        }
+        Value::Ptr { obj: Some(o), .. } | Value::Object(o) => format!("<{}> #{:#x}", schema.name_or_hash(o.type_hash), o.id),
+        Value::Ptr { link, .. } => format!("ptr {link:?}"),
+        Value::Str(b) => format!("{:?}", String::from_utf8_lossy(b)),
+        Value::Packed { elem_size, data } => format!("[{} x {elem_size}B]", data.len() / elem_size.max(&1)),
+        Value::Array(items) => format!("[{} items]", items.len()),
+    };
+    println!("{pad}{label:28} {text}");
+    if depth == 0 {
+        return;
+    }
+    match v {
+        Value::Array(items) => {
+            for (i, it) in items.iter().enumerate() {
+                dump_value(archive, schema, &format!("[{i}]"), it, indent + 1, depth - 1);
+            }
+        }
+        _ => {
+            if let Some(o) = v.as_obj() {
+                dump_obj(archive, schema, o, indent + 1, depth - 1);
+            }
+        }
+    }
+}
+
+fn shaders(forge: PathBuf, needle: &str, schemas: PathBuf, top: usize, fields: bool, disasm: Option<u32>) -> anyhow::Result<()> {
     use anvil_fastload::Value;
     let schema = load_schema(&schemas)?;
     let archive = open_map(&forge, &schema)?;
@@ -379,8 +430,12 @@ fn shaders(forge: PathBuf, needle: &str, schemas: PathBuf, top: usize) -> anyhow
             for list in ["VertexShaderPermutations", "PixelShaderPermutations", "LightingPermutations"] {
                 let perms = archive.field(ct, list).map(|v| v.items()).unwrap_or_default();
                 println!("  {which}.{list}: {}", perms.len());
-                for p in perms.iter().filter_map(Value::as_obj).take(top) {
+                for (i, p) in perms.iter().filter_map(Value::as_obj).enumerate() {
                     let key = archive.field(p, "ShaderKey").and_then(Value::as_u32).unwrap_or(0);
+                    // --disasm lists every permutation with that key, others up to --top
+                    if disasm.map_or(i >= top, |d| d != key) {
+                        continue;
+                    }
                     let code = archive.field(p, "CompiledCode").and_then(Value::as_bytes).unwrap_or_default();
                     let ver = code.get(..4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
                     let params: Vec<String> = archive.field(p, "Parameters")
@@ -397,6 +452,23 @@ fn shaders(forge: PathBuf, needle: &str, schemas: PathBuf, top: usize) -> anyhow
                         })
                         .collect();
                     println!("    key {key:#010x} code {} B ver {ver:#010x} params {}", code.len(), params.join(" "));
+                    if fields {
+                        for (h, v) in &p.fields {
+                            let text = match v {
+                                Value::Raw(b) if b.len() <= 4 => format!("{:#x}", v.as_u32().unwrap_or(0)),
+                                Value::Raw(b) => format!("{} B", b.len()),
+                                Value::Array(items) => format!("[{} items]", items.len()),
+                                other => format!("{:.60}", format!("{other:?}")),
+                            };
+                            println!("      {:24} {text}", schema.name_or_hash(*h));
+                        }
+                    }
+                    if disasm == Some(key) {
+                        match d3d9_shader::parse(code) {
+                            Ok(prog) => println!("{prog}"),
+                            Err(e) => println!("      parse error: {e}"),
+                        }
+                    }
                 }
             }
         }
@@ -669,4 +741,12 @@ fn animplay(forge: PathBuf, needle: &str, out: PathBuf, schemas: PathBuf, frames
     enc.write_header()?.write_image_data(&img)?;
     println!("wrote {}", out.display());
     Ok(())
+}
+
+fn parse_u32(s: &str) -> Result<u32, String> {
+    match s.strip_prefix("0x") {
+        Some(h) => u32::from_str_radix(h, 16),
+        None => s.parse(),
+    }
+    .map_err(|e| e.to_string())
 }

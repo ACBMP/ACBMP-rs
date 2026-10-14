@@ -29,9 +29,65 @@ as such; the rest is read from decompiled code and not yet exercised.
   valid if MaterialTemplate byte 0x3c), flag 1 -> bit 2 for geometry types
   2/5/6, flag 2 -> bit 4 (MaterialTemplate byte 0x3f), flag 3 -> bit 8 for
   geometry type 1.
-- Next: callers of `StaticPrimitive::StaticPrimitive(..., GfxVertexShaderKey,
-  ...)` (0x009682b0) to see how a static mesh's key is built, and the
-  meaning of the `GfxVertexFormatDescOptions` slots.
+- Main lit forward pass of a static mesh: vertex permutation
+  `(VertexFormat << 16) | 1`, pixel = the `LightingPermutation` with
+  `ShaderKey 1, LightingKey 1` (ambient cube + one direct light + fog +
+  world lightmap). Lighting permutations have empty `Parameters`; their
+  material registers are those of the `PixelShaderPermutation` with the same
+  `ShaderKey` (CTAB names agree). Drawn by `acb-render/src/retail.rs`; on
+  San Donato all 202 material/format pairs translate (29 programs).
+
+### Material parameters
+
+- A Material's values are DynamicProperties keyed by
+  `PropertyID = CRC32(PropertyName)` (zlib crc32): `Layer0_Diffuse`
+  0x5D09D951, `Layer1_Diffuse` 0x4A72CD12, `Layer0_Normal` 0x30FB00F6,
+  `Layer1_Normal` 0xFC510068, `Layer0_Color` 0x19350632, `Layer1_Color`
+  0xBF420D86, `PixelBlenderScale` 0x37B93E61, `PixelBlenderBias` 0x06555971,
+  `Layer0_UVScale` 0xE1E639A5, `Layer1_UVScale` 0xF69D2DE6. Floats are raw
+  f32 bits, vectors f32x4, textures `TextureSelector` objects.
+- Missing values: template `EditableProperties` (PropertyName,
+  LinkedOperator) -> `MaterialDefinition.Operators` defaults
+  (`ConstantVectorValue.Value`, `ConstantFloatValue.Value`).
+- `TextureSelector` (`GetTextureMap` 0x009db730, `GetUsedTextureSet`
+  0x009db5b0): `TextureSpecificationMethod` 0 = material's TextureSet,
+  1 = explicit TextureSet, 2 = explicit Texture, 3 = global/gradient; sets
+  index `Maps[MapType]`. Method 0/1 selectors also carry the Texture ref.
+- Permutation `Parameters`: PropertyID, ConstantIndex, NbVectors, Type
+  (2 = sampler, 0/1 = float). Tex2 PS key 1: Layer0_Normal s0,
+  Layer1_Normal s1, Layer0_Diffuse s2, Layer1_Diffuse s3, Layer1_UVScale
+  c128, PixelBlenderScale c129, PixelBlenderBias c130, Layer0_Color c131,
+  Layer1_Color c132; VS: Layer0_UVScale c100.
+
+### Static vertex shaders (formats 3/4)
+
+- Inputs: v0 SHORT4 (pos = xyz * |w| * 3.8148e-6, sign(w) = bitangent sign),
+  TexCoord0 SHORT2N * 16 (= short / 2048), Normal/Tangent raw UBYTE4
+  ((b - 127) * 0.007874), format 3 adds a D3DCOLOR at +16 (uv at +20).
+- Engine constants: c0-3 WVP rows, c8-11 World rows, c12 eye, c18 clip plane
+  (PS kills on its distance; (0,0,0,-1) keeps all), c84-86
+  WorldToLightProj, c116 + b15 deconstruction.
+- `TexCoord1 = (normal.w, tangent.w, 0, 255) / 255`; `.x` is the per-vertex
+  layer blend weight of two-layer templates:
+  `w = sat((1+s)(v - 0.5) + s((1 - a0 + a1)/2 + bias - 0.5) + 0.5)`, s =
+  PixelBlenderScale, a0/a1 = diffuse alphas (height masks).
+
+### Lighting pixel shader (key 1 / LightingKey 1)
+
+- albedo = Layer0Diffuse * Layer0_Color (lerp Layer1) * 2 * Color1 * Color0.x;
+  alpha = diffuse.a * Layer0_Color.w * Color1.w (decals fade by vertex alpha).
+- Ambient cube c24-29 (w = intensity), direct light c40 (towards light) /
+  c41 (colour), lightmap s12 + c87-89 (neutral: c88.y = 0, c89.y = 1),
+  fog `f = sat((dist - c17.x) * c17.y) * c17.z`, `lerp(colour, c16, f)`.
+- Writes oC1 (depth, MRT) too; dropped. Normal maps sample `.xyw`
+  (DXT5nm-style), so textures are uploaded non-sRGB and the shader's gamma
+  output is converted to linear before the sRGB target.
+- Unhandled globals still left at 0 on San Donato: g_EyeDirection,
+  g_LODBlendFactor (dithered LOD cross-fade), g_TimeOfDay,
+  g_LayeredSkyUserColor, g_EntityVisualScaleFactor, g_WorldToLightProjVS,
+  g_NumLights/g_OmniLights/g_SpotLights, g_ShadowedDirect.
+- Next: `StaticPrimitive::StaticPrimitive(..., GfxVertexShaderKey, ...)`
+  (0x009682b0) for the other key bits; sky/time-of-day constants; shadows.
 
 ## Maps
 

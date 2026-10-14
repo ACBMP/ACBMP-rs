@@ -3,8 +3,13 @@
 //! [`Scene::load`] uploads every static mesh instance of an [`Archive`]:
 //! one vertex/index buffer per unique Mesh, one instance buffer of entity
 //! matrices per Mesh, one instanced draw per submesh. Materials bind the
-//! diffuse texture in its native BC format. Shading is a placeholder until
-//! the retail SM3 shaders are translated.
+//! diffuse texture in its native BC format.
+//!
+//! With [`ShadingMode::Retail`] materials whose template and vertex format
+//! translate are drawn by the game's own shaders ([`retail`]); everything
+//! else keeps the placeholder `basic.wgsl` shading.
+
+mod retail;
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -13,6 +18,7 @@ use acb_world::{Archive, PixelFormat, Texture};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
+pub use retail::{Environment, RetailStats};
 pub use wgpu;
 
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -52,7 +58,11 @@ pub async fn request_device(adapter: &wgpu::Adapter) -> anyhow::Result<(wgpu::De
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("acb"),
             required_features: wgpu::Features::TEXTURE_COMPRESSION_BC,
-            required_limits: wgpu::Limits::default(),
+            // the retail path feeds instance matrices through locations 24..31
+            required_limits: wgpu::Limits {
+                max_vertex_attributes: adapter.limits().max_vertex_attributes.min(32),
+                ..wgpu::Limits::default()
+            },
             ..Default::default()
         })
         .await?)
@@ -80,7 +90,24 @@ struct GpuMesh {
     indices: wgpu::Buffer,
     instances: wgpu::Buffer,
     instance_count: u32,
-    submeshes: Vec<(Range<u32>, usize)>,
+    submeshes: Vec<(Range<u32>, MaterialRef)>,
+    /// Undecoded vertex buffer for the retail shaders.
+    raw_vertices: Option<wgpu::Buffer>,
+    /// Retail per-instance rows (WVP, World), rewritten each frame.
+    retail_instances: Option<(wgpu::Buffer, Vec<Mat4>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaterialRef {
+    Basic(usize),
+    Retail(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShadingMode {
+    #[default]
+    Placeholder,
+    Retail,
 }
 
 struct GpuMaterial {
@@ -100,6 +127,7 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     /// [opaque, alpha test, blended] x [culled, two-sided]
     pipelines: [[wgpu::RenderPipeline; 2]; 3],
+    color_format: wgpu::TextureFormat,
 }
 
 #[derive(Debug, Default)]
@@ -114,11 +142,15 @@ pub struct LoadStats {
     pub disabled_submeshes: usize,
     /// Material count per BlendMode value.
     pub blend_modes: std::collections::BTreeMap<u32, usize>,
+    pub retail: Option<RetailStats>,
 }
 
 pub struct Scene {
     meshes: Vec<GpuMesh>,
     materials: Vec<GpuMaterial>,
+    retail: Option<retail::Retail>,
+    retail_materials: Vec<retail::Material>,
+    pub environment: Environment,
     /// World-space bounds of every instance origin.
     pub bounds: (Vec3, Vec3),
 }
@@ -264,7 +296,7 @@ impl Renderer {
             anisotropy_clamp: 8,
             ..Default::default()
         });
-        Self { device, queue, frame_buf, frame_bg, material_layout, sampler, pipelines }
+        Self { device, queue, frame_buf, frame_bg, material_layout, sampler, pipelines, color_format }
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -275,12 +307,19 @@ impl Renderer {
         &self.queue
     }
 
-    fn upload_texture(&self, t: &Texture) -> Option<wgpu::Texture> {
-        let (format, block_bytes) = match t.format {
-            PixelFormat::Bgra8 => (wgpu::TextureFormat::Bgra8UnormSrgb, 4),
-            PixelFormat::Bc1 => (wgpu::TextureFormat::Bc1RgbaUnormSrgb, 8),
-            PixelFormat::Bc2 => (wgpu::TextureFormat::Bc2RgbaUnormSrgb, 16),
-            PixelFormat::Bc3 => (wgpu::TextureFormat::Bc3RgbaUnormSrgb, 16),
+    /// `srgb`: sample linear values (placeholder shading); the retail
+    /// shaders work on the stored gamma values, like D3D9 without SRGBTEXTURE.
+    fn upload_texture(&self, t: &Texture, srgb: bool) -> Option<wgpu::Texture> {
+        use wgpu::TextureFormat as F;
+        let (format, block_bytes) = match (t.format, srgb) {
+            (PixelFormat::Bgra8, true) => (F::Bgra8UnormSrgb, 4),
+            (PixelFormat::Bc1, true) => (F::Bc1RgbaUnormSrgb, 8),
+            (PixelFormat::Bc2, true) => (F::Bc2RgbaUnormSrgb, 16),
+            (PixelFormat::Bc3, true) => (F::Bc3RgbaUnormSrgb, 16),
+            (PixelFormat::Bgra8, false) => (F::Bgra8Unorm, 4),
+            (PixelFormat::Bc1, false) => (F::Bc1RgbaUnorm, 8),
+            (PixelFormat::Bc2, false) => (F::Bc2RgbaUnorm, 16),
+            (PixelFormat::Bc3, false) => (F::Bc3RgbaUnorm, 16),
         };
         let block = if t.format == PixelFormat::Bgra8 { 1 } else { 4 };
         if t.width % block != 0 || t.height % block != 0 {
@@ -381,8 +420,9 @@ impl Renderer {
         scene: &Scene,
         camera: &Camera,
     ) {
-        let fog = [0.62, 0.68, 0.74];
-        let sun = Vec3::new(0.4, -0.5, 0.75).normalize();
+        let env = &scene.environment;
+        let fog = env.fog_color.to_array();
+        let sun = env.sun_dir;
         let frame = FrameUniform {
             view_proj: camera.view_proj().to_cols_array(),
             eye: camera.eye.extend(1.0).to_array(),
@@ -390,6 +430,16 @@ impl Renderer {
             fog: [fog[0], fog[1], fog[2], 0.0006],
         };
         self.queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));
+        if let Some(retail) = &scene.retail {
+            retail.update_frame(self, env, camera.eye);
+            let view_proj = camera.view_proj();
+            for m in &scene.meshes {
+                if let Some((buf, worlds)) = &m.retail_instances {
+                    let rows = retail::instance_rows(view_proj, worlds);
+                    self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&rows));
+                }
+            }
+        }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("main"),
@@ -417,20 +467,40 @@ impl Renderer {
             }),
             ..Default::default()
         });
-        pass.set_bind_group(0, &self.frame_bg, &[]);
         for blended_pass in [false, true] {
             for m in &scene.meshes {
-                pass.set_vertex_buffer(0, m.vertices.slice(..));
-                pass.set_vertex_buffer(1, m.instances.slice(..));
                 pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for (range, mat) in &m.submeshes {
-                    let mat = &scene.materials[*mat];
-                    if mat.blended != blended_pass {
-                        continue;
+                    match *mat {
+                        MaterialRef::Basic(i) => {
+                            let mat = &scene.materials[i];
+                            if mat.blended != blended_pass {
+                                continue;
+                            }
+                            let kind = if mat.blended { 2 } else { mat.alpha_test as usize };
+                            pass.set_pipeline(&self.pipelines[kind][mat.two_sided as usize]);
+                            pass.set_bind_group(0, &self.frame_bg, &[]);
+                            pass.set_bind_group(1, &mat.bind_group, &[]);
+                            pass.set_vertex_buffer(0, m.vertices.slice(..));
+                            pass.set_vertex_buffer(1, m.instances.slice(..));
+                        }
+                        MaterialRef::Retail(i) => {
+                            let (Some(retail), Some(raw), Some((inst, _))) =
+                                (&scene.retail, &m.raw_vertices, &m.retail_instances)
+                            else {
+                                continue;
+                            };
+                            let mat = &scene.retail_materials[i];
+                            if mat.blended != blended_pass {
+                                continue;
+                            }
+                            pass.set_pipeline(retail.pipeline(mat));
+                            pass.set_bind_group(0, &mat.consts, &[]);
+                            pass.set_bind_group(1, &mat.textures, &[]);
+                            pass.set_vertex_buffer(0, raw.slice(..));
+                            pass.set_vertex_buffer(1, inst.slice(..));
+                        }
                     }
-                    let kind = if mat.blended { 2 } else { mat.alpha_test as usize };
-                    pass.set_pipeline(&self.pipelines[kind][mat.two_sided as usize]);
-                    pass.set_bind_group(1, &mat.bind_group, &[]);
                     pass.draw_indexed(range.clone(), 0, 0..m.instance_count);
                 }
             }
@@ -439,8 +509,12 @@ impl Renderer {
 }
 
 impl Scene {
-    pub fn load(r: &Renderer, archive: &Archive) -> anyhow::Result<(Self, LoadStats)> {
+    pub fn load(r: &Renderer, archive: &Archive, shading: ShadingMode) -> anyhow::Result<(Self, LoadStats)> {
         let mut stats = LoadStats::default();
+        let mut retail = (shading == ShadingMode::Retail).then(|| retail::Retail::new(r));
+        let mut retail_materials = Vec::new();
+        let mut retail_slots: HashMap<(u32, u32), Option<usize>> = HashMap::new();
+        let mut gamma_views: HashMap<u32, Option<wgpu::TextureView>> = HashMap::new();
         let white = r.white_texture().create_view(&Default::default());
         let mut materials = vec![r.material(&white, 0.5, false, false, false)];
         let mut material_slots: HashMap<u32, usize> = HashMap::from([(0, 0)]);
@@ -480,6 +554,27 @@ impl Scene {
                     stats.disabled_submeshes += 1;
                     continue;
                 }
+                if let Some(retail) = &mut retail {
+                    let slot = *retail_slots.entry((s.material, mesh.format)).or_insert_with(|| {
+                        let mut load = |t: u32| {
+                            gamma_views
+                                .entry(t)
+                                .or_insert_with(|| {
+                                    let tex = archive.texture(t).ok().flatten()?;
+                                    let gpu = r.upload_texture(&tex, false)?;
+                                    Some(gpu.create_view(&Default::default()))
+                                })
+                                .clone()
+                        };
+                        let m = retail.material(r, archive, s.material, &mesh, &mut load)?;
+                        retail_materials.push(m);
+                        Some(retail_materials.len() - 1)
+                    });
+                    if let Some(slot) = slot {
+                        submeshes.push((s.first_index..s.first_index + s.index_count, MaterialRef::Retail(slot)));
+                        continue;
+                    }
+                }
                 let slot = match material_slots.get(&s.material) {
                     Some(&i) => i,
                     None => {
@@ -489,7 +584,7 @@ impl Scene {
                                 .entry(t)
                                 .or_insert_with(|| {
                                     let tex = archive.texture(t).ok().flatten()?;
-                                    let gpu = r.upload_texture(&tex)?;
+                                    let gpu = r.upload_texture(&tex, true)?;
                                     stats.textures += 1;
                                     Some(gpu.create_view(&Default::default()))
                                 })
@@ -514,7 +609,7 @@ impl Scene {
                         materials.len() - 1
                     }
                 };
-                submeshes.push((s.first_index..s.first_index + s.index_count, slot));
+                submeshes.push((s.first_index..s.first_index + s.index_count, MaterialRef::Basic(slot)));
             }
             let vertices: Vec<Vertex> = (0..mesh.positions.len())
                 .map(|i| Vertex {
@@ -531,7 +626,22 @@ impl Scene {
             stats.meshes += 1;
             stats.instances += mats.len();
             stats.triangles += mesh.indices.len() / 3 * mats.len();
+            let any_retail = submeshes.iter().any(|(_, m)| matches!(m, MaterialRef::Retail(_)));
+            let (raw_vertices, retail_instances) = if any_retail {
+                let worlds: Vec<Mat4> = mats.iter().map(Mat4::from_cols_array).collect();
+                let buf = r.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("retail instances"),
+                    size: retail::INSTANCE_STRIDE * worlds.len() as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (Some(init("raw vertices", &mesh.raw, wgpu::BufferUsages::VERTEX)), Some((buf, worlds)))
+            } else {
+                (None, None)
+            };
             meshes.push(GpuMesh {
+                raw_vertices,
+                retail_instances,
                 vertices: init("vertices", bytemuck::cast_slice(&vertices), wgpu::BufferUsages::VERTEX),
                 indices: init("indices", bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
                 instances: init("instances", bytemuck::cast_slice(mats), wgpu::BufferUsages::VERTEX),
@@ -540,7 +650,19 @@ impl Scene {
             });
         }
         stats.materials = materials.len();
-        Ok((Self { meshes, materials, bounds: (lo, hi) }, stats))
+        stats.retail = retail.as_mut().map(|r| {
+            r.stats.programs = r.programs.len();
+            std::mem::take(&mut r.stats)
+        });
+        let scene = Self {
+            meshes,
+            materials,
+            retail,
+            retail_materials,
+            environment: Environment::default(),
+            bounds: (lo, hi),
+        };
+        Ok((scene, stats))
     }
 }
 

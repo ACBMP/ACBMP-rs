@@ -16,9 +16,11 @@ use anvil_forge::{DataFile, Forge};
 use anvil_schema::Schema;
 
 pub mod mesh;
+pub mod shading;
 pub mod texture;
 
 pub use mesh::StaticMesh;
+pub use shading::{MaterialParams, ParamValue, Permutation, ShaderParam, TemplateShaders};
 pub use texture::{PixelFormat, Texture};
 
 #[derive(Debug, thiserror::Error)]
