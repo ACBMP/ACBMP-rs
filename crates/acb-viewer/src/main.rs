@@ -415,7 +415,14 @@ impl App {
         let step = loco.walk.root_step(tw0, tw) * w_walk + loco.run.root_step(tr0, tr) * w_run;
         let delta = (Quat::from_rotation_z(p.yaw) * step).truncate();
         if let Some(ground) = &g.ground {
-            p.pos = move_on(ground, p.pos, delta);
+            let to = move_on(ground, p.pos, delta);
+            // pressing into a wall: ease out of the cycle instead of
+            // running on the spot (the run lean would put the head through)
+            let len = delta.length();
+            if len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3 {
+                p.speed = (p.speed - 6.0 * dt).max(0.0);
+            }
+            p.pos = to;
         } else {
             p.pos += delta.extend(0.0);
         }
