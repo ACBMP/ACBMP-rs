@@ -228,6 +228,31 @@ impl Ground {
         out.into_iter().take(count).map(|x| (x.1, x.2)).collect()
     }
 
+    /// Nearest hit of the segment `o + t*d`, t in 0..1, with any collision
+    /// triangle (floors and walls).
+    pub fn ray(&self, o: Vec3, d: Vec3) -> Option<f32> {
+        let (lo, hi) = (cell(o.truncate().min((o + d).truncate())), cell(o.truncate().max((o + d).truncate())));
+        let mut best: Option<f32> = None;
+        let mut seen = std::collections::HashSet::new();
+        for x in lo.0..=hi.0 {
+            for y in lo.1..=hi.1 {
+                for grid in [&self.floor, &self.wall] {
+                    for &i in grid.get(&(x, y)).into_iter().flatten() {
+                        if !seen.insert(i) {
+                            continue;
+                        }
+                        if let Some(t) = ray_tri(o, d, &self.tris[i as usize]).filter(|t| (0.0..=1.0).contains(t)) {
+                            if best.is_none_or(|b| t < b) {
+                                best = Some(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+
     pub fn triangles(&self) -> usize {
         self.tris.len()
     }

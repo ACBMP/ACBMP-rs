@@ -151,8 +151,12 @@ impl Player {
         let mut dist = self.cam_dist;
         // pull in rather than look through a wall behind the player
         let back = -self.look();
-        if let Some((f, _)) = ground.and_then(|g| g.sweep_wall(target, back.truncate() * dist, 0.3)) {
-            dist = (dist * f).max(0.8);
+        // pull in in front of whatever is between the player and the eye
+        // (keeping 0.25 m off it)
+        // (keeping 0.25 m off it; geometry hugging the player is ignored)
+        const SKIP: f32 = 0.3;
+        if let Some(f) = ground.and_then(|g| g.ray(target + back * SKIP, back * (dist + 0.25 - SKIP))) {
+            dist = (SKIP + (dist + 0.25 - SKIP) * f - 0.25).max(0.6);
         }
         (target + back * dist, target)
     }
@@ -847,6 +851,7 @@ impl App {
             Ok(()) => eprintln!("wrote {}", path.display()),
             Err(e) => eprintln!("capture failed: {e:#}"),
         }
+        eprintln!("camera eye {:.2?} target {:.2?}", camera.eye.to_array(), camera.target.to_array());
         if let Some(p) = &self.player {
             eprintln!("player at {:.2} {:.2} {:.2} yaw {:.0} speed {:.2}", p.pos.x, p.pos.y, p.pos.z, p.yaw.to_degrees(), p.loco.speed);
         }
