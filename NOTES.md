@@ -291,6 +291,20 @@ its exact byte length and by key continuity (`acbmp animstats`).
   default next to `multi/`) characters follow root motion and return to
   their spawn every `--wander` seconds.
 
+## Freerun guidance
+
+- `GuidanceSystem` components (also Capsule/Cylinder/Barrel variants with
+  their own shapes): `CompressPoints` u16 x3 = (v - 32768) * 5 mm in
+  entity space; `GuidanceObjects[i]`: `Index0` -> `Index1` edge, `Valid`,
+  `SubType` (1 edge, 4 = 26 on San Donato), `DecN4Normal0/1` = 4 x i16
+  / 511 each, the two faces meeting at the edge (roof ledge: up, then the
+  wall's outward normal; `EdgeFilter` says which pairs were extracted:
+  WallGround, GroundCeiling). `Partitioner` = BV tree over the edges.
+- `acbmp guidance <map> [--obj]`: San Donato 4075 edges / 6.4 km, Firenze
+  11981 / 13.5 km; edge midpoints sit on the collision mesh (median 2-3
+  mm; 99.5% within 5 cm on Firenze and Siena; San Donato's other 800 lie
+  where there is no collision at all).
+
 ## Kills
 
 - Per persona `IDxx_G2G_{Front,Back,FarFront,FarBack}_{Walk,Run}2{All,Run}_

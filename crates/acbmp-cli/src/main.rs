@@ -104,6 +104,15 @@ enum Cmd {
         #[arg(long)]
         obj: Option<PathBuf>,
     },
+    /// Decode the map's freerun guidance edges and check them against collision
+    Guidance {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Write the edges as OBJ polylines
+        #[arg(long)]
+        obj: Option<PathBuf>,
+    },
     /// Census of the map's rigid bodies and shapes; optionally export them
     Collision {
         forge: PathBuf,
@@ -277,6 +286,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Cloth { forge, schemas, character: Some(ch), .. } => cloth_capsules(forge, &ch, schemas)?,
         Cmd::Cloth { forge, name, schemas, character: None } => cloth(forge, &name, schemas)?,
         Cmd::Navmesh { forge, schemas, obj } => navmesh(forge, schemas, obj)?,
+        Cmd::Guidance { forge, schemas, obj } => guidance(forge, schemas, obj)?,
         Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
         Cmd::Pick { forge, schemas, eye, target, width, height, px } => pick(forge, schemas, &eye, &target, width, height, &px)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
@@ -793,6 +803,91 @@ fn navmesh(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::Re
     Ok(())
 }
 
+fn guidance(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::Result<()> {
+    use glam::Vec3;
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let edges = archive.guidance_edges();
+    let mut types: std::collections::BTreeMap<u32, usize> = Default::default();
+    edges.iter().for_each(|e| *types.entry(e.sub_type).or_default() += 1);
+    let length: f32 = edges.iter().map(|e| Vec3::from(e.a).distance(Vec3::from(e.b))).sum();
+    let ents: std::collections::HashSet<u32> = edges.iter().map(|e| e.entity).collect();
+    println!("{} edges on {} entities, {length:.0} m; sub types {types:?}", edges.len(), ents.len());
+    // how far edge midpoints are from the collision surface
+    let (world, _) = archive.world_collision();
+    let tris: Vec<[Vec3; 3]> = world.triangles.iter().map(|t| t.map(|i| Vec3::from(world.vertices[i as usize]))).collect();
+    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, t) in tris.iter().enumerate() {
+        let lo = t[0].min(t[1]).min(t[2]);
+        let hi = t[0].max(t[1]).max(t[2]);
+        for x in (lo.x / 2.0).floor() as i32..=(hi.x / 2.0).floor() as i32 {
+            for y in (lo.y / 2.0).floor() as i32..=(hi.y / 2.0).floor() as i32 {
+                grid.entry((x, y)).or_default().push(i);
+            }
+        }
+    }
+    let point_tri = |p: Vec3, [a, b, c]: [Vec3; 3]| {
+        // distance from p to triangle (closest point, Ericson)
+        let (ab, ac, ap) = (b - a, c - a, p - a);
+        let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+        if d1 <= 0.0 && d2 <= 0.0 {
+            return p.distance(a);
+        }
+        let bp = p - b;
+        let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+        if d3 >= 0.0 && d4 <= d3 {
+            return p.distance(b);
+        }
+        let cp = p - c;
+        let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+        if d6 >= 0.0 && d5 <= d6 {
+            return p.distance(c);
+        }
+        let vc = d1 * d4 - d3 * d2;
+        if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+            return p.distance(a + ab * (d1 / (d1 - d3)));
+        }
+        let vb = d5 * d2 - d1 * d6;
+        if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+            return p.distance(a + ac * (d2 / (d2 - d6)));
+        }
+        let va = d3 * d6 - d5 * d4;
+        if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+            return p.distance(b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6))));
+        }
+        let denom = 1.0 / (va + vb + vc);
+        p.distance(a + ab * (vb * denom) + ac * (vc * denom))
+    };
+    let mut dist: Vec<f32> = edges
+        .iter()
+        .map(|e| {
+            let m = (Vec3::from(e.a) + Vec3::from(e.b)) / 2.0;
+            grid.get(&((m.x / 2.0).floor() as i32, (m.y / 2.0).floor() as i32))
+                .map(|l| l.iter().map(|&i| point_tri(m, tris[i])).fold(f32::MAX, f32::min))
+                .unwrap_or(f32::MAX)
+        })
+        .collect();
+    let near = dist.iter().filter(|d| **d < 0.05).count();
+    let none = dist.iter().filter(|d| **d == f32::MAX).count();
+    println!("{near} edges within 5 cm of collision, {none} over cells without any collision");
+    dist.sort_by(f32::total_cmp);
+    let q = |f: f32| dist.get(((dist.len() as f32 * f) as usize).min(dist.len().saturating_sub(1))).copied().unwrap_or(0.0);
+    println!("edge midpoint to collision: median {:.3} m, 90% {:.3} m, 99% {:.3} m", q(0.5), q(0.9), q(0.99));
+    if let Some(path) = obj {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        for e in &edges {
+            writeln!(w, "v {} {} {}", e.a[0], e.a[2], -e.a[1])?;
+            writeln!(w, "v {} {} {}", e.b[0], e.b[2], -e.b[1])?;
+        }
+        for i in 0..edges.len() {
+            writeln!(w, "l {} {}", 2 * i + 1, 2 * i + 2)?;
+        }
+        println!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
 fn collision(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::Result<()> {
     let t0 = Instant::now();
     let schema = load_schema(&schemas)?;
@@ -812,6 +907,10 @@ fn collision(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::
         let mut count = |e: &anvil_fastload::Obj| {
             for c in archive.field(e, "Components").map(|v| v.items()).unwrap_or_default().iter().filter_map(|v| v.as_obj()) {
                 *census.entry(schema.name_or_hash(c.type_hash)).or_default() += 1;
+                if archive.is_type(c, "GuidanceSystem") && std::env::var_os("ACBMP_GUIDANCE").is_some() {
+                    println!("  GuidanceSystem on {:#010x} {}", e.id, archive.loc(e.id).map(|l| l.name.as_str()).unwrap_or("(inline)"));
+                    dump_obj(&archive, &schema, c, 2, 3);
+                }
                 if archive.is_type(c, "CrowdFlow") && std::env::var_os("ACBMP_FLOWS").is_some() {
                     println!("  CrowdFlow on {:#010x} {}", e.id, archive.loc(e.id).map(|l| l.name.as_str()).unwrap_or("(inline)"));
                     dump_obj(&archive, &schema, c, 2, 2);
