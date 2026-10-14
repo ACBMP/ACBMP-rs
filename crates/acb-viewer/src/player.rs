@@ -269,7 +269,17 @@ pub(crate) fn drive(p: &mut Player, g: &mut Gfx, keys: &HashSet<KeyCode>, sim_ti
                     p.vel = (delta / dt.max(1e-4)).extend(0.0);
                     p.fall_from = p.pos.z;
                 }
-                p.pos = to;
+                // shoulder past people rather than through them (walls win)
+                let mut push = Vec2::ZERO;
+                for a in g.actors.iter().skip(1).filter(|a| a.scripted.is_none()) {
+                    let o = a.entity.w_axis.truncate();
+                    let d = (to - o).truncate();
+                    let len = d.length();
+                    if len > 1e-3 && len < PERSONAL && (to.z - o.z).abs() < 1.5 {
+                        push += d / len * (PERSONAL - len);
+                    }
+                }
+                p.pos = if push == Vec2::ZERO { to } else { move_on(ground, to, push).0 };
             }
         }
     } else {
@@ -297,6 +307,9 @@ pub(crate) fn drive(p: &mut Player, g: &mut Gfx, keys: &HashSet<KeyCode>, sim_ti
         pose_actor(&mut g.scene, &g.renderer, actor, &globals, world, dt);
     }
 }
+
+/// How close the player gets to other people, metres.
+const PERSONAL: f32 = 0.6;
 
 /// Gravity, m/s^2 (ClothSettings use the same 10).
 const GRAVITY: f32 = 10.0;
