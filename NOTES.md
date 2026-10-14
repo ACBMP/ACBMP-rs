@@ -208,6 +208,25 @@ its exact byte length and by key continuity (`acbmp animstats`).
   `Custom_Color_2` 0x4616cd3c) to row f32x4 colours; the
   `AC2MP_Characters_Body` PS reads them at c128/c129 (materials default to
   white). Applied as `MaterialOverride` vectors.
+- Cloth (`acb-anim/src/cloth.rs`, `acbmp cloth <forge> [name]`): the
+  first `ClothLOD` with particles. `VertexPos`/`VertexNormals` are in the
+  visual mesh's space (every constraint's sqrt(`SquareRestLength`) equals
+  the particle distance exactly); particles skin to the LOD's own
+  `MeshBones` by `BoneIndices` (u8 x4) / `BoneWeights` (f32 x4).
+  `VertexFlags` 1 = pinned (skin factor 1, radius 0.01-0.02), 2 =
+  simulated; `VertexSkinFactors` == `VertexRigidities` (painted 0..0.98);
+  `VertexSphereRadius` = collision radius. `VisualVertexMappings[i]`:
+  three particle indices (0xffff = none), barycentric `Weights`, `Offset`
+  along the particle triangle's normal; rebuilds the visual mesh to < 1 mm
+  where `UseVisualSkinning` = 0. The visual mesh's vertex order differs
+  (seam splits, counts off by 1-2), so vertices are matched by bind
+  position + UV. `ClothSettings`: gravity (0,0,-10), 3 constraint
+  iterations, air friction, skinning velocity factors (unused yet),
+  `Ragdoll` (body collision shapes, unused yet).
+- Viewer cloth: world-space Verlet at 60 Hz, pinned particles follow the
+  skin, others are pulled by skin_factor^2 / 2 per step and clamped to
+  0.05 + 0.6 (1 - skin) m from the skin (stand-in for body collision);
+  the part is posed on the CPU (model space, identity skin matrices).
 - MP personas: `AC2MP_IDxx_Main` (BuildTable from the builder) adds head,
   eyes, legs; the body/arms/robe/accessories live in `AC2MP_IDxx_Custom1..3`
   (+`_ext`, spelling varies: `ID17_Cutom3_ext`) and `_Custom_Colors`

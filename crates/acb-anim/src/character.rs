@@ -29,10 +29,11 @@
 
 use std::collections::HashMap;
 
-use acb_world::{Archive, MaterialOverride, SkinnedMesh};
+use acb_world::{Archive, MaterialOverride, MeshBone, SkinnedMesh};
 use anvil_fastload::{Obj, Value};
 use glam::{Mat4, Vec3, Vec4};
 
+use crate::cloth::ClothLod;
 use crate::pose::{Bone, Skeleton};
 
 #[derive(Debug, Clone)]
@@ -57,6 +58,21 @@ pub struct Character {
     overrides: HashMap<u32, u32>,
     /// Builder changes per material.
     material_changes: HashMap<u32, MaterialOverride>,
+    /// Soft bodies; see [`Character::finish`].
+    pub cloths: Vec<CharacterCloth>,
+}
+
+/// A ClothLOD bound to the character.
+#[derive(Debug, Clone)]
+pub struct CharacterCloth {
+    pub lod: ClothLod,
+    /// `lod.bones` -> skeleton bone, and their inverse binds.
+    pub bone_map: Vec<Option<usize>>,
+    pub inverse_bind: Vec<Mat4>,
+    /// The part showing it (its `VisualMesh`), once added.
+    pub part: Option<usize>,
+    /// Per vertex of that part: the visual mapping driving it.
+    pub vertex_mapping: Vec<Option<usize>>,
 }
 
 /// Decodes a `PackedOrthonormalMatrix` (see the module docs).
@@ -128,7 +144,7 @@ impl Character {
             }
         }
 
-        let mut c = Character { entity, skeleton, parts: Vec::new(), overrides, material_changes: HashMap::new() };
+        let mut c = Character { entity, skeleton, parts: Vec::new(), overrides, material_changes: HashMap::new(), cloths: Vec::new() };
         for v in comps.iter().filter(|c| archive.is_type(c, "Visual")) {
             let Some(object) = archive.field(v, "Object").and_then(Value::target_id) else { continue };
             let mut local = HashMap::new();
@@ -146,6 +162,7 @@ impl Character {
             }
             c.add_visual(archive, object, &local);
         }
+        c.finish();
         Some(c)
     }
 
@@ -169,7 +186,6 @@ impl Character {
             return;
         }
         let Ok(Some(mesh)) = archive.skinned_mesh(mesh_uid) else { return };
-        let bone_index: HashMap<u32, usize> = self.skeleton.bones.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
         let materials = mesh
             .submeshes
             .iter()
@@ -178,11 +194,17 @@ impl Character {
                 (m, self.material_changes.get(&m).cloned().unwrap_or_default())
             })
             .collect();
-        let mut bone_map: Vec<Option<usize>> = mesh.bones.iter().map(|b| bone_index.get(&b.id).copied()).collect();
-        let mut inverse_bind: Vec<Mat4> =
-            mesh.bones.iter().map(|b| unpack_inverse_bind(b.packed.0, b.packed.1, b.packed.2)).collect();
-        // Bones no listed skeleton has (MA_Ezio_LOD0's eyes) ride rigidly
-        // on the mapped bone nearest their bind origin.
+        let (bone_map, inverse_bind) = self.bind(&mesh.bones);
+        self.parts.push(CharacterPart { mesh_uid, mesh, materials, bone_map, inverse_bind });
+    }
+
+    /// Skeleton bone and inverse bind per mesh bone. Bones no listed
+    /// skeleton has (MA_Ezio_LOD0's eyes) ride rigidly on the mapped bone
+    /// nearest their bind origin.
+    fn bind(&self, bones: &[MeshBone]) -> (Vec<Option<usize>>, Vec<Mat4>) {
+        let bone_index: HashMap<u32, usize> = self.skeleton.bones.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+        let mut bone_map: Vec<Option<usize>> = bones.iter().map(|b| bone_index.get(&b.id).copied()).collect();
+        let mut inverse_bind: Vec<Mat4> = bones.iter().map(|b| unpack_inverse_bind(b.packed.0, b.packed.1, b.packed.2)).collect();
         let origin = |m: &Mat4| m.inverse().w_axis.truncate();
         for i in 0..bone_map.len() {
             if bone_map[i].is_some() {
@@ -197,7 +219,95 @@ impl Character {
                 inverse_bind[i] = inverse_bind[j];
             }
         }
-        self.parts.push(CharacterPart { mesh_uid, mesh, materials, bone_map, inverse_bind });
+        (bone_map, inverse_bind)
+    }
+
+    /// Binds soft bodies to the final skeleton and their visual parts.
+    fn finish(&mut self) {
+        for i in 0..self.cloths.len() {
+            let (bone_map, inverse_bind) = self.bind(&self.cloths[i].lod.bones);
+            let part = self.parts.iter().position(|p| p.mesh_uid == self.cloths[i].lod.visual_mesh);
+            let vertex_mapping = part.map(|p| self.cloths[i].lod.match_visual(&self.parts[p].mesh)).unwrap_or_default();
+            let c = &mut self.cloths[i];
+            (c.bone_map, c.inverse_bind, c.part, c.vertex_mapping) = (bone_map, inverse_bind, part, vertex_mapping);
+        }
+    }
+
+    /// Model-space skinned particle positions of cloth `ci`.
+    pub fn cloth_targets(&self, ci: usize, globals: &[Mat4]) -> Vec<Vec3> {
+        let c = &self.cloths[ci];
+        let skins: Vec<Mat4> = c
+            .bone_map
+            .iter()
+            .zip(&c.inverse_bind)
+            .map(|(b, inv)| b.and_then(|b| globals.get(b)).map(|g| *g * *inv).unwrap_or(Mat4::IDENTITY))
+            .collect();
+        c.lod
+            .positions
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let (idx, w) = (c.lod.bone_indices.get(i).copied().unwrap_or([0; 4]), c.lod.bone_weights.get(i).copied().unwrap_or(Vec4::X));
+                (0..4)
+                    .filter(|&k| w[k] > 0.0)
+                    .map(|k| skins.get(idx[k] as usize).copied().unwrap_or(Mat4::IDENTITY).transform_point3(*p) * w[k])
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// Format-0 vertex buffer of cloth `ci`'s part posed in model space:
+    /// mapped vertices from the (model-space) `particles`, the rest skinned
+    /// on the CPU by `skins` (that part's [`Character::skin_matrices`]).
+    /// Draw it with identity skin matrices.
+    pub fn cloth_vertices(&self, ci: usize, particles: &[Vec3], skins: &[Mat4]) -> Option<Vec<u8>> {
+        let c = &self.cloths[ci];
+        let part = &self.parts[c.part?];
+        let m = &part.mesh;
+        let vis = c.lod.visual_positions(particles);
+        let mut pos: Vec<Vec3> = Vec::with_capacity(m.positions.len());
+        for (vi, p) in m.positions.iter().enumerate() {
+            if let Some(k) = c.vertex_mapping.get(vi).copied().flatten() {
+                pos.push(vis[k]);
+                continue;
+            }
+            let sub = m.submeshes.iter().find(|s| (s.first_vertex..s.first_vertex + s.vertex_count).contains(&(vi as u32)));
+            let mut v = Vec3::ZERO;
+            for k in 0..4 {
+                let w = m.weights[vi][k];
+                if w <= 0.0 {
+                    continue;
+                }
+                let mb = sub.and_then(|s| s.palette.get(m.joints[vi][k] as usize)).copied().unwrap_or(0) as usize;
+                v += skins.get(mb).copied().unwrap_or(Mat4::IDENTITY).transform_point3(Vec3::from(*p)) * w;
+            }
+            pos.push(v);
+        }
+        // smooth normals from the posed triangles
+        let mut nrm = vec![Vec3::ZERO; pos.len()];
+        for t in m.indices.chunks_exact(3) {
+            let [a, b, cc] = [t[0], t[1], t[2]].map(|i| i as usize);
+            let n = (pos[b] - pos[a]).cross(pos[cc] - pos[a]);
+            for i in [a, b, cc] {
+                nrm[i] += n;
+            }
+        }
+        let mut raw = m.raw.clone();
+        let q = |x: f32| ((x / 10.0).clamp(-1.0, 1.0) * 32767.0).round() as i16;
+        let b = |x: f32| (x.clamp(-1.0, 1.0) * 127.0 + 127.0).round() as u8;
+        for (vi, v) in raw.chunks_exact_mut(m.stride).enumerate() {
+            let p = pos[vi];
+            for (k, x) in [p.x, p.y, p.z].into_iter().enumerate() {
+                v[k * 2..k * 2 + 2].copy_from_slice(&q(x).to_le_bytes());
+            }
+            let n = nrm[vi].normalize_or_zero();
+            if n != Vec3::ZERO {
+                v[8] = b(n.x);
+                v[9] = b(n.y);
+                v[10] = b(n.z);
+            }
+        }
+        Some(raw)
     }
 
     /// Builds an `EntityBuilder`'s template Entity and applies the builder.
@@ -225,6 +335,7 @@ impl Character {
                 c.apply_build_table(archive, t);
             }
         }
+        c.finish();
         Some(c)
     }
 
@@ -291,7 +402,8 @@ impl Character {
                 }
                 "BuildTable" | "BuildTableExt" => self.apply_build_table(archive, value),
                 "Mesh" | "LODSelector" => self.add_visual(archive, value, &HashMap::new()),
-                // soft-body cloth: its first state's visual, skinned only (no simulation yet)
+                // soft-body cloth: its first state's visual, and the
+                // particles that drive it (simulated by the caller)
                 "Cloth" => {
                     let visual = archive.root(value).ok().and_then(|r| {
                         let state = archive.field(&r.obj, "SoftBodyStates")?.items().first()?.as_obj()?;
@@ -299,6 +411,15 @@ impl Character {
                     });
                     if let Some(v) = visual.filter(|u| *u != 0) {
                         self.add_visual(archive, v, &HashMap::new());
+                    }
+                    if let Some(lod) = ClothLod::load(archive, value) {
+                        self.cloths.push(CharacterCloth {
+                            lod,
+                            bone_map: Vec::new(),
+                            inverse_bind: Vec::new(),
+                            part: None,
+                            vertex_mapping: Vec::new(),
+                        });
                     }
                 }
                 _ => {}

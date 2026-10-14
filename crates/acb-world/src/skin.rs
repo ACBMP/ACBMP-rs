@@ -53,6 +53,25 @@ pub struct MeshBone {
 }
 
 impl Archive<'_> {
+    /// An array of `MeshBone` objects (a Mesh's `Bones`, a ClothLOD's
+    /// `MeshBones`).
+    pub fn mesh_bones(&self, v: Option<&Value>) -> Vec<MeshBone> {
+        let num = |o: &anvil_fastload::Obj, n: &str| self.field(o, n).and_then(Value::as_u32).unwrap_or(0);
+        v.map(Value::items)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Value::as_obj)
+            .map(|b| {
+                let p = self.field(b, "PackedInitialMatrixInverse").and_then(Value::as_obj);
+                let pn = |n: &str| p.map(|p| num(p, n)).unwrap_or(0);
+                MeshBone {
+                    id: num(b, "BoneID"),
+                    packed: (["J0", "J1", "J2", "K0", "K1", "K2"].map(|n| pn(n) as u16), pn("TransA"), pn("TransB")),
+                }
+            })
+            .collect()
+    }
+
     /// Decoded skinned mesh; `Ok(None)` when the mesh is not format 0.
     pub fn skinned_mesh(&self, uid: u32) -> Result<Option<SkinnedMesh>, Error> {
         let root = self.root(uid)?;
@@ -96,19 +115,7 @@ impl Archive<'_> {
             ib.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]]) as u32).collect()
         };
 
-        for b in self.field(o, "Bones").map(Value::items).unwrap_or_default() {
-            let Some(b) = b.as_obj() else { continue };
-            let p = self.field(b, "PackedInitialMatrixInverse").and_then(Value::as_obj);
-            let pn = |n: &str| p.map(|p| num(p, n)).unwrap_or(0);
-            m.bones.push(MeshBone {
-                id: num(b, "BoneID"),
-                packed: (
-                    ["J0", "J1", "J2", "K0", "K1", "K2"].map(|n| pn(n) as u16),
-                    pn("TransA"),
-                    pn("TransB"),
-                ),
-            });
-        }
+        m.bones = self.mesh_bones(self.field(o, "Bones"));
 
         let materials: Vec<u32> = self
             .field(o, "CompiledMeshMaterials")

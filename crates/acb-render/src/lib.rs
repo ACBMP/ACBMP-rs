@@ -782,7 +782,7 @@ impl Scene {
             r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage })
         };
         self.skinned.push(GpuSkinned {
-            vertices: init("skinned vertices", &mesh.raw, wgpu::BufferUsages::VERTEX),
+            vertices: init("skinned vertices", &mesh.raw, wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST),
             indices: init("skinned indices", bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
             instances: r.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("skinned instance"),
@@ -795,6 +795,16 @@ impl Scene {
             draws,
         });
         Some(self.skinned.len() - 1)
+    }
+
+    /// Replaces a skinned mesh's vertex buffer (same layout and size), e.g.
+    /// a simulated cloth posed on the CPU.
+    pub fn set_skinned_vertices(&self, r: &Renderer, handle: usize, raw: &[u8]) {
+        if let Some(s) = self.skinned.get(handle) {
+            if raw.len() as u64 <= s.vertices.size() {
+                r.queue.write_buffer(&s.vertices, 0, raw);
+            }
+        }
     }
 
     /// Places a skinned mesh: `world` = model -> world, `skin` = per mesh

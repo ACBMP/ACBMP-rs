@@ -437,4 +437,5 @@ impl RawTrack {
 }
 
 pub mod character;
+pub mod cloth;
 pub mod pose;

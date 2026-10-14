@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use acb_anim::character::Character;
+use acb_anim::cloth::ClothSim;
 use acb_anim::pose::Clip;
 use acb_anim::BuiltinTracks;
 use acb_render::{wgpu, Camera, Renderer, Scene, DEPTH_FORMAT};
@@ -146,6 +147,31 @@ struct Actor {
     /// Clip time of the previous frame.
     clip_time: f32,
     epoch: u32,
+    /// One simulation per `character.cloths`.
+    cloth: Vec<ClothSim>,
+}
+
+/// Skins every part of an actor at `world` and steps its cloth by `dt`:
+/// cloth parts are posed on the CPU and drawn with identity skinning.
+fn pose_actor(scene: &mut Scene, r: &Renderer, a: &mut Actor, globals: &[Mat4], world: Mat4, dt: f32) {
+    let c = &a.character;
+    let mut skins = c.skin_matrices(globals);
+    let to_model = world.inverse();
+    for (ci, sim) in a.cloth.iter_mut().enumerate() {
+        let Some(part) = c.cloths[ci].part else { continue };
+        let target: Vec<Vec3> = c.cloth_targets(ci, globals).into_iter().map(|p| world.transform_point3(p)).collect();
+        sim.step(&c.cloths[ci].lod, &target, dt);
+        let local: Vec<Vec3> = sim.pos.iter().map(|p| to_model.transform_point3(*p)).collect();
+        if let (Some(raw), Some(h)) = (c.cloth_vertices(ci, &local, &skins[part]), a.handles[part]) {
+            scene.set_skinned_vertices(r, h, &raw);
+            skins[part].iter_mut().for_each(|m| *m = Mat4::IDENTITY);
+        }
+    }
+    for (h, skin) in a.handles.iter().zip(skins) {
+        if let Some(h) = h {
+            scene.set_skinned_pose(*h, world, &skin);
+        }
+    }
 }
 
 struct Fly {
@@ -319,7 +345,8 @@ impl App {
                 _ => character.model_to_entity(),
             };
             let phase = i as f32 * 0.37;
-            actors.push(Actor { character, handles, spawn, entity: spawn, model, phase, clip_time: phase, epoch: 0 });
+            let cloth = vec![ClothSim::default(); character.cloths.len()];
+            actors.push(Actor { character, handles, spawn, entity: spawn, model, phase, clip_time: phase, epoch: 0, cloth });
         }
         eprintln!("{} characters on {} standard spawns", actors.len(), spawns.len());
         // start behind the first one, looking along its facing (+Y)
@@ -378,11 +405,7 @@ impl App {
             };
             let globals = c.skeleton.globals(&local);
             let world = a.entity * a.model;
-            for (h, skin) in a.handles.iter().zip(c.skin_matrices(&globals)) {
-                if let Some(h) = h {
-                    g.scene.set_skinned_pose(*h, world, &skin);
-                }
-            }
+            pose_actor(&mut g.scene, &g.renderer, a, &globals, world, dt);
         }
     }
 
@@ -425,10 +448,8 @@ impl App {
         let pose = step.pose;
         let globals = c.skeleton.globals(&pose);
         let world = p.entity() * actor.model;
-        for (h, skin) in actor.handles.iter().zip(c.skin_matrices(&globals)) {
-            if let Some(h) = h {
-                g.scene.set_skinned_pose(*h, world, &skin);
-            }
+        if let Some(actor) = g.actors.first_mut() {
+            pose_actor(&mut g.scene, &g.renderer, actor, &globals, world, dt);
         }
     }
 

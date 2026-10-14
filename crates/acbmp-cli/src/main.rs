@@ -83,6 +83,15 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         top: usize,
     },
+    /// Decode Cloth soft bodies and check them against their visual meshes
+    Cloth {
+        forge: PathBuf,
+        /// Name substring (empty: all)
+        #[arg(default_value = "")]
+        name: String,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+    },
     /// Census of the map's rigid bodies and shapes; optionally export them
     Collision {
         forge: PathBuf,
@@ -253,6 +262,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Skin { forge, name, schemas } => skin(forge, &name, schemas)?,
         Cmd::Dump { forge, name, schemas, depth } => dump(forge, &name, schemas, depth)?,
         Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
+        Cmd::Cloth { forge, name, schemas } => cloth(forge, &name, schemas)?,
         Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
         Cmd::Pick { forge, schemas, eye, target, width, height, px } => pick(forge, schemas, &eye, &target, width, height, &px)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
@@ -532,6 +542,97 @@ fn pick(forge: PathBuf, schemas: PathBuf, eye: &[f32], target: &[f32], width: u3
     Ok(())
 }
 
+fn cloth(forge: PathBuf, needle: &str, schemas: PathBuf) -> anyhow::Result<()> {
+    use acb_anim::cloth::ClothLod;
+    use glam::Vec3;
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    for uid in archive.uids_of("Cloth") {
+        let name = archive.loc(uid).map(|l| l.name.clone()).unwrap_or_default();
+        if !name.contains(needle) {
+            continue;
+        }
+        let Some(c) = ClothLod::load(&archive, uid) else {
+            println!("{name}: no LOD with particles");
+            continue;
+        };
+        let n = c.positions.len();
+        let rest_err = c
+            .constraints
+            .iter()
+            .map(|k| (c.positions[k.a as usize].distance(c.positions[k.b as usize]) - k.rest).abs())
+            .fold(0f32, f32::max);
+        let mut flags: std::collections::BTreeMap<u8, usize> = Default::default();
+        c.flags.iter().for_each(|f| *flags.entry(*f).or_default() += 1);
+        let range = |v: &[f32]| v.iter().fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(*x), hi.max(*x)));
+        let wsum = c.bone_weights.iter().map(|w| w.element_sum()).fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+        let mapped = c.mappings.iter().filter(|m| m.skinned).count();
+        if std::env::var_os("ACBMP_CLOTH_DEBUG").is_some() {
+            for f in [1u8, 2] {
+                let sel = |v: &[f32]| -> Vec<f32> { v.iter().zip(&c.flags).filter(|(_, g)| **g == f).map(|(x, _)| *x).collect() };
+                println!("  flag {f}: skin {:?} rigidity {:?} radius {:?}", range(&sel(&c.skin_factor)), range(&sel(&c.rigidity)), range(&sel(&c.radius)));
+            }
+            let same = c.skin_factor.iter().zip(&c.rigidity).filter(|(a, b)| (*a - *b).abs() < 1e-6).count();
+            println!("  skin == rigidity for {same}/{n}");
+        }
+        let mesh = archive.skinned_mesh(c.visual_mesh).ok().flatten();
+        let fit = mesh.as_ref().map(|m| {
+            let vis = c.visual_positions(&c.positions);
+            let errs: Vec<f32> = vis
+                .iter()
+                .zip(&m.positions)
+                .zip(&c.mappings)
+                .filter(|(_, mp)| !mp.skinned)
+                .map(|((a, b), _)| a.distance(Vec3::from(*b)))
+                .collect();
+            // variant: offset along the interpolated particle normals
+            if std::env::var_os("ACBMP_CLOTH_DEBUG").is_some() {
+                for (i, (mp, v)) in c.mappings.iter().zip(&m.positions).enumerate().filter(|(_, (mp, _))| !mp.skinned) {
+                    let q = mp.indices.map(|j| c.positions.get(j as usize).copied());
+                    let nq = mp.indices.map(|j| c.normals.get(j as usize).copied());
+                    let base: Vec3 = q.iter().zip(mp.weights).filter_map(|(x, w)| x.map(|x| x * w)).sum();
+                    let ni: Vec3 = nq.iter().zip(mp.weights).filter_map(|(x, w)| x.map(|x| x * w)).sum();
+                    let target = Vec3::from(*v);
+                    let e_tri = vis[i].distance(target);
+                    if e_tri > 0.01 {
+                        println!(
+                            "  v{i}: idx {:?} w {:.2?} off {:.3} | tri err {e_tri:.3} interp-normal err {:.3} no-offset err {:.3}",
+                            mp.indices, mp.weights, mp.offset, (base + ni.normalize_or_zero() * mp.offset).distance(target), base.distance(target)
+                        );
+                    }
+                }
+            }
+            let max = errs.iter().copied().fold(0f32, f32::max);
+            let mean = errs.iter().sum::<f32>() / errs.len().max(1) as f32;
+            let map = c.match_visual(m);
+            let nerr: Vec<f32> = map
+                .iter()
+                .zip(&m.positions)
+                .filter_map(|(k, p)| k.map(|k| vis[k].distance(Vec3::from(*p))))
+                .collect();
+            let unmatched = map.iter().filter(|k| k.is_none()).count();
+            let nmax = nerr.iter().copied().fold(0f32, f32::max);
+            format!(
+                "visual {} verts (mesh {}), in-order fit mean {mean:.4} max {max:.4} m; matched max {nmax:.4} m, {unmatched} unmatched",
+                vis.len(),
+                m.positions.len()
+            )
+        });
+        println!(
+            "{name}: {n} particles, {} constraints (rest err {rest_err:.4}), {} tris, {} bones, flags {flags:?}, skin {:?}, rigidity {:?}, radius {:?}, bone w sum {wsum:?}, {mapped} skinned mappings, iters {}, {}",
+            c.constraints.len(),
+            c.indices.len() / 3,
+            c.bones.len(),
+            range(&c.skin_factor),
+            range(&c.rigidity),
+            range(&c.radius),
+            c.settings.iterations,
+            fit.unwrap_or_else(|| "no visual mesh".into())
+        );
+    }
+    Ok(())
+}
+
 fn collision(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::Result<()> {
     let t0 = Instant::now();
     let schema = load_schema(&schemas)?;
@@ -723,7 +824,9 @@ fn dump_value(archive: &acb_world::Archive, schema: &anvil_schema::Schema, label
     }
     match v {
         Value::Array(items) => {
-            for (i, it) in items.iter().enumerate() {
+            // ACBMP_DUMP_ITEMS=n: expand only the first n items of each array
+            let max = std::env::var("ACBMP_DUMP_ITEMS").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+            for (i, it) in items.iter().enumerate().take(max) {
                 dump_value(archive, schema, &format!("[{i}]"), it, indent + 1, depth - 1);
             }
         }
