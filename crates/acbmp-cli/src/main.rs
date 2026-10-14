@@ -919,6 +919,8 @@ fn rootmotion(forge: PathBuf, names: &[String], schemas: PathBuf, exe: PathBuf) 
         };
         let clip = acb_anim::pose::Clip::load_with(&archive, uid, Some(&builtins)).ok_or_else(|| anyhow::anyhow!("{name}: decode"))?;
         let end = clip.root_motion(clip.length);
+        let (_, r0, p0) = clip.root_motion(0.0).to_scale_rotation_translation();
+        print!("start ({:.2}, {:.2}, {:.2}) yaw {:.0}; ", p0.x, p0.y, p0.z, r0.to_euler(glam::EulerRot::ZXY).0.to_degrees());
         let (_, rot, pos) = end.to_scale_rotation_translation();
         let (yaw, _, _) = rot.to_euler(glam::EulerRot::ZXY);
         // speed in 8 slices

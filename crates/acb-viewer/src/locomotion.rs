@@ -210,6 +210,20 @@ impl Locomotion {
         self.action = Some(action);
     }
 
+    /// Back in control after a scripted clip that ended in `pose`.
+    pub fn resume(&mut self, pose: Pose) {
+        self.action = None;
+        self.air = None;
+        self.speed = 0.0;
+        self.fade = Some((pose.clone(), FADE));
+        self.last = pose;
+    }
+
+    /// The pose shown last frame.
+    pub fn last_pose(&self) -> &Pose {
+        &self.last
+    }
+
     pub fn airborne(&self) -> bool {
         self.air.is_some()
     }

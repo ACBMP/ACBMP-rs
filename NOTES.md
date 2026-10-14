@@ -291,6 +291,26 @@ its exact byte length and by key continuity (`acbmp animstats`).
   default next to `multi/`) characters follow root motion and return to
   their spawn every `--wander` seconds.
 
+## Kills
+
+- Per persona `IDxx_G2G_{Front,Back,FarFront,FarBack}_{Walk,Run}2{All,Run}_
+  Kill_ass` / `_Killed_Npc` (+ `_Kill_Missed_ass`, `_Kill_NpcTarget_ass`,
+  `_Killed_NpcTarget_Npc`, `_Tr_out`, `_Cam1..8` camera clips); also
+  Air2G, Drop2G, Narrow2Narrow, Hayground grabs, FallBack, Humil (stun)
+  sets under `IDxx_` (generic).
+- Assassin and victim clips share one frame, the victim's: at t = 0 the
+  victim's Reference is at the origin (yaw 90 = facing +Y like idle), the
+  assassin's ~1 m away (ID07 Front: (0.16, -1.03), yaw -90). Root tracks
+  barely move; the Reference bones carry the motion. Verified by playing
+  both in one frame (`acb-viewer --pair ass,victim`).
+- Viewer: E kills the nearest person within 2.5 m ahead: Front/Back by
+  the side of the victim the player is on, frame at the victim turned so
+  the assassin's start pelvis points at the player, 0.25 s blend in;
+  afterwards the player is re-rooted under the clip's final pelvis
+  (Reference relative to the idle's neutral (0.03,-0.02,0.96)/66 deg) and
+  locomotion fades back in. The victim holds the last frame. The game's
+  approach (`positionf` clips) and target rules are not modelled.
+
 ## Player control (viewer `--play`)
 
 - `--play` drives the first `--character`: WASD relative to the orbit

@@ -1,0 +1,86 @@
+//! Ground kills: a persona's paired `IDxx_G2G_{Front,Back}_Walk2All_Kill_ass`
+//! (assassin) and `..._Killed_Npc` (victim) clips. Both are authored in one
+//! frame, the victim's: at t = 0 the victim's Reference (pelvis) is at the
+//! origin and the assassin's about a metre away. Placing that frame at the
+//! victim, turned so the assassin's start pelvis points at the player, and
+//! playing both clips in it reproduces the kill; the root tracks barely
+//! move, the Reference bones carry the motion.
+
+use acb_anim::pose::Clip;
+use acb_anim::BuiltinTracks;
+use acb_world::Archive;
+use glam::{Mat4, Quat, Vec3};
+
+/// Skeleton id of the `Reference` bone (pelvis in entity space).
+const REFERENCE: u32 = 0x2c52_cbb0;
+
+pub struct KillClips {
+    /// [front, back] x (assassin, victim)
+    pub sets: [(Clip, Clip); 2],
+}
+
+/// Reference bone translation and yaw of a clip at `t` (entity space).
+pub fn reference(clip: &Clip, t: f32) -> Option<(Vec3, f32)> {
+    let frame = t * 60.0;
+    let key = |times: &[u32]| times.iter().rposition(|&k| k as f32 <= frame).unwrap_or(0);
+    let mut pos = None;
+    let mut yaw = None;
+    for (id, tr) in clip.tracks.iter().filter(|(id, _)| *id == REFERENCE) {
+        let _ = id;
+        if let Some(v) = tr.vec3s() {
+            pos = Some(v[key(&tr.times).min(v.len() - 1)]);
+        } else if let Some(q) = tr.quats() {
+            yaw = Some(q[key(&tr.times).min(q.len() - 1)].to_euler(glam::EulerRot::ZXY).0);
+        }
+    }
+    Some((pos?, yaw?))
+}
+
+impl KillClips {
+    /// The kill set of the persona behind builder `builder_name`
+    /// (`AC2MP_ID07_MainTemplate_Player` -> `ID07_...`).
+    pub fn load(archive: &Archive, builtins: Option<&BuiltinTracks>, builder_name: &str) -> Option<KillClips> {
+        let id = builder_name.to_ascii_uppercase().strip_prefix("AC2MP_")?.split('_').next()?.to_string();
+        let uids = archive.uids_of("Animation");
+        let load = |name: String| {
+            uids.iter()
+                .copied()
+                .find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(&name)))
+                .and_then(|u| Clip::load_with(archive, u, builtins))
+        };
+        let set = |side: &str| {
+            Some((
+                load(format!("{id}_G2G_{side}_Walk2All_Kill_ass"))?,
+                load(format!("{id}_G2G_{side}_Walk2All_Killed_Npc"))?,
+            ))
+        };
+        Some(KillClips { sets: [set("Front")?, set("Back")?] })
+    }
+
+    /// The set for an assassin at `from` attacking a victim at `victim`
+    /// facing `victim_yaw` (front when the assassin is ahead of the victim),
+    /// and the shared frame to play it in.
+    pub fn plan(&self, from: Vec3, victim: Vec3, victim_yaw: f32) -> Option<(usize, Mat4)> {
+        let to_ass = (from - victim).truncate();
+        let facing = glam::Vec2::new(-victim_yaw.sin(), victim_yaw.cos());
+        let side = usize::from(to_ass.dot(facing) < 0.0);
+        let (ass, _) = &self.sets[side];
+        let (start, _) = reference(ass, 0.0)?;
+        // turn the frame so the assassin's start pelvis points at `from`
+        let local = start.y.atan2(start.x);
+        let world = to_ass.y.atan2(to_ass.x);
+        Some((side, Mat4::from_rotation_translation(Quat::from_rotation_z(world - local), victim)))
+    }
+}
+
+/// Where to put an entity so that a pose whose Reference is at `pos`/`yaw`
+/// (in `frame`) looks like a neutral stance (Reference at `neutral`): the
+/// hand-off from a kill clip back to locomotion. Returns position and
+/// facing yaw.
+pub fn reroot(frame: Mat4, pos: Vec3, yaw: f32, neutral: (Vec3, f32)) -> (Vec3, f32) {
+    let turn = yaw - neutral.1;
+    let entity_local = pos - Quat::from_rotation_z(turn) * neutral.0;
+    let (_, rot, _) = frame.to_scale_rotation_translation();
+    let frame_yaw = rot.to_euler(glam::EulerRot::ZXY).0;
+    (frame.transform_point3(entity_local.with_z(0.0)), frame_yaw + turn)
+}

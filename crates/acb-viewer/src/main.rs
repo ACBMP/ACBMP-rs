@@ -8,6 +8,7 @@
 
 mod crowd;
 mod ground;
+mod kill;
 mod locomotion;
 
 use std::collections::HashSet;
@@ -25,6 +26,7 @@ use clap::Parser;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use crowd::{Agent, Nav};
 use ground::Ground;
+use kill::KillClips;
 use locomotion::{Clips, Gait, Locomotion};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -74,6 +76,10 @@ struct Args {
     /// --character)
     #[arg(long, default_value_t = 0)]
     crowd: usize,
+    /// Debug paired animations: the first two characters share the first
+    /// spawn's transform and play these two clips (assassin,victim)
+    #[arg(long, value_delimiter = ',')]
+    pair: Vec<String>,
     /// Start the --play character here (world x,y,z) instead of its spawn
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
     at: Option<Vec<f32>>,
@@ -94,6 +100,7 @@ fn parse_keys(list: &str) -> anyhow::Result<HashSet<KeyCode>> {
                 "d" => KeyCode::KeyD,
                 "shift" => KeyCode::ShiftLeft,
                 "space" => KeyCode::Space,
+                "e" => KeyCode::KeyE,
                 other => anyhow::bail!("unknown key {other}"),
             })
         })
@@ -121,6 +128,7 @@ struct Player {
     vel: Vec3,
     /// Height the current fall started at.
     fall_from: f32,
+    kill: Option<PlayerKill>,
     cam_yaw: f32,
     cam_pitch: f32,
     cam_dist: f32,
@@ -164,7 +172,30 @@ struct Actor {
     cloth: Vec<ClothSim>,
     /// Navmesh wanderer (--crowd) instead of the looping clip.
     agent: Option<Agent>,
+    /// A clip played once in a given frame and held at its end (--pair,
+    /// kill victims) instead of everything else.
+    scripted: Option<Scripted>,
 }
+
+struct Scripted {
+    clip: Clip,
+    frame: Mat4,
+    /// Simulated time it started at.
+    start: f32,
+}
+
+/// The player's kill in progress.
+struct PlayerKill {
+    side: usize,
+    frame: Mat4,
+    t: f32,
+    /// Pose and placement it blends in from.
+    from_pose: Vec<(Vec3, Quat)>,
+    from_world: Mat4,
+}
+
+/// Blend-in time of a kill from wherever the player was.
+const KILL_BLEND: f32 = 0.25;
 
 /// --crowd: the navmesh and the clips wanderers blend.
 struct Crowd {
@@ -226,6 +257,7 @@ struct Gfx {
     loco: Option<Clips>,
     ground: Option<Ground>,
     crowd: Option<Crowd>,
+    kills: Option<KillClips>,
 }
 
 struct App {
@@ -241,6 +273,8 @@ struct App {
     start: Instant,
     /// `--input` events not yet applied.
     script: Vec<(f32, HashSet<KeyCode>)>,
+    /// Kill clips between loading and `Gfx`.
+    kills: Option<KillClips>,
     /// Simulated seconds since start (fixed 60 Hz steps in --capture runs).
     sim_time: f32,
 }
@@ -315,7 +349,8 @@ impl App {
                 p.pos.z = z;
             }
         }
-        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip, loco, ground, crowd });
+        let kills = self.kills.take();
+        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip, loco, ground, crowd, kills });
         self.start = Instant::now();
         self.sim_time = 0.0;
         Ok(())
@@ -358,6 +393,10 @@ impl App {
         } else {
             None
         };
+        self.kills = if self.args.play { KillClips::load(archive, builtins.as_ref(), &self.args.characters[0]) } else { None };
+        if self.args.play && self.kills.is_none() {
+            eprintln!("{}: no ground kill clips", self.args.characters[0]);
+        }
         let spawns: Vec<_> = archive.player_spawns().into_iter().filter(|s| s.kind == 0).collect();
         let count = self.args.count.unwrap_or(characters.len()).min(spawns.len());
         let mut actors = Vec::new();
@@ -374,9 +413,28 @@ impl App {
             };
             let phase = i as f32 * 0.37;
             let cloth = vec![ClothSim::default(); character.cloths.len()];
-            actors.push(Actor { character, handles, spawn, entity: spawn, model, phase, clip_time: phase, epoch: 0, cloth, agent: None });
+            actors.push(Actor { character, handles, spawn, entity: spawn, model, phase, clip_time: phase, epoch: 0, cloth, agent: None, scripted: None });
         }
         eprintln!("{} characters on {} standard spawns", actors.len(), spawns.len());
+        if std::env::var_os("ACBMP_TRACE").is_some() {
+            for (i, a) in actors.iter().enumerate() {
+                let p = a.spawn.w_axis;
+                let f = a.spawn.y_axis;
+                eprintln!("actor {i} at {:.2} {:.2} {:.2} facing {:.2} {:.2}", p.x, p.y, p.z, f.x, f.y);
+            }
+        }
+        if let [ass, victim] = self.args.pair.as_slice() {
+            for (i, name) in [ass, victim].into_iter().enumerate() {
+                let clip = by_name("Animation", name)
+                    .and_then(|a| Clip::load_with(archive, a, builtins.as_ref()))
+                    .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))?;
+                let shared = actors[0].spawn;
+                if let Some(a) = actors.get_mut(i) {
+                    (a.spawn, a.entity, a.model) = (shared, shared, Mat4::IDENTITY);
+                    a.scripted = Some(Scripted { clip, frame: shared, start: 0.0 });
+                }
+            }
+        }
         let crowd = if self.args.crowd > 0 {
             let load = |name: &str| {
                 by_name("Animation", name)
@@ -396,7 +454,7 @@ impl App {
                 let agent = Agent::new(&crowd.nav, i as u64 + 1);
                 let entity = agent.entity();
                 let cloth = vec![ClothSim::default(); character.cloths.len()];
-                actors.push(Actor { character, handles, spawn: entity, entity, model, phase: 0.0, clip_time: 0.0, epoch: 0, cloth, agent: Some(agent) });
+                actors.push(Actor { character, handles, spawn: entity, entity, model, phase: 0.0, clip_time: 0.0, epoch: 0, cloth, agent: Some(agent), scripted: None });
             }
             eprintln!(
                 "crowd: {} NPCs, {} lanes, {} navmesh triangles",
@@ -429,6 +487,7 @@ impl App {
                     loco: Locomotion::new(clips, &actor.character.skeleton),
                     vel: Vec3::ZERO,
                     fall_from: at.z,
+                    kill: None,
                     cam_yaw: self.fly.yaw,
                     cam_pitch: -0.25,
                     cam_dist: 3.5,
@@ -467,6 +526,14 @@ impl App {
                 pose_actor(&mut g.scene, &g.renderer, a, &globals, world, dt);
                 continue;
             }
+            if let Some(sc) = &a.scripted {
+                let ct = (t - sc.start).clamp(0.0, sc.clip.length);
+                let pose = sc.clip.sample(&c.skeleton, ct);
+                let globals = c.skeleton.globals(&pose);
+                let world = sc.frame * sc.clip.root_motion(ct);
+                pose_actor(&mut g.scene, &g.renderer, a, &globals, world, dt);
+                continue;
+            }
             let local = match &g.clip {
                 Some(clip) if clip.length > 0.0 => {
                     let ct = (t + a.phase) % clip.length;
@@ -495,8 +562,77 @@ impl App {
     /// root motion with wall sliding and floor snapping.
     fn drive_player(&mut self, dt: f32) {
         let (Some(p), Some(g)) = (&mut self.player, &mut self.gfx) else { return };
-        let (Some(clips), Some(actor)) = (&g.loco, g.actors.first()) else { return };
+        let Some(clips) = &g.loco else { return };
+        if g.actors.is_empty() {
+            return;
+        }
         let k = |c| self.keys.contains(&c);
+        // E: kill the nearest person in reach ahead
+        if k(KeyCode::KeyE) && p.kill.is_none() && !p.loco.airborne() {
+            if let Some(kills) = &g.kills {
+                let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+                let victim = g
+                    .actors
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .filter(|(_, a)| a.scripted.is_none())
+                    .map(|(i, a)| (i, a.entity.w_axis.truncate()))
+                    .filter(|(_, v)| {
+                        let d = (*v - p.pos).truncate();
+                        d.length() < 2.5 && (v.z - p.pos.z).abs() < 1.0 && d.normalize_or_zero().dot(fwd) > 0.5
+                    })
+                    .min_by(|a, b| a.1.distance(p.pos).total_cmp(&b.1.distance(p.pos)));
+                if let Some((vi, vpos)) = victim {
+                    let (_, rot, _) = g.actors[vi].entity.to_scale_rotation_translation();
+                    let vyaw = rot.to_euler(glam::EulerRot::ZXY).0;
+                    if let Some((side, frame)) = kills.plan(p.pos, vpos, vyaw) {
+                        let v = &mut g.actors[vi];
+                        v.agent = None;
+                        v.model = Mat4::IDENTITY;
+                        v.scripted = Some(Scripted { clip: kills.sets[side].1.clone(), frame, start: self.sim_time });
+                        let from_pose = p.loco.last_pose().clone();
+                        p.kill = Some(PlayerKill { side, frame, t: 0.0, from_pose, from_world: p.entity() });
+                    }
+                }
+            }
+        }
+        if let (Some(kill), Some(kills)) = (&mut p.kill, &g.kills) {
+            let clip = &kills.sets[kill.side].0;
+            kill.t += dt;
+            let t = kill.t.min(clip.length);
+            let c = g.actors[0].character.clone();
+            let mut pose = clip.sample(&c.skeleton, t);
+            let w = (kill.t / KILL_BLEND).min(1.0);
+            if w < 1.0 {
+                let mut from = kill.from_pose.clone();
+                acb_anim::pose::blend(&mut from, &pose, w);
+                pose = from;
+            }
+            // the camera follows the pelvis; the hand-off re-roots there
+            let neutral = kill::reference(clips.idle(), 0.0).unwrap_or((Vec3::Z * 0.96, 66f32.to_radians()));
+            if let Some((rp, ry)) = kill::reference(clip, t) {
+                let (pos, yaw) = kill::reroot(kill.frame, rp, ry, neutral);
+                p.pos = pos.with_z(kill.frame.w_axis.z);
+                p.yaw = yaw;
+            }
+            let mut world = kill.frame * clip.root_motion(t);
+            if w < 1.0 {
+                let (_, r0, t0) = kill.from_world.to_scale_rotation_translation();
+                let (_, r1, t1) = world.to_scale_rotation_translation();
+                world = Mat4::from_rotation_translation(r0.slerp(r1, w), t0.lerp(t1, w));
+            }
+            let globals = c.skeleton.globals(&pose);
+            if kill.t >= clip.length {
+                p.kill = None;
+                p.loco.resume(pose);
+            }
+            if let Some(actor) = g.actors.first_mut() {
+                pose_actor(&mut g.scene, &g.renderer, actor, &globals, world, dt);
+            }
+            return;
+        }
+        let actor = &g.actors[0];
         let fwd = Vec2::new(p.cam_yaw.cos(), p.cam_yaw.sin());
         let right = Vec2::new(fwd.y, -fwd.x);
         let mut dir = Vec2::ZERO;
@@ -822,6 +958,7 @@ fn main() -> anyhow::Result<()> {
         fps_time: Instant::now(),
         start: Instant::now(),
         sim_time: 0.0,
+        kills: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
