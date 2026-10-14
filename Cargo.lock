@@ -45,12 +45,14 @@ dependencies = [
 name = "acb-viewer"
 version = "0.1.0"
 dependencies = [
+ "acb-anim",
  "acb-render",
  "acb-world",
  "anvil-schema",
  "anyhow",
  "clap",
  "glam",
+ "png",
  "pollster",
  "winit",
 ]

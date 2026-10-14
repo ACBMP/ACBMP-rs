@@ -13,9 +13,11 @@ path = "src/main.rs"
 [dependencies]
 acb-world.workspace = true
 acb-render.workspace = true
+acb-anim.workspace = true
 anvil-schema.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 winit = "0.30"
 glam = "0.34.1"
+png = "0.18.1"
 pollster = "1.0.1"

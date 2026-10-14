@@ -1064,6 +1064,16 @@ fn charshot(
         let unmapped = p.mesh.bones.iter().zip(&p.bone_map).filter(|(_, m)| m.is_none()).count();
         let mats: Vec<String> = p.materials.iter().map(|m| name(m.0)).collect();
         println!("  {} {} verts, {} bones ({} unmapped) {:?}", name(p.mesh_uid), p.mesh.positions.len(), p.mesh.bones.len(), unmapped, mats);
+        if std::env::var_os("ACBMP_DEBUG_BONES").is_some() {
+            let n = p.mesh.positions.len() as f32;
+            let c = p.mesh.positions.iter().fold([0.0f32; 3], |a, v| [a[0] + v[0] / n, a[1] + v[1] / n, a[2] + v[2] / n]);
+            println!("    mesh-space centroid {c:.3?}");
+            let band = |lo: f32, hi: f32| {
+                let ys: Vec<f32> = p.mesh.positions.iter().filter(|v| v[2] >= lo && v[2] < hi).map(|v| v[1]).collect();
+                (ys.len(), ys.iter().cloned().fold(f32::MAX, f32::min), ys.iter().cloned().fold(f32::MIN, f32::max))
+            };
+            println!("    y range z<0.04 {:.3?}, ankle z 0.10..0.14 {:.3?}", band(-1.0, 0.04), band(0.10, 0.14));
+        }
         // bind-pose skinning should be one rigid transform for every bone
         if std::env::var_os("ACBMP_DEBUG_BONES").is_some() {
             let g = c.skeleton.globals(&c.skeleton.bind_pose());
@@ -1074,6 +1084,28 @@ fn charshot(
         }
     }
 
+    if let (Some(clip), true) = (&clip, std::env::var_os("ACBMP_DEBUG_BONES").is_some()) {
+        let r = archive.root(clip.uid)?;
+        let raw = acb_anim::parse_tracks(r.obj.custom.as_ref().unwrap())?;
+        let ids: Vec<u32> = archive
+            .field(&r.obj, "AnimTrackData")
+            .and_then(anvil_fastload::Value::as_obj)
+            .and_then(|d| archive.field(d, "AnimTrackDataMapping"))
+            .map(|v| v.items().iter().filter_map(|m| m.as_obj()).map(|m| archive.field(m, "TrackID").and_then(|v| v.as_u32()).unwrap_or(0)).collect())
+            .unwrap_or_default();
+        for (id, t) in ids.iter().zip(&raw).filter(|(id, _)| [0, 2, 0x2c52cbb0, 0x21895793].contains(*id)) {
+            match t {
+                acb_anim::Track::Builtin(b) => println!("  track {id:#x}: builtin {b:#x}"),
+                acb_anim::Track::Data(d) => println!(
+                    "  track {id:#x}: {:?} {} keys, first {:?} last {:?}",
+                    d.compression.kind(),
+                    d.times.len(),
+                    d.vec3s().map(|v| v[0]).map(|v| format!("{v:.3?}")).or(d.quats().map(|q| format!("{:.3?}", q[0]))),
+                    d.vec3s().map(|v| v[v.len() - 1]).map(|v| format!("{v:.3?}")).or(d.quats().map(|q| format!("{:.3?}", q[q.len() - 1]))),
+                ),
+            }
+        }
+    }
     let frames = frames.max(1);
     let mut strip = vec![0u8; (size * size * 4) as usize * frames];
     let stride = (size * 4) as usize * frames;
@@ -1083,6 +1115,27 @@ fn charshot(
             None => c.skeleton.bind_pose(),
         };
         let globals = c.skeleton.globals(&local);
+        if std::env::var_os("ACBMP_DEBUG_BONES").is_some() {
+            // model-space extent of the skinned vertices
+            let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+            for (p, skin) in c.parts.iter().zip(c.skin_matrices(&globals)) {
+                for sm in &p.mesh.submeshes {
+                    let range = sm.first_vertex as usize..(sm.first_vertex + sm.vertex_count) as usize;
+                    for v in range.filter(|&v| v < p.mesh.positions.len()) {
+                        let mut out = glam::Vec3::ZERO;
+                        for k in 0..4 {
+                            let slot = p.mesh.joints[v][k] as usize;
+                            let Some(&bone) = sm.palette.get(slot) else { continue };
+                            let m = skin.get(bone as usize).copied().unwrap_or(glam::Mat4::IDENTITY);
+                            out += p.mesh.weights[v][k] * m.transform_point3(glam::Vec3::from(p.mesh.positions[v]));
+                        }
+                        lo = lo.min(out);
+                        hi = hi.max(out);
+                    }
+                }
+            }
+            println!("  frame {f}: skinned extent {lo:.2?} .. {hi:.2?}");
+        }
         for (h, skin) in handles.iter().zip(c.skin_matrices(&globals)) {
             if let Some(h) = h {
                 scene.set_skinned_pose(*h, glam::Mat4::IDENTITY, &skin);

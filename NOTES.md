@@ -179,3 +179,15 @@ its exact byte length and by key continuity (`acbmp animstats`).
 - `acbmp charshot <forge> AC2MP_ID07_MainTemplate_Player out.png --anim
   xx_h_run_hipm_footl --frames 4 --yaw 60` renders through the game shaders
   (`ACBMP_DEBUG_BONES=1` prints bind-pose skin residuals per bone).
+- Placement: skeleton "Human Body" has `Reference` (bone 0) at the origin
+  and bone 1 (ground) 0.964 m below it, turned 90 degrees; walk/run clips
+  drive Reference only through builtin tracks. Meshes are authored feet on
+  z = 0 facing -Y; entities face +Y (`FightUtils::IsInFrontOfPlayer` dots
+  the matrix's Y row). `Character::model_to_entity` = Rz(180) * inverse
+  bind-pose skin residual.
+- Spawns: Entities with `MultiSpawnPlayerComponent{SpawnType, TeamIndex}`
+  (`Archive::player_spawns`); SpawnType 0 = standard.
+- `acb-viewer <map.forge> --character <builder> [...] --count 12 --anim
+  xx_l_walk_hipm_footl` places personas round-robin on standard spawns;
+  `--capture out.png --capture-after 3` writes one frame offscreen and exits
+  (use this instead of desktop screenshots).

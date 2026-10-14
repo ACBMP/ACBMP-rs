@@ -218,6 +218,16 @@ pub struct Instance {
     pub matrix: [f32; 16],
 }
 
+/// A player spawn point.
+#[derive(Debug, Clone)]
+pub struct Spawn {
+    pub entity: u32,
+    pub kind: u32,
+    pub team: u32,
+    /// Same layout as [`Instance::matrix`].
+    pub matrix: [f32; 16],
+}
+
 impl Archive<'_> {
     /// LOD0 mesh behind a Visual's target (a LODSelector or a Mesh).
     pub fn lod0_mesh(&self, mut target: u32) -> Option<u32> {
@@ -269,6 +279,26 @@ impl Archive<'_> {
                         visit(c);
                     }
                 }
+            }
+        }
+        out
+    }
+
+    /// Player spawn points placed by the map (`MultiSpawnPlayerComponent`
+    /// roots): SpawnType 0 standard, 1 tutorial, 2 team, 3 chest. Facing is
+    /// local +Y.
+    pub fn player_spawns(&self) -> Vec<Spawn> {
+        let mut out = Vec::new();
+        for uid in self.uids_of_in("Entity", 0) {
+            let Ok(r) = self.root(uid) else { continue };
+            let Some(Ok(matrix)) = self.field(&r.obj, "GlobalMatrix").and_then(Value::as_f32s).map(<[f32; 16]>::try_from)
+            else {
+                continue;
+            };
+            let comps = self.field(&r.obj, "Components").map(Value::items).unwrap_or_default();
+            for c in comps.iter().filter_map(Value::as_obj).filter(|c| self.is_type(c, "MultiSpawnPlayerComponent")) {
+                let num = |n: &str| self.field(c, n).and_then(Value::as_u32).unwrap_or(0);
+                out.push(Spawn { entity: uid, kind: num("SpawnType"), team: num("TeamIndex"), matrix });
             }
         }
         out

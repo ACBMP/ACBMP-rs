@@ -843,7 +843,9 @@ fn retail_slot(
 /// Renders one frame offscreen and returns tightly packed RGBA8 pixels.
 pub fn render_to_rgba(r: &Renderer, scene: &Scene, camera: &Camera, width: u32, height: u32) -> Vec<u8> {
     let d = r.device();
-    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    // the renderer's own target format (a window's may be BGRA)
+    let format = r.color_format;
+    let bgra = matches!(format, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm);
     let target = |format, usage| {
         d.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -889,6 +891,9 @@ pub fn render_to_rgba(r: &Renderer, scene: &Scene, camera: &Camera, width: u32, 
     let mut out = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height as usize {
         out.extend_from_slice(&data[y * row as usize..y * row as usize + width as usize * 4]);
+    }
+    if bgra {
+        out.chunks_exact_mut(4).for_each(|p| p.swap(0, 2));
     }
     out
 }

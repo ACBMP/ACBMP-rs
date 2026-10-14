@@ -305,6 +305,24 @@ impl Character {
         }
     }
 
+    /// Skeleton model space -> entity space. The skeleton's `Reference` root
+    /// sits at pelvis height (animations drive it through builtin tracks we
+    /// do not decode yet); bone 1 is the ground. Meshes are authored with feet
+    /// on z = 0 facing -Y, and bind-pose skinning is the same rigid transform
+    /// for every bone, so its inverse lands the model in mesh space. Entities
+    /// face +Y (`FightUtils::IsInFrontOfPlayer` tests the matrix's Y row), so
+    /// the mesh is turned around on top of that.
+    pub fn model_to_entity(&self) -> Mat4 {
+        let globals = self.skeleton.globals(&self.skeleton.bind_pose());
+        let model_to_mesh = self
+            .parts
+            .iter()
+            .flat_map(|p| p.bone_map.iter().zip(&p.inverse_bind))
+            .find_map(|(b, inv)| Some(globals.get((*b)?)?.mul_mat4(inv).inverse()))
+            .unwrap_or(Mat4::IDENTITY);
+        Mat4::from_rotation_z(std::f32::consts::PI) * model_to_mesh
+    }
+
     /// Skinning matrices (mesh space -> model space) of every mesh bone of
     /// every part, for skeleton bone matrices `globals`.
     pub fn skin_matrices(&self, globals: &[Mat4]) -> Vec<Vec<Mat4>> {

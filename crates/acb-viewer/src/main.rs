@@ -1,16 +1,20 @@
 //! Fly-through viewer for ACB maps.
 //!
 //! WASD move, Space/C up/down, hold right mouse to look, Shift for speed,
-//! mouse wheel changes the base speed, Escape quits.
+//! mouse wheel changes the base speed, Escape quits. `--character` puts
+//! MP personas on the map's standard player spawns, playing `--anim`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use acb_anim::character::Character;
+use acb_anim::pose::Clip;
 use acb_render::{wgpu, Camera, Renderer, Scene, DEPTH_FORMAT};
 use clap::Parser;
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -25,6 +29,29 @@ struct Args {
     /// Directory holding ACB_MP.schema and ACR_MP.schema
     #[arg(long, env = "ACBMP_SCHEMAS")]
     schemas: PathBuf,
+    /// EntityBuilder or Entity to place on the player spawns, round-robin
+    /// (repeatable), e.g. AC2MP_ID07_MainTemplate_Player
+    #[arg(long = "character")]
+    characters: Vec<String>,
+    /// How many spawns get a character (default: one per --character)
+    #[arg(long)]
+    count: Option<usize>,
+    /// Animation the characters loop
+    #[arg(long, default_value = "xx_l_walk_hipm_footl")]
+    anim: String,
+    /// Render one frame to this PNG after --capture-after seconds and quit
+    #[arg(long)]
+    capture: Option<PathBuf>,
+    #[arg(long, default_value_t = 3.0)]
+    capture_after: f32,
+}
+
+/// A character placed in the scene.
+struct Actor {
+    character: Rc<Character>,
+    handles: Vec<Option<usize>>,
+    world: Mat4,
+    phase: f32,
 }
 
 struct Fly {
@@ -47,6 +74,8 @@ struct Gfx {
     depth: wgpu::TextureView,
     renderer: Renderer,
     scene: Scene,
+    actors: Vec<Actor>,
+    clip: Option<Clip>,
 }
 
 struct App {
@@ -58,6 +87,7 @@ struct App {
     last: Instant,
     frames: u32,
     fps_time: Instant,
+    start: Instant,
 }
 
 fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
@@ -111,13 +141,80 @@ impl App {
         let t0 = Instant::now();
         let schema = Box::leak(Box::new(acb_world::load_schema(&self.args.schemas)?));
         let archive = acb_world::open_map(&self.args.map, schema)?;
-        let (scene, s) = Scene::load(&renderer, &archive, acb_render::ShadingMode::Retail)?;
+        let (mut scene, s) = Scene::load(&renderer, &archive, acb_render::ShadingMode::Retail)?;
         eprintln!(
             "{} meshes, {} instances, {} triangles, {} textures, loaded in {:.1}s",
             s.meshes, s.instances, s.triangles, s.textures, t0.elapsed().as_secs_f64()
         );
-        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene });
+        let (actors, clip) = self.place_characters(&renderer, &archive, &mut scene)?;
+        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip });
+        self.start = Instant::now();
         Ok(())
+    }
+
+    fn place_characters(
+        &mut self,
+        r: &Renderer,
+        archive: &acb_world::Archive,
+        scene: &mut Scene,
+    ) -> anyhow::Result<(Vec<Actor>, Option<Clip>)> {
+        if self.args.characters.is_empty() {
+            return Ok((Vec::new(), None));
+        }
+        let by_name = |ty: &str, name: &str| {
+            archive.uids_of(ty).into_iter().find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(name)))
+        };
+        let mut characters = Vec::new();
+        for name in &self.args.characters {
+            let c = match by_name("EntityBuilder", name) {
+                Some(b) => Character::load_built(archive, b),
+                None => by_name("Entity", name).and_then(|e| Character::load(archive, e)),
+            };
+            characters.push(Rc::new(c.ok_or_else(|| anyhow::anyhow!("{name}: no such character"))?));
+        }
+        let clip = by_name("Animation", &self.args.anim).and_then(|a| Clip::load(archive, a));
+        if clip.is_none() {
+            eprintln!("{}: animation not found, bind pose", self.args.anim);
+        }
+        let spawns: Vec<_> = archive.player_spawns().into_iter().filter(|s| s.kind == 0).collect();
+        let count = self.args.count.unwrap_or(characters.len()).min(spawns.len());
+        let mut actors = Vec::new();
+        for (i, spawn) in spawns.iter().take(count).enumerate() {
+            let character = characters[i % characters.len()].clone();
+            let handles = character.parts.iter().map(|p| scene.add_skinned(r, archive, &p.mesh, &p.materials)).collect();
+            let world = Mat4::from_cols_array(&spawn.matrix) * character.model_to_entity();
+            actors.push(Actor { character, handles, world, phase: i as f32 * 0.37 });
+        }
+        eprintln!("{} characters on {} standard spawns", actors.len(), spawns.len());
+        // start behind the first one, looking along its facing (+Y)
+        if let Some(spawn) = spawns.first().filter(|_| !actors.is_empty()) {
+            let m = Mat4::from_cols_array(&spawn.matrix);
+            let facing = m.y_axis.truncate().normalize_or_zero();
+            let at = m.w_axis.truncate();
+            self.fly.pos = at - facing * 4.0 + Vec3::Z * 1.8;
+            self.fly.yaw = facing.y.atan2(facing.x);
+            self.fly.pitch = -0.15;
+            self.fly.speed = 4.0;
+        }
+        Ok((actors, clip))
+    }
+
+    fn animate(&mut self) {
+        let Some(g) = &mut self.gfx else { return };
+        let t = self.start.elapsed().as_secs_f32();
+        for a in &g.actors {
+            let c = &a.character;
+            let local = match &g.clip {
+                Some(clip) if clip.length > 0.0 => clip.sample(&c.skeleton, (t + a.phase) % clip.length),
+                _ => c.skeleton.bind_pose(),
+            };
+            let globals = c.skeleton.globals(&local);
+            for (h, skin) in a.handles.iter().zip(c.skin_matrices(&globals)) {
+                if let Some(h) = h {
+                    g.scene.set_skinned_pose(*h, a.world, &skin);
+                }
+            }
+        }
     }
 
     fn update(&mut self, dt: f32) {
@@ -151,6 +248,16 @@ impl App {
             fov_y: 60f32.to_radians(),
             aspect: g.config.width as f32 / g.config.height as f32,
         };
+        if let Some(path) = &self.args.capture {
+            if self.start.elapsed().as_secs_f32() >= self.args.capture_after {
+                let rgba = acb_render::render_to_rgba(&g.renderer, &g.scene, &camera, g.config.width, g.config.height);
+                if let Err(e) = write_png(path, g.config.width, g.config.height, &rgba) {
+                    eprintln!("capture failed: {e:#}");
+                }
+                eprintln!("wrote {}", path.display());
+                std::process::exit(0);
+            }
+        }
         let mut enc = g.renderer.device().create_command_encoder(&Default::default());
         g.renderer.render(&mut enc, &view, &g.depth, &g.scene, &camera);
         g.renderer.queue().submit([enc.finish()]);
@@ -230,6 +337,7 @@ impl ApplicationHandler for App {
                 let dt = self.last.elapsed().as_secs_f32().min(0.1);
                 self.last = Instant::now();
                 self.update(dt);
+                self.animate();
                 self.draw();
             }
             _ => {}
@@ -252,6 +360,14 @@ impl ApplicationHandler for App {
     }
 }
 
+fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(path)?), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(rgba)?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let event_loop = EventLoop::new()?;
@@ -264,6 +380,7 @@ fn main() -> anyhow::Result<()> {
         last: Instant::now(),
         frames: 0,
         fps_time: Instant::now(),
+        start: Instant::now(),
     };
     event_loop.run_app(&mut app)?;
     Ok(())
