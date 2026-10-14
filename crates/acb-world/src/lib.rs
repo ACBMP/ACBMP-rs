@@ -17,9 +17,11 @@ use anvil_schema::Schema;
 
 pub mod mesh;
 pub mod shading;
+pub mod skin;
 pub mod texture;
 
 pub use mesh::StaticMesh;
+pub use skin::{MeshBone, SkinnedMesh, SkinnedSubmesh};
 pub use shading::{MaterialParams, ParamValue, Permutation, ShaderParam, TemplateShaders};
 pub use texture::{PixelFormat, Texture};
 

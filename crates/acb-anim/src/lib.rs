@@ -360,4 +360,5 @@ impl RawTrack {
     }
 }
 
+pub mod character;
 pub mod pose;

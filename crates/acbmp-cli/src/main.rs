@@ -63,6 +63,29 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         top: usize,
     },
+    /// Load a character Entity (skinned Visuals + skeletons) and check its bind pose
+    Character {
+        forge: PathBuf,
+        name: String,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Write the CPU-skinned character as Wavefront OBJ
+        #[arg(long)]
+        obj: Option<PathBuf>,
+        /// Pose with this animation (name or substring)
+        #[arg(long)]
+        anim: Option<String>,
+        /// Time into the animation, seconds
+        #[arg(long, default_value_t = 0.0)]
+        t: f32,
+    },
+    /// Decode a skinned (format 0) mesh and print layout statistics
+    Skin {
+        forge: PathBuf,
+        name: String,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+    },
     /// Print the top-level fields of root objects whose name contains a string
     Dump {
         forge: PathBuf,
@@ -140,6 +163,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::Animstats { forge, schemas } => animstats(forge, schemas)?,
         Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
         Cmd::Shaders { forge, name, schemas, top, fields, disasm } => shaders(forge, &name, schemas, top, fields, disasm)?,
+        Cmd::Character { forge, name, schemas, obj, anim, t } => character(forge, &name, schemas, obj, anim.as_deref(), t)?,
+        Cmd::Skin { forge, name, schemas } => skin(forge, &name, schemas)?,
         Cmd::Dump { forge, name, schemas, depth } => dump(forge, &name, schemas, depth)?,
         Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
@@ -749,4 +774,209 @@ fn parse_u32(s: &str) -> Result<u32, String> {
         None => s.parse(),
     }
     .map_err(|e| e.to_string())
+}
+
+fn skin(forge: PathBuf, needle: &str, schemas: PathBuf) -> anyhow::Result<()> {
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let uid = archive
+        .uids_of("Mesh")
+        .into_iter()
+        .find(|u| archive.loc(*u).is_some_and(|l| l.name == needle))
+        .ok_or_else(|| anyhow::anyhow!("no mesh named {needle}"))?;
+    let m = archive.skinned_mesh(uid)?.ok_or_else(|| anyhow::anyhow!("not a skinned mesh"))?;
+    println!("{} vertices, {} triangles, {} bones", m.positions.len(), m.indices.len() / 3, m.bones.len());
+    let (lo, hi) = m.positions.iter().fold(([f32::MAX; 3], [f32::MIN; 3]), |(lo, hi), p| {
+        (std::array::from_fn(|i| lo[i].min(p[i])), std::array::from_fn(|i| hi[i].max(p[i])))
+    });
+    println!("bounds {lo:?} .. {hi:?}");
+    let nlen: f32 = m.normals.iter().map(|n| (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()).sum::<f32>()
+        / m.normals.len() as f32;
+    let wsum: Vec<u32> = m.raw.chunks_exact(m.stride).map(|v| v[28..32].iter().map(|&b| b as u32).sum()).collect();
+    println!(
+        "mean |normal| {nlen:.3}; weight byte sums min {} max {}",
+        wsum.iter().min().unwrap(),
+        wsum.iter().max().unwrap()
+    );
+    for (i, s) in m.submeshes.iter().enumerate() {
+        let idx = &m.indices[s.first_index as usize..(s.first_index + s.index_count) as usize];
+        let (imin, imax) = (idx.iter().min().copied().unwrap_or(0), idx.iter().max().copied().unwrap_or(0));
+        let vr = s.first_vertex as usize..(s.first_vertex + s.vertex_count) as usize;
+        let jmax = m.joints[vr.clone()].iter().flat_map(|j| j.iter().copied()).max().unwrap_or(0);
+        println!(
+            "  sub {i}: tris {} idx {imin}..={imax} verts {:?} max joint {jmax} palette {} {:?} mat {}",
+            s.index_count / 3,
+            vr,
+            s.palette.len(),
+            &s.palette,
+            archive.loc(s.material).map(|l| l.name.as_str()).unwrap_or("?")
+        );
+    }
+    for v in m.raw.chunks_exact(m.stride).take(6) {
+        println!("  {}", v.chunks(4).map(|c| c.iter().map(|b| format!("{b:02x}")).collect::<String>()).collect::<Vec<_>>().join(" "));
+    }
+    let ids: std::collections::HashSet<u32> = m.bones.iter().map(|b| b.id).collect();
+    let skel = archive
+        .uids_of("Skeleton")
+        .into_iter()
+        .filter_map(|s| acb_anim::pose::Skeleton::load(&archive, s))
+        .max_by_key(|s| s.bones.iter().filter(|b| ids.contains(&b.id)).count());
+    if let Some(skel) = skel {
+        let hit = skel.bones.iter().filter(|b| ids.contains(&b.id)).count();
+        println!("skeleton {} covers {hit}/{} mesh bones", archive.loc(skel.uid).map(|l| l.name.as_str()).unwrap_or("?"), ids.len());
+        let g = skel.globals(&skel.bind_pose());
+        if std::env::var_os("ACBMP_DUMP_BIND").is_some() {
+            for b in &m.bones {
+                let Some(si) = skel.bones.iter().position(|sb| sb.id == b.id) else { continue };
+                let (inv, gl) = (g[si].inverse().w_axis, g[si].w_axis);
+                println!("BIND {} {} {} {} {} {} {} {}", b.packed.1, b.packed.2, inv.x, inv.y, inv.z, gl.x, gl.y, gl.z);
+            }
+        }
+        for b in m.bones.iter().take(8) {
+            let Some(si) = skel.bones.iter().position(|sb| sb.id == b.id) else { continue };
+            let inv = g[si].inverse();
+            let j: Vec<f32> = b.packed.0[..3].iter().map(|&v| v as i16 as f32 / 32767.0).collect();
+            let k: Vec<f32> = b.packed.0[3..].iter().map(|&v| v as i16 as f32 / 32767.0).collect();
+            println!("  bone {:#010x} J {j:.3?} K {k:.3?} T {:#010x} {:#010x}", b.id, b.packed.1, b.packed.2);
+            println!("     inv cols x {:.3} y {:.3} z {:.3} t {:.4}", inv.x_axis.truncate(), inv.y_axis.truncate(), inv.z_axis.truncate(), inv.w_axis.truncate());
+        }
+    }
+    Ok(())
+}
+
+fn find_uid(archive: &acb_world::Archive, type_name: &str, needle: &str) -> anyhow::Result<u32> {
+    let uids = archive.uids_of(type_name);
+    uids.iter()
+        .find(|u| archive.loc(**u).is_some_and(|l| l.name == needle))
+        .or_else(|| uids.iter().find(|u| archive.loc(**u).is_some_and(|l| l.name.contains(needle))))
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("no {type_name} matching {needle}"))
+}
+
+fn character(forge: PathBuf, needle: &str, schemas: PathBuf, obj: Option<PathBuf>, anim: Option<&str>, t: f32) -> anyhow::Result<()> {
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let name = |u: u32| archive.loc(u).map(|l| l.name.clone()).unwrap_or_else(|| format!("{u:#010x}"));
+    let uid = find_uid(&archive, "Entity", needle)?;
+    let c = acb_anim::character::Character::load(&archive, uid).ok_or_else(|| anyhow::anyhow!("not a character"))?;
+    println!("{}: {} skeleton bones, {} skinned parts", name(uid), c.skeleton.bones.len(), c.parts.len());
+    let globals = c.skeleton.globals(&c.skeleton.bind_pose());
+    let skins = c.skin_matrices(&globals);
+    for (p, skin) in c.parts.iter().zip(&skins) {
+        let unmapped = p.bone_map.iter().filter(|b| b.is_none()).count();
+        // bind pose: skinned position minus the authored one turned into
+        // skeleton space (+90 degrees about Z); constant per rigid part
+        let mut sum = glam::Vec3::ZERO;
+        let mut dev = Vec::new();
+        for (vi, pos) in p.mesh.positions.iter().enumerate() {
+            let Some(sub) = p.mesh.submeshes.iter().find(|s| (s.first_vertex..s.first_vertex + s.vertex_count).contains(&(vi as u32))) else { continue };
+            let v = glam::Vec3::from(*pos).extend(1.0);
+            let mut out = glam::Vec4::ZERO;
+            for k in 0..4 {
+                let w = p.mesh.weights[vi][k];
+                if w > 0.0 {
+                    let mb = sub.palette.get(p.mesh.joints[vi][k] as usize).copied().unwrap_or(0) as usize;
+                    out += w * (skin[mb] * v);
+                }
+            }
+            let d = out.truncate() - glam::Quat::from_rotation_z(std::f32::consts::FRAC_PI_2) * glam::Vec3::from(*pos);
+            sum += d;
+            dev.push(d);
+        }
+        let mean = sum / dev.len().max(1) as f32;
+        let spread = dev.iter().map(|d| (*d - mean).length()).fold(0.0f32, f32::max);
+        println!(
+            "  {} : {} verts, {} bones ({unmapped} unmapped), mats [{}], bind offset {:.4} spread {:.4}",
+            name(p.mesh_uid),
+            p.mesh.positions.len(),
+            p.mesh.bones.len(),
+            p.materials.iter().map(|m| name(*m)).collect::<Vec<_>>().join(", "),
+            mean,
+            spread
+        );
+    }
+    if std::env::var_os("ACBMP_DEBUG_PALETTE").is_some() {
+        // distance from each vertex to its heaviest bone's bind origin, via the palette vs direct
+        for p in &c.parts {
+            let origin: Vec<glam::Vec3> = p.inverse_bind.iter().map(|m| m.inverse().w_axis.truncate()).collect();
+            let (mut dp, mut dd, mut n) = (0.0f32, 0.0f32, 0);
+            for (vi, pos) in p.mesh.positions.iter().enumerate() {
+                let Some(sub) = p.mesh.submeshes.iter().find(|s| (s.first_vertex..s.first_vertex + s.vertex_count).contains(&(vi as u32))) else { continue };
+                let k = (0..4).max_by(|a, b| p.mesh.weights[vi][*a].total_cmp(&p.mesh.weights[vi][*b])).unwrap();
+                let j = p.mesh.joints[vi][k] as usize;
+                let v = glam::Vec3::from(*pos);
+                if let Some(&mb) = sub.palette.get(j) { dp += (origin[mb as usize] - v).length(); }
+                if let Some(o) = origin.get(j) { dd += (*o - v).length(); }
+                n += 1;
+            }
+            println!("  {} palette {:.3} direct {:.3}", name(p.mesh_uid), dp / n as f32, dd / n as f32);
+            if p.mesh.bones.len() > 40 {
+                let mut acc = vec![(glam::Vec3::ZERO, 0usize); p.mesh.bones.len()];
+                for (vi, pos) in p.mesh.positions.iter().enumerate() {
+                    let Some(sub) = p.mesh.submeshes.iter().find(|s| (s.first_vertex..s.first_vertex + s.vertex_count).contains(&(vi as u32))) else { continue };
+                    let k = (0..4).max_by(|a, b| p.mesh.weights[vi][*a].total_cmp(&p.mesh.weights[vi][*b])).unwrap();
+                    if let Some(&mb) = sub.palette.get(p.mesh.joints[vi][k] as usize) {
+                        acc[mb as usize].0 += glam::Vec3::from(*pos);
+                        acc[mb as usize].1 += 1;
+                    }
+                }
+                for (i, (sum, n)) in acc.iter().enumerate() {
+                    if *n > 0 {
+                        println!("    mb {i:2} -> sk {:?} origin {:.2} centroid {:.2} n {n}", p.bone_map[i], origin[i], *sum / *n as f32);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(out) = obj {
+        use std::io::Write;
+        let local = match anim {
+            Some(a) => {
+                let clip = acb_anim::pose::Clip::load(&archive, find_uid(&archive, "Animation", a)?)
+                    .ok_or_else(|| anyhow::anyhow!("animation did not decode"))?;
+                println!("posed with {} at {t:.2}s of {:.2}s ({} bones animated)", name(clip.uid), clip.length, clip.bone_coverage(&c.skeleton));
+                let posed = clip.sample(&c.skeleton, t);
+                posed
+            }
+            None => c.skeleton.bind_pose(),
+        };
+        let globals = c.skeleton.globals(&local);
+        let skins = c.skin_matrices(&globals);
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&out)?);
+        let mut base = 1usize;
+        if std::env::var_os("ACBMP_OBJ_JOINTS").is_some() {
+            // a thin prism per bone, parent -> child
+            writeln!(w, "o joints")?;
+            for (i, b) in c.skeleton.bones.iter().enumerate() {
+                let Some(p) = b.parent else { continue };
+                let (a, e) = (globals[p].w_axis.truncate(), globals[i].w_axis.truncate());
+                let d = 0.008;
+                for o in [glam::Vec3::X * d, glam::Vec3::Y * d, glam::Vec3::Z * d] {
+                    writeln!(w, "v {} {} {}\nv {} {} {}\nv {} {} {}", a.x - o.x, a.y - o.y, a.z - o.z, a.x + o.x, a.y + o.y, a.z + o.z, e.x, e.y, e.z)?;
+                    writeln!(w, "f {} {} {}", base, base + 1, base + 2)?;
+                    base += 3;
+                }
+            }
+        }
+        for (p, skin) in c.parts.iter().zip(&skins) {
+            writeln!(w, "o {}", name(p.mesh_uid))?;
+            for (vi, pos) in p.mesh.positions.iter().enumerate() {
+                let sub = p.mesh.submeshes.iter().find(|s| (s.first_vertex..s.first_vertex + s.vertex_count).contains(&(vi as u32)));
+                let v = glam::Vec3::from(*pos).extend(1.0);
+                let mut o = glam::Vec4::ZERO;
+                for k in 0..4 {
+                    let wt = p.mesh.weights[vi][k];
+                    let mb = sub.and_then(|s| s.palette.get(p.mesh.joints[vi][k] as usize)).copied().unwrap_or(0) as usize;
+                    o += wt * (skin[mb] * v);
+                }
+                writeln!(w, "v {} {} {}", o.x, o.y, o.z)?;
+            }
+            for t in p.mesh.indices.chunks_exact(3) {
+                writeln!(w, "f {} {} {}", base + t[0] as usize, base + t[1] as usize, base + t[2] as usize)?;
+            }
+            base += p.mesh.positions.len();
+        }
+        println!("wrote {}", out.display());
+    }
+    Ok(())
 }

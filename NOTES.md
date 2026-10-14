@@ -123,3 +123,28 @@ its exact byte length and by key continuity (`acbmp animstats`).
 - Keys are at 60 fps (`max key frame / Length` = 60.00 for every animation).
 - `AnimTrackDataMapping.TrackID` (one per track, same order) equals a
   skeleton `Bone.BoneID` for 91% of tracks; others are 0 and small ints.
+
+## Skinned meshes and characters
+
+- Vertex format 0, 32 bytes: short4n position (xyz x 10 m) | ubyte4 normal,
+  tangent, binormal ((b - 127) / 127) | short2n uv (x 16) | ubyte4 palette
+  slots | ubyte4n weights (sum 255). From the skinned VS (CHR_Detail_DoNotUse
+  key 1): `a0 = BlendIndices * 3`, float4x3 bones at `c[a0 + 120]`, 42 slots.
+- Primitive i draws with `CompiledMesh.InstancingData[i]`
+  (`HwBoneToMeshBoneTable`: palette slot -> `Mesh.Bones` index) and
+  `CompiledMeshMaterials[i]`. `SubMeshIndex` is not the primitive index.
+- `MeshBone.PackedInitialMatrixInverse` (u16 J0..K2, u32 TransA, TransB):
+  J, K = i16 / 32767; inverse-bind rotation columns (J x K, J, K);
+  translation = three signed 21-bit fields of TransA | TransB << 32, / 65536.
+  Mesh space is skeleton model space turned +90 degrees about Z. Checked by
+  bone bind origins landing on the centroids of the vertices they carry
+  (`ACBMP_DEBUG_PALETTE=1 acbmp character`); a fit against skeleton bind
+  alone cannot see that rotation.
+- Entity (e.g. `UA_Altair`): `Visual.Object` = Mesh (or LODSelector, not
+  handled yet), `Visual.InstanceData.MaterialInfos` and the
+  `MaterialOverrider` swap `*_Empty` materials. `SkeletonComponent` =
+  `MainSkeleton` + `AddonSkeletons`; addon bones with an existing BoneID are
+  that bone. Two MA_Ezio_LOD0 bones (eyes) are in no listed skeleton; they
+  follow the nearest mapped bone.
+- `acbmp character <forge> UA_Altair --obj out.obj --anim <clip> --t <s>`
+  writes the CPU-skinned pose; verified on a walk and an air assassination.
