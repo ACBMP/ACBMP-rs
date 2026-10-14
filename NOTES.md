@@ -290,6 +290,16 @@ its exact byte length and by key continuity (`acbmp animstats`).
   a 2 m grid; normals with |nz| >= 0.6 are floor, the rest walls. Walls are swept at 0.55 m and 1.3 m (radius 0.3,
   one slide), floor snaps from 0.6 m above (step height); moves onto no
   floor are refused. No falling, jumping or climbing.
+- Falling: a move whose floor is more than a step (0.6 m) below starts a
+  fall with the locomotion velocity; gravity 10 m/s^2, walls still slide.
+  Pose `xx_l_walklowfall_footl_tr_fall` / `xx_h_runlowfall_footl_tr_fall`
+  held on its last frame (its root track, 3-3.3 m down, is ignored). On
+  touchdown `xx_h_landing_forward_{soft,hard}_footl_tr_h_{wait_footl,
+  jog_footr}_a` (< 3 m, < 6 m) or `xx_h_landing_damage_footl_tr_h_{wait_footr,
+  jog_footl}`, by whether input is held. Thresholds are guesses.
+  `--at x,y,z` starts the player elsewhere; `ACBMP_TRACE=1` prints its
+  state four times a simulated second. Roof at (-31.3, 42.0, 7.5) next to
+  the San Donato spawn plaza drops 4.5 m.
 - Open: start transitions (`xx_h_wait_foot*_tr_*`), run turns, the real
   HumanGround state machine.
 - `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and

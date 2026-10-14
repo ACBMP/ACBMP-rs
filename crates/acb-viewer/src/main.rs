@@ -68,6 +68,9 @@ struct Args {
     /// space)
     #[arg(long, value_delimiter = ',')]
     hold: Vec<String>,
+    /// Start the --play character here (world x,y,z) instead of its spawn
+    #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
+    at: Option<Vec<f32>>,
     /// Scripted keys over simulated time, e.g. "0=w,shift 2= 2.5=d": from
     /// each time on exactly these keys are held (replaces --hold)
     #[arg(long)]
@@ -108,6 +111,10 @@ struct Player {
     /// Facing: entity +Y is (-sin yaw, cos yaw).
     yaw: f32,
     loco: Locomotion,
+    /// Velocity while airborne, m/s.
+    vel: Vec3,
+    /// Height the current fall started at.
+    fall_from: f32,
     cam_yaw: f32,
     cam_pitch: f32,
     cam_dist: f32,
@@ -365,10 +372,16 @@ impl App {
             self.fly.speed = 4.0;
             if let (Some(clips), Some(actor)) = (&loco, actors.first()) {
                 let yaw = (-facing.x).atan2(facing.y);
+                let at = match self.args.at.as_deref() {
+                    Some([x, y, z]) => Vec3::new(*x, *y, *z),
+                    _ => at,
+                };
                 self.player = Some(Player {
                     pos: at,
                     yaw,
                     loco: Locomotion::new(clips, &actor.character.skeleton),
+                    vel: Vec3::ZERO,
+                    fall_from: at.z,
                     cam_yaw: self.fly.yaw,
                     cam_pitch: -0.25,
                     cam_dist: 3.5,
@@ -437,18 +450,51 @@ impl App {
         let step = p.loco.update(clips, &actor.character.skeleton, dir.normalize_or_zero(), gait, &mut p.yaw, dt);
         let delta = step.delta;
         if let Some(ground) = &g.ground {
-            let to = move_on(ground, p.pos, delta);
-            // pressing into a wall: ease out of the cycle instead of
-            // running on the spot (the run lean would put the head through)
-            let len = delta.length();
-            if len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3 {
-                p.loco.blocked(dt);
+            if p.loco.airborne() {
+                p.vel.z -= GRAVITY * dt;
+                let mut at = slide(ground, p.pos, p.vel.truncate() * dt);
+                let z = p.pos.z + p.vel.z * dt;
+                match ground.floor_below(at + Vec3::Z * 0.1) {
+                    Some(f) if f >= z => {
+                        at.z = f;
+                        p.vel = Vec3::ZERO;
+                        p.loco.land(p.fall_from - f, dir != Vec2::ZERO);
+                    }
+                    _ => at.z = z,
+                }
+                p.pos = at;
+            } else {
+                let (to, ledge) = move_on(ground, p.pos, delta);
+                // pressing into a wall: ease out of the cycle instead of
+                // running on the spot (the run lean would put the head through)
+                let len = delta.length();
+                if len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3 {
+                    p.loco.blocked(dt);
+                }
+                if ledge {
+                    p.loco.start_fall();
+                    p.vel = (delta / dt.max(1e-4)).extend(0.0);
+                    p.fall_from = p.pos.z;
+                }
+                p.pos = to;
             }
-            p.pos = to;
         } else {
             p.pos += delta.extend(0.0);
         }
 
+        // ACBMP_TRACE=1: player state four times a second (simulated time)
+        if std::env::var_os("ACBMP_TRACE").is_some() && (self.sim_time * 4.0).floor() != ((self.sim_time - dt) * 4.0).floor() {
+            eprintln!(
+                "t {:.2} pos {:.2} {:.2} {:.2} yaw {:.0} speed {:.2}{}",
+                self.sim_time,
+                p.pos.x,
+                p.pos.y,
+                p.pos.z,
+                p.yaw.to_degrees(),
+                p.loco.speed,
+                if p.loco.airborne() { " AIR" } else { "" }
+            );
+        }
         let c = &actor.character;
         let pose = step.pose;
         let globals = c.skeleton.globals(&pose);
@@ -641,12 +687,13 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Moves a character standing at `pos` by `delta`: slides along walls
-/// (swept at knee and chest height, so steps and curbs pass) and snaps to
-/// the floor, refusing moves onto nothing.
-fn move_on(ground: &Ground, pos: Vec3, delta: Vec2) -> Vec3 {
+/// Gravity, m/s^2 (ClothSettings use the same 10).
+const GRAVITY: f32 = 10.0;
+
+/// Horizontal move with wall sliding, swept at knee and chest height (so
+/// steps and curbs pass).
+fn slide(ground: &Ground, pos: Vec3, delta: Vec2) -> Vec3 {
     const RADIUS: f32 = 0.3;
-    const STEP: f32 = 0.6;
     let blocked = |from: Vec3, d: Vec2| {
         [0.55, 1.3]
             .into_iter()
@@ -668,9 +715,20 @@ fn move_on(ground: &Ground, pos: Vec3, delta: Vec2) -> Vec3 {
             }
         }
     }
+    at
+}
+
+/// Moves a character standing at `pos` by `delta`: slides along walls and
+/// snaps to the floor within a step. Returns the new position and whether
+/// it left a ledge (floor more than a step below: start falling, position
+/// not snapped). Moves onto no floor at all are refused.
+fn move_on(ground: &Ground, pos: Vec3, delta: Vec2) -> (Vec3, bool) {
+    const STEP: f32 = 0.6;
+    let at = slide(ground, pos, delta);
     match ground.floor_below(at + Vec3::Z * STEP) {
-        Some(z) => at.with_z(z),
-        None => pos,
+        Some(z) if z >= at.z - STEP => (at.with_z(z), false),
+        Some(_) => (at, true),
+        None => (pos, false),
     }
 }
 

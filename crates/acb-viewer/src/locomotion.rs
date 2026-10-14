@@ -48,6 +48,10 @@ enum Id {
     /// left 90, right 90, left 180, right 180
     Turn(usize),
     TurnSettle(usize),
+    /// walk, run: into the fall pose (held on its last frame)
+    Fall(usize),
+    /// soft/hard/damage x (to wait, to jog)
+    Land(usize),
 }
 
 pub struct Clips {
@@ -60,6 +64,8 @@ pub struct Clips {
     sprint_stop: [Clip; 2],
     turn: [Clip; 4],
     turn_settle: [Clip; 4],
+    fall: [Clip; 2],
+    land: [Clip; 6],
 }
 
 impl Clips {
@@ -93,6 +99,15 @@ impl Clips {
             sprint_stop: pair(&|f| format!("xx_h_sprintstop_foot{f}"))?,
             turn: [turn(0)?, turn(1)?, turn(2)?, turn(3)?],
             turn_settle: [settle(0)?, settle(1)?, settle(2)?, settle(3)?],
+            fall: [load("xx_l_walklowfall_footl_tr_fall")?, load("xx_h_runlowfall_footl_tr_fall")?],
+            land: [
+                load("xx_h_landing_forward_soft_footl_tr_h_wait_footl_a")?,
+                load("xx_h_landing_forward_soft_footl_tr_h_jog_footr_a")?,
+                load("xx_h_landing_forward_hard_footl_tr_h_wait_footl_a")?,
+                load("xx_h_landing_forward_hard_footl_tr_h_jog_footr_a")?,
+                load("xx_h_landing_damage_footl_tr_h_wait_footr")?,
+                load("xx_h_landing_damage_footl_tr_h_jog_footl")?,
+            ],
         })
     }
 
@@ -111,6 +126,8 @@ impl Clips {
             Id::SprintStop(f) => &self.sprint_stop[f],
             Id::Turn(i) => &self.turn[i],
             Id::TurnSettle(i) => &self.turn_settle[i],
+            Id::Fall(i) => &self.fall[i],
+            Id::Land(i) => &self.land[i],
         }
     }
 }
@@ -132,6 +149,8 @@ pub struct Locomotion {
     action: Option<Action>,
     /// Pose faded out from and the fade time left.
     fade: Option<(Pose, f32)>,
+    /// Falling: the clip into the fall pose and its time.
+    air: Option<(Id, f32)>,
     last: Pose,
 }
 
@@ -158,12 +177,43 @@ fn pose_distance(a: &[(Vec3, Quat)], b: &[(Vec3, Quat)]) -> f32 {
 
 impl Locomotion {
     pub fn new(clips: &Clips, skeleton: &Skeleton) -> Self {
-        Locomotion { speed: 0.0, phase: 0.0, idle_time: 0.0, action: None, fade: None, last: clips.idle.sample(skeleton, 0.0) }
+        Locomotion { speed: 0.0, phase: 0.0, idle_time: 0.0, action: None, fade: None, air: None, last: clips.idle.sample(skeleton, 0.0) }
     }
 
     fn start(&mut self, action: Action) {
         self.fade = Some((self.last.clone(), FADE));
         self.action = Some(action);
+    }
+
+    pub fn airborne(&self) -> bool {
+        self.air.is_some()
+    }
+
+    /// Left the ground: the caller moves the character ballistically until
+    /// [`Locomotion::land`].
+    pub fn start_fall(&mut self) {
+        if self.air.is_none() {
+            self.air = Some((Id::Fall(usize::from(self.speed > 1.5)), 0.0));
+            self.action = None;
+            self.fade = Some((self.last.clone(), FADE));
+        }
+    }
+
+    /// Touched down after falling `height` metres; `moving`: input held.
+    pub fn land(&mut self, height: f32, moving: bool) {
+        if self.air.take().is_none() {
+            return;
+        }
+        let severity = if height < 3.0 {
+            0
+        } else if height < 6.0 {
+            1
+        } else {
+            2
+        };
+        self.speed = if moving { 2.0 } else { 0.0 };
+        self.phase = 0.0;
+        self.start(Action { queue: vec![Id::Land(severity * 2 + usize::from(moving))], t: 0.0, interruptible: false });
     }
 
     /// The character ran into something: drop toward idle.
@@ -177,6 +227,13 @@ impl Locomotion {
     /// character's facing and is turned by the controller or the clips.
     pub fn update(&mut self, clips: &Clips, sk: &Skeleton, dir: Vec2, gait: Gait, yaw: &mut f32, dt: f32) -> Step {
         let want = (dir != Vec2::ZERO).then(|| (-dir.x).atan2(dir.y));
+        if let Some((id, t)) = &mut self.air {
+            *t += dt;
+            let c = clips.get(*id);
+            let pose = c.sample(sk, t.min(c.length));
+            let pose = self.faded(pose, dt);
+            return Step { delta: Vec2::ZERO, pose };
+        }
         if self.action.as_ref().is_some_and(|a| a.interruptible) && want.is_some() {
             self.action = None;
             self.fade = Some((self.last.clone(), FADE));
@@ -188,6 +245,12 @@ impl Locomotion {
             true => self.play_action(clips, sk, yaw, dt),
             false => self.play_cycle(clips, sk, want, gait, yaw, dt),
         };
+        let pose = self.faded(pose, dt);
+        Step { delta, pose }
+    }
+
+    /// Applies the running cross-fade and remembers the result.
+    fn faded(&mut self, pose: Pose, dt: f32) -> Pose {
         let pose = match &mut self.fade {
             Some((from, left)) => {
                 *left -= dt;
@@ -201,7 +264,7 @@ impl Locomotion {
             None => pose,
         };
         self.last = pose.clone();
-        Step { delta, pose }
+        pose
     }
 
     fn maybe_start_action(&mut self, clips: &Clips, sk: &Skeleton, want: Option<f32>, yaw: f32) {
