@@ -86,7 +86,7 @@ impl Camera {
     pub fn view_proj(&self) -> Mat4 {
         let view = glam::camera::rh::view::look_at_mat4(self.eye, self.target, Vec3::Z);
         // wgpu clip space is D3D's: depth 0..1
-        let proj = glam::camera::rh::proj::directx::perspective(self.fov_y, self.aspect, 0.25, 8000.0);
+        let proj = glam::camera::rh::proj::directx::perspective(self.fov_y, self.aspect, NEAR, FAR);
         proj * view
     }
 }
@@ -154,7 +154,18 @@ pub struct Renderer {
     /// [opaque, alpha test, blended] x [culled, two-sided]
     pipelines: [[wgpu::RenderPipeline; 2]; 3],
     color_format: wgpu::TextureFormat,
+    /// Opaque depth -> inverse view distance, for shaders that read the
+    /// scene depth (`g_DepthSampler`: water, soft particles).
+    depth_blit: wgpu::RenderPipeline,
+    depth_blit_layout: wgpu::BindGroupLayout,
+    depth_copy: std::cell::RefCell<Option<((u32, u32), wgpu::TextureView)>>,
 }
+
+/// Camera clip planes (see [`Camera::view_proj`]).
+pub const NEAR: f32 = 0.25;
+pub const FAR: f32 = 8000.0;
+/// Format of the scene-depth copy: 1 / view distance fits half floats.
+const DEPTH_COPY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R16Float;
 
 #[derive(Debug, Default)]
 pub struct LoadStats {
@@ -328,7 +339,78 @@ impl Renderer {
             anisotropy_clamp: 8,
             ..Default::default()
         });
-        Self { device, queue, frame_buf, frame_bg, material_layout, sampler, pipelines, color_format }
+        let depth_blit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("depth blit"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let blit_src = format!(
+            r#"
+@group(0) @binding(0) var src: texture_depth_2d;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {{
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}}
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {{
+    let d = textureLoad(src, vec2<i32>(pos.xy), 0);
+    // 0..1 depth of a directx-style perspective -> 1 / view distance
+    return vec4<f32>(({far} - d * ({far} - {near})) / ({near} * {far}), 0.0, 0.0, 1.0);
+}}
+"#,
+            near = NEAR,
+            far = FAR
+        );
+        let blit_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("depth blit"),
+            source: wgpu::ShaderSource::Wgsl(blit_src.into()),
+        });
+        let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("depth blit"),
+            bind_group_layouts: &[Some(&depth_blit_layout)],
+            immediate_size: 0,
+        });
+        let depth_blit = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("depth blit"),
+            layout: Some(&blit_pl),
+            vertex: wgpu::VertexState {
+                module: &blit_module,
+                entry_point: Some("vs"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_module,
+                entry_point: Some("fs"),
+                targets: &[Some(DEPTH_COPY_FORMAT.into())],
+                compilation_options: Default::default(),
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            device,
+            queue,
+            frame_buf,
+            frame_bg,
+            material_layout,
+            sampler,
+            pipelines,
+            color_format,
+            depth_blit,
+            depth_blit_layout,
+            depth_copy: Default::default(),
+        }
     }
 
     pub fn device(&self) -> &wgpu::Device {
@@ -444,11 +526,38 @@ impl Renderer {
         )
     }
 
+    /// The scene-depth copy for this frame size (recreated on resize).
+    fn depth_copy_view(&self, size: (u32, u32)) -> wgpu::TextureView {
+        let mut slot = self.depth_copy.borrow_mut();
+        if let Some((s, v)) = &*slot {
+            if *s == size {
+                return v.clone();
+            }
+        }
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene depth copy"),
+            size: wgpu::Extent3d { width: size.0.max(1), height: size.1.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_COPY_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&Default::default());
+        *slot = Some((size, view.clone()));
+        view
+    }
+
+    /// Draws `scene`: opaque and alpha-tested geometry, then a copy of the
+    /// depth for shaders that read it, then blended geometry. `depth` must
+    /// allow texture binding; `size` is the target's.
     pub fn render(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         color: &wgpu::TextureView,
         depth: &wgpu::TextureView,
+        size: (u32, u32),
         scene: &Scene,
         camera: &Camera,
     ) {
@@ -462,8 +571,9 @@ impl Renderer {
             fog: [fog[0], fog[1], fog[2], 0.0006],
         };
         self.queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));
+        let fv = retail::FrameView::new(camera, size);
         if let Some(retail) = &scene.retail {
-            retail.update_frame(self, env, camera.eye);
+            retail.update_frame(self, env, &fv);
             let view_proj = camera.view_proj();
             for m in &scene.meshes {
                 if let Some((buf, worlds)) = &m.retail_instances {
@@ -478,89 +588,138 @@ impl Renderer {
                     let palette: Vec<Mat4> =
                         d.palette.iter().map(|&b| s.skin.get(b as usize).copied().unwrap_or(Mat4::IDENTITY)).collect();
                     let mat = &scene.retail_materials[d.material];
-                    retail.write_skinned_frame(self, mat, &d.frame, env, camera.eye, &palette);
+                    retail.write_skinned_frame(self, mat, &d.frame, env, &fv, &palette);
                 }
             }
         }
 
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("opaque"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: fog[0] as f64,
+                            g: fog[1] as f64,
+                            b: fog[2] as f64,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            self.draw(&mut pass, scene, false, &HashMap::new());
+        }
+
+        // scene depth for the blended pass
+        let copy = self.depth_copy_view(size);
+        {
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("depth blit"),
+                layout: &self.depth_blit_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(depth) }],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("depth copy"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &copy,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.depth_blit);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        // blended materials that read the depth get it bound this frame
+        let mut depth_bound: HashMap<usize, wgpu::BindGroup> = HashMap::new();
+        if let Some(retail) = &scene.retail {
+            for (i, m) in scene.retail_materials.iter().enumerate().filter(|(_, m)| m.blended) {
+                if let Some(bg) = retail.textures_with_depth(self, m, &copy) {
+                    depth_bound.insert(i, bg);
+                }
+            }
+        }
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("main"),
+            label: Some("blended"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: color,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: fog[0] as f64,
-                        g: fog[1] as f64,
-                        b: fog[2] as f64,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
                 stencil_ops: None,
             }),
             ..Default::default()
         });
-        for blended_pass in [false, true] {
-            for m in &scene.meshes {
-                pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
-                for (range, mat) in &m.submeshes {
-                    match *mat {
-                        MaterialRef::Basic(i) => {
-                            let mat = &scene.materials[i];
-                            if mat.blended != blended_pass {
-                                continue;
-                            }
-                            let kind = if mat.blended { 2 } else { mat.alpha_test as usize };
-                            pass.set_pipeline(&self.pipelines[kind][mat.two_sided as usize]);
-                            pass.set_bind_group(0, &self.frame_bg, &[]);
-                            pass.set_bind_group(1, &mat.bind_group, &[]);
-                            pass.set_vertex_buffer(0, m.vertices.slice(..));
-                            pass.set_vertex_buffer(1, m.instances.slice(..));
+        self.draw(&mut pass, scene, true, &depth_bound);
+    }
+
+    /// One pass's draws: the opaque or the blended materials.
+    fn draw(&self, pass: &mut wgpu::RenderPass, scene: &Scene, blended_pass: bool, depth_bound: &HashMap<usize, wgpu::BindGroup>) {
+        for m in &scene.meshes {
+            pass.set_index_buffer(m.indices.slice(..), wgpu::IndexFormat::Uint32);
+            for (range, mat) in &m.submeshes {
+                match *mat {
+                    MaterialRef::Basic(i) => {
+                        let mat = &scene.materials[i];
+                        if mat.blended != blended_pass {
+                            continue;
                         }
-                        MaterialRef::Retail(i) => {
-                            let (Some(retail), Some(raw), Some((inst, _))) =
-                                (&scene.retail, &m.raw_vertices, &m.retail_instances)
-                            else {
-                                continue;
-                            };
-                            let mat = &scene.retail_materials[i];
-                            if mat.blended != blended_pass {
-                                continue;
-                            }
-                            pass.set_pipeline(retail.pipeline(mat));
-                            pass.set_bind_group(0, &mat.consts, &[]);
-                            pass.set_bind_group(1, &mat.textures, &[]);
-                            pass.set_vertex_buffer(0, raw.slice(..));
-                            pass.set_vertex_buffer(1, inst.slice(..));
-                        }
+                        let kind = if mat.blended { 2 } else { mat.alpha_test as usize };
+                        pass.set_pipeline(&self.pipelines[kind][mat.two_sided as usize]);
+                        pass.set_bind_group(0, &self.frame_bg, &[]);
+                        pass.set_bind_group(1, &mat.bind_group, &[]);
+                        pass.set_vertex_buffer(0, m.vertices.slice(..));
+                        pass.set_vertex_buffer(1, m.instances.slice(..));
                     }
-                    pass.draw_indexed(range.clone(), 0, 0..m.instance_count);
+                    MaterialRef::Retail(i) => {
+                        let (Some(retail), Some(raw), Some((inst, _))) = (&scene.retail, &m.raw_vertices, &m.retail_instances)
+                        else {
+                            continue;
+                        };
+                        let mat = &scene.retail_materials[i];
+                        if mat.blended != blended_pass {
+                            continue;
+                        }
+                        pass.set_pipeline(retail.pipeline(mat));
+                        pass.set_bind_group(0, &mat.consts, &[]);
+                        pass.set_bind_group(1, depth_bound.get(&i).unwrap_or(&mat.textures), &[]);
+                        pass.set_vertex_buffer(0, raw.slice(..));
+                        pass.set_vertex_buffer(1, inst.slice(..));
+                    }
                 }
+                pass.draw_indexed(range.clone(), 0, 0..m.instance_count);
             }
-            let Some(retail) = &scene.retail else { continue };
-            for s in &scene.skinned {
-                pass.set_index_buffer(s.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.set_vertex_buffer(0, s.vertices.slice(..));
-                pass.set_vertex_buffer(1, s.instances.slice(..));
-                for d in &s.draws {
-                    let mat = &scene.retail_materials[d.material];
-                    if mat.blended != blended_pass {
-                        continue;
-                    }
-                    pass.set_pipeline(retail.pipeline(mat));
-                    pass.set_bind_group(0, &d.consts, &[]);
-                    pass.set_bind_group(1, &mat.textures, &[]);
-                    pass.draw_indexed(d.range.clone(), 0, 0..1);
+        }
+        let Some(retail) = &scene.retail else { return };
+        for s in &scene.skinned {
+            pass.set_index_buffer(s.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(0, s.vertices.slice(..));
+            pass.set_vertex_buffer(1, s.instances.slice(..));
+            for d in &s.draws {
+                let mat = &scene.retail_materials[d.material];
+                if mat.blended != blended_pass {
+                    continue;
                 }
+                pass.set_pipeline(retail.pipeline(mat));
+                pass.set_bind_group(0, &d.consts, &[]);
+                pass.set_bind_group(1, depth_bound.get(&d.material).unwrap_or(&mat.textures), &[]);
+                pass.draw_indexed(d.range.clone(), 0, 0..1);
             }
         }
     }
@@ -873,7 +1032,7 @@ pub fn render_to_rgba(r: &Renderer, scene: &Scene, camera: &Camera, width: u32, 
         })
     };
     let color = target(format, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
-    let depth = target(DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT);
+    let depth = target(DEPTH_FORMAT, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING);
     let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
     let readback = d.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
@@ -886,6 +1045,7 @@ pub fn render_to_rgba(r: &Renderer, scene: &Scene, camera: &Camera, width: u32, 
         &mut enc,
         &color.create_view(&Default::default()),
         &depth.create_view(&Default::default()),
+        (width, height),
         scene,
         camera,
     );

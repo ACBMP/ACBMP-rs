@@ -244,7 +244,7 @@ fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
         .create_view(&Default::default())
@@ -586,7 +586,7 @@ impl App {
         };
         let view = frame.texture.create_view(&Default::default());
         let mut enc = g.renderer.device().create_command_encoder(&Default::default());
-        g.renderer.render(&mut enc, &view, &g.depth, &g.scene, &camera);
+        g.renderer.render(&mut enc, &view, &g.depth, (g.config.width, g.config.height), &g.scene, &camera);
         g.renderer.queue().submit([enc.finish()]);
         g.renderer.queue().present(frame);
 

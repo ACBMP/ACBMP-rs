@@ -153,7 +153,32 @@ impl ConstBlock {
     }
 }
 
-fn fill_globals(block: &mut ConstBlock, globals: &[Global], env: &Environment, eye: Vec3) -> BTreeSet<String> {
+/// Per-frame camera facts the engine globals are made of.
+pub struct FrameView {
+    pub eye: Vec3,
+    pub forward: Vec3,
+    /// World -> view (right-handed, looking down -Z).
+    pub view: Mat4,
+    pub tan_half: (f32, f32),
+    pub size: (u32, u32),
+}
+
+impl FrameView {
+    pub fn new(camera: &crate::Camera, size: (u32, u32)) -> FrameView {
+        let view = glam::camera::rh::view::look_at_mat4(camera.eye, camera.target, Vec3::Z);
+        let ty = (camera.fov_y / 2.0).tan();
+        FrameView {
+            eye: camera.eye,
+            forward: (camera.target - camera.eye).normalize_or_zero(),
+            view,
+            tan_half: (ty * camera.aspect, ty),
+            size,
+        }
+    }
+}
+
+fn fill_globals(block: &mut ConstBlock, globals: &[Global], env: &Environment, fv: &FrameView) -> BTreeSet<String> {
+    let eye = fv.eye;
     let mut unknown = BTreeSet::new();
     let v = |x: Vec3, w: f32| [x.x, x.y, x.z, w];
     for g in globals {
@@ -183,6 +208,17 @@ fn fill_globals(block: &mut ConstBlock, globals: &[Global], env: &Environment, e
             "g_WorldLightmapUVParameters" => vec![[0.0, 0.0, 1.0, 1.0]],
             "g_WorldLightmapZOffsetParameters" => vec![[0.0, 1.0, 0.0, 0.0]],
             "g_DeconstructionRanges" => vec![[1.0e6, 1.0e6 + 1.0, 0.0, 0.0]],
+            "g_EyeDirection" => vec![v(fv.forward, 0.0)],
+            // world -> view with z = distance ahead (the shaders compare it
+            // with the depth sampler's linearized value)
+            "g_WorldToView" => {
+                let m = fv.view;
+                vec![m.row(0).to_array(), m.row(1).to_array(), (-m.row(2)).to_array()]
+            }
+            // g_DepthSampler holds 1 / distance (see the renderer's depth
+            // copy), so distance = w / (d + z) with z = 0, w = 1
+            "g_ReverseProjectionParams" => vec![[fv.tan_half.0, fv.tan_half.1, 0.0, 1.0]],
+            "g_VPosToUV" => vec![[1.0 / fv.size.0.max(1) as f32, 1.0 / fv.size.1.max(1) as f32, 0.0, 0.0]],
             _ => {
                 unknown.insert(g.name.clone());
                 continue;
@@ -218,6 +254,10 @@ pub(crate) struct Material {
     pub textures: wgpu::BindGroup,
     pub two_sided: bool,
     pub blended: bool,
+    /// Texture views by binding, and the binding of `g_DepthSampler` if
+    /// the program reads the scene depth.
+    views: Vec<(u32, wgpu::TextureView)>,
+    depth_binding: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -559,8 +599,9 @@ impl Retail {
         };
         let (vs_globals, ps_globals) = (globals(&vs_prog), globals(&ps_prog));
         let env = Environment::default();
-        let mut unknown = fill_globals(&mut ConstBlock::new(wgsl::VS_CONSTS), &vs_globals, &env, Vec3::ZERO);
-        unknown.extend(fill_globals(&mut ConstBlock::new(wgsl::PS_CONSTS), &ps_globals, &env, Vec3::ZERO));
+        let fv = FrameView { eye: Vec3::ZERO, forward: Vec3::Y, view: Mat4::IDENTITY, tan_half: (1.0, 1.0), size: (1, 1) };
+        let mut unknown = fill_globals(&mut ConstBlock::new(wgsl::VS_CONSTS), &vs_globals, &env, &fv);
+        unknown.extend(fill_globals(&mut ConstBlock::new(wgsl::PS_CONSTS), &ps_globals, &env, &fv));
         Ok((Program {
             pipelines,
             tex_layout,
@@ -616,6 +657,7 @@ impl Retail {
         });
 
         let mut views = Vec::new();
+        let mut depth_binding = None;
         for (base, reg, ty, name) in &p.samplers {
             let list = if *base == 0 { &p.ps_params } else { &p.vs_params };
             let tex = list
@@ -636,6 +678,9 @@ impl Retail {
                     None => self.defaults.white.clone(),
                 },
             };
+            if name == "g_DepthSampler" {
+                depth_binding = Some(base + 2 * reg);
+            }
             views.push((base + 2 * reg, view));
         }
         let mut entries = Vec::new();
@@ -651,19 +696,36 @@ impl Retail {
             layout: &p.tex_layout,
             entries: &entries,
         });
-        Material { program: pi, consts, vs_mat, ps_mat, textures, two_sided, blended }
+        Material { program: pi, consts, vs_mat, ps_mat, textures, two_sided, blended, views, depth_binding }
     }
 
     /// Uploads this frame's engine globals for every program.
-    pub fn update_frame(&self, r: &Renderer, env: &Environment, eye: Vec3) {
+    pub fn update_frame(&self, r: &Renderer, env: &Environment, fv: &FrameView) {
         for p in &self.programs {
             let mut vs = ConstBlock::new(wgsl::VS_CONSTS);
             let mut ps = ConstBlock::new(wgsl::PS_CONSTS);
-            fill_globals(&mut vs, &p.vs_globals, env, eye);
-            fill_globals(&mut ps, &p.ps_globals, env, eye);
+            fill_globals(&mut vs, &p.vs_globals, env, fv);
+            fill_globals(&mut ps, &p.ps_globals, env, fv);
             r.queue.write_buffer(&p.vs_frame, 0, &vs.bytes());
             r.queue.write_buffer(&p.ps_frame, 0, &ps.bytes());
         }
+    }
+
+    /// For a material that reads `g_DepthSampler`: its textures with the
+    /// scene-depth copy bound there.
+    pub fn textures_with_depth(&self, r: &Renderer, m: &Material, depth: &wgpu::TextureView) -> Option<wgpu::BindGroup> {
+        let slot = m.depth_binding?;
+        let mut entries = Vec::new();
+        for (binding, view) in &m.views {
+            let view = if *binding == slot { depth } else { view };
+            entries.push(wgpu::BindGroupEntry { binding: *binding, resource: wgpu::BindingResource::TextureView(view) });
+            entries.push(wgpu::BindGroupEntry { binding: binding + 1, resource: wgpu::BindingResource::Sampler(&r.sampler) });
+        }
+        Some(r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("retail textures + depth"),
+            layout: &self.programs[m.program].tex_layout,
+            entries: &entries,
+        }))
     }
 
     /// A skinned draw's own VS frame buffer and consts bind group.
@@ -690,9 +752,9 @@ impl Retail {
 
     /// Fills a skinned draw's frame buffer: globals, then `palette` (mesh
     /// space -> model space per palette slot) as float4x3 rows from c120.
-    pub fn write_skinned_frame(&self, r: &Renderer, m: &Material, buf: &wgpu::Buffer, env: &Environment, eye: Vec3, palette: &[Mat4]) {
+    pub fn write_skinned_frame(&self, r: &Renderer, m: &Material, buf: &wgpu::Buffer, env: &Environment, fv: &FrameView, palette: &[Mat4]) {
         let mut vs = ConstBlock::new(wgsl::VS_CONSTS);
-        fill_globals(&mut vs, &self.programs[m.program].vs_globals, env, eye);
+        fill_globals(&mut vs, &self.programs[m.program].vs_globals, env, fv);
         for (k, b) in palette.iter().take(acb_world::skin::PALETTE_SIZE).enumerate() {
             for row in 0..3 {
                 vs.set(BONE_REG + 3 * k as u32 + row as u32, b.row(row).to_array());

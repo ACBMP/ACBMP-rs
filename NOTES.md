@@ -86,6 +86,17 @@ as such; the rest is read from decompiled code and not yet exercised.
   g_LODBlendFactor (dithered LOD cross-fade), g_TimeOfDay,
   g_LayeredSkyUserColor, g_EntityVisualScaleFactor, g_WorldToLightProjVS,
   g_NumLights/g_OmniLights/g_SpotLights, g_ShadowedDirect.
+- Scene depth: the lighting PS writes `oC1 = v1.z / v1.w` (NDC depth);
+  shaders such as the water (`AC2MP_VEN_WaterSea_01a`) read it back as
+  `g_DepthSampler` (s8) at `(vPos + 0.5) * g_VPosToUV`, linearize it as
+  `g_ReverseProjectionParams.w / (d + .z)` and compare with
+  `dot(pos, g_WorldToView[2])` for depth-faded opacity. The renderer
+  draws opaque, blits the depth buffer to an R16Float target holding
+  1 / view distance (so .z = 0, .w = 1), then draws blended materials,
+  binding the copy to materials with a `g_DepthSampler` sampler.
+  `g_WorldToView` row 2 is negated (distance ahead). Venice water now
+  shows; its reflection sampler (s1, `Operator109`) is still unbound
+  (white) and the sky dome (`3D_TimeOfDay_SkyDome_Layer0`) not drawn.
 - Saturation check (2026-10-14): five San Donato views have 0-52 pixels
   at >= 250 in every channel, nearly all `GEN_FabricW_01A` (white cloth,
   Layer0_Color 0.6 -> albedo ~1.2) and `GEN_Veg_Fougere_03A`; no blown-out
