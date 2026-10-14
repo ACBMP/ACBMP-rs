@@ -140,11 +140,42 @@ its exact byte length and by key continuity (`acbmp animstats`).
   bone bind origins landing on the centroids of the vertices they carry
   (`ACBMP_DEBUG_PALETTE=1 acbmp character`); a fit against skeleton bind
   alone cannot see that rotation.
-- Entity (e.g. `UA_Altair`): `Visual.Object` = Mesh (or LODSelector, not
-  handled yet), `Visual.InstanceData.MaterialInfos` and the
+- Entity (e.g. `UA_Altair`): `Visual.Object` = Mesh or LODSelector
+  (`LODDescs[0].Object` = nearest LOD; it may be null, `UseNullObjects`), `Visual.InstanceData.MaterialInfos` and the
   `MaterialOverrider` swap `*_Empty` materials. `SkeletonComponent` =
   `MainSkeleton` + `AddonSkeletons`; addon bones with an existing BoneID are
   that bone. Two MA_Ezio_LOD0 bones (eyes) are in no listed skeleton; they
   follow the nearest mapped bone.
 - `acbmp character <forge> UA_Altair --obj out.obj --anim <clip> --t <s>`
   writes the CPU-skinned pose; verified on a walk and an air assassination.
+- GPU skinning: each skinned draw owns its VS frame block (globals plus
+  `m.row(0..3)` of each palette matrix at c120 + 3 * slot); attribute
+  locations: pos 0, normal 3, tangent 6, binormal 7, uv 8, indices 2,
+  weights 1. Unbound emissive samplers default to black (white doubled the
+  light).
+- `CHR_Detail_DoNotUse` (UCMA/ARCM_Altair_Cloth): only a normal map is
+  bound and its PS masks direct/omni/spot light by c0.yzz = (1, 0, 0), so
+  it renders red under a sun. Asset quirk, not a translation bug.
+- EntityBuilder (`CU_*`, `AC2MP_IDxx_MainTemplate_Player/NPC`): `Template`
+  Entity + `BuildColumn{Pass, TargetProperty.PathNodes, ColumnID}`;
+  `Rows[i]` hold one dynamic property per column, keyed name_hash =
+  ColumnID. Pass 5 with an empty path adds the value: BuildTable /
+  BuildTableExt (apply its row), GraphicObject (Mesh/LODSelector),
+  Skeleton (add-on), SoftBody (`Cloth`: `SoftBodyStates[0].GraphicObject`
+  is the visual, usually also added as a GraphicObject; sim data =
+  ClothLOD particles/constraints, not simulated yet). Pass 4 with
+  [MaterialPropertyPathNodeSolver(TargetMaterial), TargetPropertyID
+  0xd70e6670 = CRC32("TextureSet")] sets a shared material's TextureSet
+  (`UA_Ezio_Head` -> `UA_Ezio_Head_Set`); `_Custom_Colors` columns use
+  property 0xdf1ed286 (colour, not applied yet).
+- MP personas: `AC2MP_IDxx_Main` (BuildTable from the builder) adds head,
+  eyes, legs; the body/arms/robe/accessories live in `AC2MP_IDxx_Custom1..3`
+  (+`_ext`, spelling varies: `ID17_Cutom3_ext`) and `_Custom_Colors`
+  BuildTableExts, which no data object references: the game picks them by
+  the player's customization; row 0 is the default look. Player builders:
+  ID07 Priest 0x1832900f, ID08 Noble, ID10 Hunter 0xaa74dca8, ID14, 15, 17
+  Executioner, 18, 20, 22 Courtesan, 23-27. Base cycles:
+  `xx_l_walk_hipm_footl`, `xx_h_run_hipm_footl`.
+- `acbmp charshot <forge> AC2MP_ID07_MainTemplate_Player out.png --anim
+  xx_h_run_hipm_footl --frames 4 --yaw 60` renders through the game shaders
+  (`ACBMP_DEBUG_BONES=1` prints bind-pose skin residuals per bone).

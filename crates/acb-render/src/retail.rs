@@ -16,10 +16,14 @@
 //! The shaders read the raw vertex buffer: SHORT4 position and UBYTE4
 //! normal/tangent are integer attributes, the texcoord is SHORT2N and the
 //! vertex colour is a D3DCOLOR.
+//!
+//! Skinned (format 0) draws index `g_BoneMatrixArray` relatively, which the
+//! translation reads from the frame block, so each skinned submesh owns its
+//! frame buffer: the program's globals plus its bone palette.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use acb_world::{Archive, MaterialParams, ParamValue, Permutation, StaticMesh};
+use acb_world::{Archive, MaterialParams, ParamValue, Permutation};
 use d3d9_shader::parse::{RegisterSet, SamplerType};
 use d3d9_shader::wgsl::{self, InputKind, Options};
 use glam::{Mat4, Vec3};
@@ -37,6 +41,8 @@ const INSTANCE_LOC: u32 = 24;
 const ALPHA_REF_REG: u32 = wgsl::PS_CONSTS as u32 - 1;
 /// Bytes per instance: 4 WVP rows + 4 World rows.
 pub const INSTANCE_STRIDE: u64 = 128;
+/// `g_BoneMatrixArray`: float4x3 rows from c120, 42 bones.
+const BONE_REG: u32 = 120;
 
 /// Frame lighting, in the shaders' gamma space.
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +85,16 @@ fn vertex_attributes(format: u32, stride: usize) -> Option<Vec<wgpu::VertexAttri
             attr(6, F::Uint8x4, 12),
             attr(4, F::Unorm8x4Bgra, 16),
             attr(8, F::Snorm16x2, 20),
+        ],
+        // skinned: SHORT4N position, UBYTE4 palette slots, UBYTE4N weights
+        (0, 32) => vec![
+            attr(0, F::Snorm16x4, 0),
+            attr(3, F::Uint8x4, 8),
+            attr(6, F::Uint8x4, 12),
+            attr(7, F::Uint8x4, 16),
+            attr(8, F::Snorm16x2, 20),
+            attr(2, F::Uint8x4, 24),
+            attr(1, F::Unorm8x4, 28),
         ],
         _ => return None,
     })
@@ -197,6 +213,8 @@ pub(crate) struct Program {
 pub(crate) struct Material {
     pub program: usize,
     pub consts: wgpu::BindGroup,
+    vs_mat: wgpu::Buffer,
+    ps_mat: wgpu::Buffer,
     pub textures: wgpu::BindGroup,
     pub two_sided: bool,
     pub blended: bool,
@@ -221,6 +239,7 @@ pub struct RetailStats {
 
 pub(crate) struct Defaults {
     white: wgpu::TextureView,
+    black: wgpu::TextureView,
     flat_normal: wgpu::TextureView,
     cube: wgpu::TextureView,
     volume: wgpu::TextureView,
@@ -249,6 +268,7 @@ impl Defaults {
         use wgpu::{TextureDimension as D, TextureViewDimension as V};
         Self {
             white: make(D::D2, 1, V::D2, [255; 4]),
+            black: make(D::D2, 1, V::D2, [0, 0, 0, 255]),
             flat_normal: make(D::D2, 1, V::D2, [128, 128, 128, 255]),
             cube: make(D::D2, 6, V::Cube, [255; 4]),
             volume: make(D::D3, 1, V::D3, [255; 4]),
@@ -309,14 +329,15 @@ impl Retail {
         r: &Renderer,
         archive: &Archive,
         uid: u32,
-        mesh: &StaticMesh,
+        texture_set: Option<u32>,
+        (format, stride): (u32, usize),
         textures: &mut dyn FnMut(u32) -> Option<wgpu::TextureView>,
     ) -> Option<Material> {
         let Some(info) = archive.material(uid) else { return self.fallback("no material") };
-        let Some(params) = archive.material_params(uid) else { return self.fallback("no template") };
+        let Some(params) = archive.material_params_with_set(uid, texture_set) else { return self.fallback("no template") };
         let key = ProgramKey {
             template: params.template,
-            format: mesh.format,
+            format,
             alpha_test: info.alpha_test,
             blended: info.blend_mode != 0,
         };
@@ -330,7 +351,7 @@ impl Retail {
         let program = match self.keys.get(&key) {
             Some(p) => *p,
             None => {
-                let p = match self.program(r, archive, key, mesh) {
+                let p = match self.program(r, archive, key, stride) {
                     Ok((p, unknown)) => {
                         self.stats.unknown_globals.extend(unknown);
                         self.programs.push(p);
@@ -357,7 +378,7 @@ impl Retail {
         r: &Renderer,
         archive: &Archive,
         key: ProgramKey,
-        mesh: &StaticMesh,
+        stride: usize,
     ) -> anyhow::Result<(Program, BTreeSet<String>)> {
         let shaders = archive.template_shaders(key.template).ok_or_else(|| anyhow::anyhow!("no compiled template"))?;
         let vs_perm: &Permutation = shaders
@@ -367,7 +388,7 @@ impl Retail {
             .lighting(MAIN_PASS, LIGHTING_KEY)
             .or_else(|| shaders.pixel(MAIN_PASS).cloned())
             .ok_or_else(|| anyhow::anyhow!("no pixel permutation"))?;
-        let attrs = vertex_attributes(mesh.format, mesh.stride).ok_or_else(|| anyhow::anyhow!("vertex format"))?;
+        let attrs = vertex_attributes(key.format, stride).ok_or_else(|| anyhow::anyhow!("vertex format"))?;
 
         let vs_prog = d3d9_shader::parse(&vs_perm.code)?;
         let ps_prog = d3d9_shader::parse(&ps_perm.code)?;
@@ -394,7 +415,7 @@ impl Retail {
         let vs = wgsl::translate(&vs_prog, &vs_opts)?;
         for i in &vs.inputs {
             if !attrs.iter().any(|a| a.shader_location == i.location) {
-                anyhow::bail!("vertex input {:?}{} not in format {}", i.usage, i.index, mesh.format);
+                anyhow::bail!("vertex input {:?}{} not in format {}", i.usage, i.index, key.format);
             }
         }
         let ps_opts = Options {
@@ -471,7 +492,7 @@ impl Retail {
             .collect();
         let buffers = [
             Some(wgpu::VertexBufferLayout {
-                array_stride: mesh.stride as u64,
+                array_stride: stride as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &attrs,
             }),
@@ -610,6 +631,8 @@ impl Retail {
                 _ => match tex.and_then(&mut *textures) {
                     Some(v) => v,
                     None if name.contains("Normal") => self.defaults.flat_normal.clone(),
+                    // unset emissive glows nothing (CHR_Detail_DoNotUse: Layer0emisive)
+                    None if name.to_ascii_lowercase().contains("emis") => self.defaults.black.clone(),
                     None => self.defaults.white.clone(),
                 },
             };
@@ -628,7 +651,7 @@ impl Retail {
             layout: &p.tex_layout,
             entries: &entries,
         });
-        Material { program: pi, consts, textures, two_sided, blended }
+        Material { program: pi, consts, vs_mat, ps_mat, textures, two_sided, blended }
     }
 
     /// Uploads this frame's engine globals for every program.
@@ -641,6 +664,41 @@ impl Retail {
             r.queue.write_buffer(&p.vs_frame, 0, &vs.bytes());
             r.queue.write_buffer(&p.ps_frame, 0, &ps.bytes());
         }
+    }
+
+    /// A skinned draw's own VS frame buffer and consts bind group.
+    pub fn skinned_consts(&self, r: &Renderer, m: &Material) -> (wgpu::Buffer, wgpu::BindGroup) {
+        let p = &self.programs[m.program];
+        let buf = r.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("retail skinned frame"),
+            size: ConstBlock::new(wgsl::VS_CONSTS).bytes().len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bg = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("retail skinned consts"),
+            layout: &self.consts_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: p.ps_frame.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: m.vs_mat.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: m.ps_mat.as_entire_binding() },
+            ],
+        });
+        (buf, bg)
+    }
+
+    /// Fills a skinned draw's frame buffer: globals, then `palette` (mesh
+    /// space -> model space per palette slot) as float4x3 rows from c120.
+    pub fn write_skinned_frame(&self, r: &Renderer, m: &Material, buf: &wgpu::Buffer, env: &Environment, eye: Vec3, palette: &[Mat4]) {
+        let mut vs = ConstBlock::new(wgsl::VS_CONSTS);
+        fill_globals(&mut vs, &self.programs[m.program].vs_globals, env, eye);
+        for (k, b) in palette.iter().take(acb_world::skin::PALETTE_SIZE).enumerate() {
+            for row in 0..3 {
+                vs.set(BONE_REG + 3 * k as u32 + row as u32, b.row(row).to_array());
+            }
+        }
+        r.queue.write_buffer(buf, 0, &vs.bytes());
     }
 
     pub fn pipeline(&self, m: &Material) -> &wgpu::RenderPipeline {

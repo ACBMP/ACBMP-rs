@@ -140,13 +140,19 @@ impl Archive<'_> {
 
     /// Template and parameter values of a Material.
     pub fn material_params(&self, uid: u32) -> Option<MaterialParams> {
+        self.material_params_with_set(uid, None)
+    }
+
+    /// [`Archive::material_params`] with the material's TextureSet replaced
+    /// (what an EntityBuilder column does to a shared material).
+    pub fn material_params_with_set(&self, uid: u32, texture_set: Option<u32>) -> Option<MaterialParams> {
         let m = self.root(uid).ok()?;
         let o = &m.obj;
         if !self.is_type(o, "Material") {
             return None;
         }
         let template = self.field(o, "MaterialTemplate")?.target_id()?;
-        let set = self.field(o, "TextureSet").and_then(Value::target_id);
+        let set = texture_set.or_else(|| self.field(o, "TextureSet").and_then(Value::target_id));
         let mut values = HashMap::new();
 
         // template defaults from the operators the properties are linked to

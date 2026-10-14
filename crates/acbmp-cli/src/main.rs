@@ -63,6 +63,36 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         top: usize,
     },
+    /// List the roots of one type whose name contains a string
+    Names {
+        forge: PathBuf,
+        #[arg(name = "TYPE")]
+        type_name: String,
+        #[arg(default_value = "")]
+        needle: String,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+    },
+    /// Render a character Entity with the game's shaders, posed by an animation
+    Charshot {
+        forge: PathBuf,
+        name: String,
+        out: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Animation (name or substring); bind pose without
+        #[arg(long)]
+        anim: Option<String>,
+        /// Frames across the animation, laid out left to right
+        #[arg(long, default_value_t = 1)]
+        frames: usize,
+        /// Camera heading around the character, degrees
+        #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        yaw: f32,
+        /// Pixel size of one frame
+        #[arg(long, default_value_t = 512)]
+        size: u32,
+    },
     /// Load a character Entity (skinned Visuals + skeletons) and check its bind pose
     Character {
         forge: PathBuf,
@@ -163,6 +193,19 @@ fn main() -> anyhow::Result<()> {
         Cmd::Animstats { forge, schemas } => animstats(forge, schemas)?,
         Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
         Cmd::Shaders { forge, name, schemas, top, fields, disasm } => shaders(forge, &name, schemas, top, fields, disasm)?,
+        Cmd::Names { forge, type_name, needle, schemas } => {
+            let schema = load_schema(&schemas)?;
+            let archive = acb_world::Archive::open(&forge, &schema)?;
+            for u in archive.uids_of(&type_name) {
+                let name = archive.loc(u).map(|l| l.name.as_str()).unwrap_or("?");
+                if name.to_lowercase().contains(&needle.to_lowercase()) {
+                    println!("{u:#010x} {name}");
+                }
+            }
+        }
+        Cmd::Charshot { forge, name, out, schemas, anim, frames, yaw, size } => {
+            charshot(forge, &name, out, schemas, anim.as_deref(), frames, yaw, size)?
+        }
         Cmd::Character { forge, name, schemas, obj, anim, t } => character(forge, &name, schemas, obj, anim.as_deref(), t)?,
         Cmd::Skin { forge, name, schemas } => skin(forge, &name, schemas)?,
         Cmd::Dump { forge, name, schemas, depth } => dump(forge, &name, schemas, depth)?,
@@ -388,7 +431,7 @@ fn dump(forge: PathBuf, needle: &str, schemas: PathBuf, depth: usize) -> anyhow:
         .collect();
     uids.sort();
     uids.dedup();
-    for uid in uids.into_iter().take(8) {
+    for uid in uids.into_iter().take(std::env::var("ACBMP_DUMP_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(8)) {
         let root = archive.root(uid)?;
         println!("== {uid:#010x} {} ({})", archive.loc(uid).unwrap().name, archive.type_name(uid).unwrap_or_default());
         dump_obj(&archive, &schema, &root.obj, 1, depth);
@@ -890,7 +933,7 @@ fn character(forge: PathBuf, needle: &str, schemas: PathBuf, obj: Option<PathBuf
             name(p.mesh_uid),
             p.mesh.positions.len(),
             p.mesh.bones.len(),
-            p.materials.iter().map(|m| name(*m)).collect::<Vec<_>>().join(", "),
+            p.materials.iter().map(|m| name(m.0)).collect::<Vec<_>>().join(", "),
             mean,
             spread
         );
@@ -978,5 +1021,95 @@ fn character(forge: PathBuf, needle: &str, schemas: PathBuf, obj: Option<PathBuf
         }
         println!("wrote {}", out.display());
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn charshot(
+    forge: PathBuf,
+    needle: &str,
+    out: PathBuf,
+    schemas: PathBuf,
+    anim: Option<&str>,
+    frames: usize,
+    yaw: f32,
+    size: u32,
+) -> anyhow::Result<()> {
+    use acb_anim::{character::Character, pose::Clip};
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let name = |u: u32| archive.loc(u).map(|l| l.name.clone()).unwrap_or_else(|| format!("{u:#010x}"));
+    // an EntityBuilder of that name builds its template; else the Entity
+    let (uid, c) = match find_uid(&archive, "EntityBuilder", needle) {
+        Ok(b) if archive.loc(b).is_some_and(|l| l.name == needle) => (b, Character::load_built(&archive, b)),
+        _ => {
+            let uid = find_uid(&archive, "Entity", needle)?;
+            (uid, Character::load(&archive, uid))
+        }
+    };
+    let c = c.ok_or_else(|| anyhow::anyhow!("not a character"))?;
+    let clip = match anim {
+        Some(a) => Some(Clip::load(&archive, find_uid(&archive, "Animation", a)?).ok_or_else(|| anyhow::anyhow!("animation did not decode"))?),
+        None => None,
+    };
+
+    let (device, queue) = pollster::block_on(acb_render::headless_device())?;
+    let r = acb_render::Renderer::new(device, queue, acb_render::wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut scene = acb_render::Scene::empty(&r);
+    let handles: Vec<Option<usize>> = c.parts.iter().map(|p| scene.add_skinned(&r, &archive, &p.mesh, &p.materials)).collect();
+    if let Some(rs) = scene.retail_stats() {
+        println!("{}: {} parts; retail {} materials, {} programs, fallbacks {:?}", name(uid), c.parts.len(), rs.materials, rs.programs, rs.fallbacks);
+    }
+    for p in &c.parts {
+        let unmapped = p.mesh.bones.iter().zip(&p.bone_map).filter(|(_, m)| m.is_none()).count();
+        let mats: Vec<String> = p.materials.iter().map(|m| name(m.0)).collect();
+        println!("  {} {} verts, {} bones ({} unmapped) {:?}", name(p.mesh_uid), p.mesh.positions.len(), p.mesh.bones.len(), unmapped, mats);
+        // bind-pose skinning should be one rigid transform for every bone
+        if std::env::var_os("ACBMP_DEBUG_BONES").is_some() {
+            let g = c.skeleton.globals(&c.skeleton.bind_pose());
+            for ((b, m), inv) in p.mesh.bones.iter().zip(&p.bone_map).zip(&p.inverse_bind) {
+                let skin = m.map(|m| g[m] * *inv).unwrap_or(glam::Mat4::IDENTITY);
+                println!("    bone {:#010x} -> {:?}: t {:.3?}", b.id, m, skin.w_axis.truncate());
+            }
+        }
+    }
+
+    let frames = frames.max(1);
+    let mut strip = vec![0u8; (size * size * 4) as usize * frames];
+    let stride = (size * 4) as usize * frames;
+    for f in 0..frames {
+        let local = match &clip {
+            Some(clip) => clip.sample(&c.skeleton, if frames > 1 { clip.length * f as f32 / (frames - 1) as f32 } else { 0.0 }),
+            None => c.skeleton.bind_pose(),
+        };
+        let globals = c.skeleton.globals(&local);
+        for (h, skin) in handles.iter().zip(c.skin_matrices(&globals)) {
+            if let Some(h) = h {
+                scene.set_skinned_pose(*h, glam::Mat4::IDENTITY, &skin);
+            }
+        }
+        // frame the bones the parts are skinned to (add-on skeletons carry
+        // helper bones far from the body)
+        let used: std::collections::BTreeSet<usize> = c.parts.iter().flat_map(|p| p.bone_map.iter().flatten().copied()).collect();
+        let (lo, hi) = used.iter().map(|&i| &globals[i]).fold((glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN)), |(lo, hi), g| {
+            (lo.min(g.w_axis.truncate()), hi.max(g.w_axis.truncate()))
+        });
+        let target = (lo + hi) * 0.5;
+        let radius = ((hi - lo).length() * 0.5).max(0.9) + 0.25;
+        let fov = 40f32.to_radians();
+        let dir = glam::Vec3::new(yaw.to_radians().sin(), -yaw.to_radians().cos(), 0.25).normalize();
+        let camera = acb_render::Camera { eye: target + dir * radius / (fov * 0.5).tan(), target, fov_y: fov, aspect: 1.0 };
+        let rgba = acb_render::render_to_rgba(&r, &scene, &camera, size, size);
+        for y in 0..size as usize {
+            let row = &rgba[y * size as usize * 4..(y + 1) * size as usize * 4];
+            let at = y * stride + f * size as usize * 4;
+            strip[at..at + row.len()].copy_from_slice(row);
+        }
+    }
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&out)?), size * frames as u32, size);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(&strip)?;
+    println!("wrote {}", out.display());
     Ok(())
 }

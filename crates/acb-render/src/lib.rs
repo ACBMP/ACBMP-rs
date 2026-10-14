@@ -8,13 +8,16 @@
 //! With [`ShadingMode::Retail`] materials whose template and vertex format
 //! translate are drawn by the game's own shaders ([`retail`]); everything
 //! else keeps the placeholder `basic.wgsl` shading.
+//!
+//! Skinned meshes ([`Scene::add_skinned`]) are retail-only; the caller poses
+//! them with per-bone skin matrices ([`Scene::set_skinned_pose`]).
 
 mod retail;
 
 use std::collections::HashMap;
 use std::ops::Range;
 
-use acb_world::{Archive, PixelFormat, Texture};
+use acb_world::{Archive, PixelFormat, SkinnedMesh, Texture};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 
@@ -97,6 +100,26 @@ struct GpuMesh {
     retail_instances: Option<(wgpu::Buffer, Vec<Mat4>)>,
 }
 
+/// A posed skinned mesh: one draw per submesh, each with its own palette.
+struct GpuSkinned {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    instances: wgpu::Buffer,
+    world: Mat4,
+    /// Per mesh bone: mesh space -> model space.
+    skin: Vec<Mat4>,
+    draws: Vec<SkinnedDraw>,
+}
+
+struct SkinnedDraw {
+    range: Range<u32>,
+    material: usize,
+    /// Palette slot -> mesh bone.
+    palette: Vec<u16>,
+    frame: wgpu::Buffer,
+    consts: wgpu::BindGroup,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MaterialRef {
     Basic(usize),
@@ -150,6 +173,12 @@ pub struct Scene {
     materials: Vec<GpuMaterial>,
     retail: Option<retail::Retail>,
     retail_materials: Vec<retail::Material>,
+    /// (material, TextureSet override, vertex format) -> retail material,
+    /// None when it fell back.
+    retail_slots: HashMap<(u32, Option<u32>, u32), Option<usize>>,
+    /// Textures uploaded unconverted for the retail shaders.
+    gamma_views: HashMap<u32, Option<wgpu::TextureView>>,
+    skinned: Vec<GpuSkinned>,
     pub environment: Environment,
     /// World-space bounds of every instance origin.
     pub bounds: (Vec3, Vec3),
@@ -439,6 +468,16 @@ impl Renderer {
                     self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&rows));
                 }
             }
+            for s in &scene.skinned {
+                let rows = retail::instance_rows(view_proj, &[s.world]);
+                self.queue.write_buffer(&s.instances, 0, bytemuck::cast_slice(&rows));
+                for d in &s.draws {
+                    let palette: Vec<Mat4> =
+                        d.palette.iter().map(|&b| s.skin.get(b as usize).copied().unwrap_or(Mat4::IDENTITY)).collect();
+                    let mat = &scene.retail_materials[d.material];
+                    retail.write_skinned_frame(self, mat, &d.frame, env, camera.eye, &palette);
+                }
+            }
         }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -504,6 +543,22 @@ impl Renderer {
                     pass.draw_indexed(range.clone(), 0, 0..m.instance_count);
                 }
             }
+            let Some(retail) = &scene.retail else { continue };
+            for s in &scene.skinned {
+                pass.set_index_buffer(s.indices.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(0, s.vertices.slice(..));
+                pass.set_vertex_buffer(1, s.instances.slice(..));
+                for d in &s.draws {
+                    let mat = &scene.retail_materials[d.material];
+                    if mat.blended != blended_pass {
+                        continue;
+                    }
+                    pass.set_pipeline(retail.pipeline(mat));
+                    pass.set_bind_group(0, &d.consts, &[]);
+                    pass.set_bind_group(1, &mat.textures, &[]);
+                    pass.draw_indexed(d.range.clone(), 0, 0..1);
+                }
+            }
         }
     }
 }
@@ -513,7 +568,7 @@ impl Scene {
         let mut stats = LoadStats::default();
         let mut retail = (shading == ShadingMode::Retail).then(|| retail::Retail::new(r));
         let mut retail_materials = Vec::new();
-        let mut retail_slots: HashMap<(u32, u32), Option<usize>> = HashMap::new();
+        let mut retail_slots: HashMap<(u32, Option<u32>, u32), Option<usize>> = HashMap::new();
         let mut gamma_views: HashMap<u32, Option<wgpu::TextureView>> = HashMap::new();
         let white = r.white_texture().create_view(&Default::default());
         let mut materials = vec![r.material(&white, 0.5, false, false, false)];
@@ -555,21 +610,17 @@ impl Scene {
                     continue;
                 }
                 if let Some(retail) = &mut retail {
-                    let slot = *retail_slots.entry((s.material, mesh.format)).or_insert_with(|| {
-                        let mut load = |t: u32| {
-                            gamma_views
-                                .entry(t)
-                                .or_insert_with(|| {
-                                    let tex = archive.texture(t).ok().flatten()?;
-                                    let gpu = r.upload_texture(&tex, false)?;
-                                    Some(gpu.create_view(&Default::default()))
-                                })
-                                .clone()
-                        };
-                        let m = retail.material(r, archive, s.material, &mesh, &mut load)?;
-                        retail_materials.push(m);
-                        Some(retail_materials.len() - 1)
-                    });
+                    let slot = retail_slot(
+                        r,
+                        archive,
+                        retail,
+                        &mut retail_materials,
+                        &mut retail_slots,
+                        &mut gamma_views,
+                        s.material,
+                        None,
+                        (mesh.format, mesh.stride),
+                    );
                     if let Some(slot) = slot {
                         submeshes.push((s.first_index..s.first_index + s.index_count, MaterialRef::Retail(slot)));
                         continue;
@@ -659,11 +710,134 @@ impl Scene {
             materials,
             retail,
             retail_materials,
+            retail_slots,
+            gamma_views,
+            skinned: Vec::new(),
             environment: Environment::default(),
             bounds: (lo, hi),
         };
         Ok((scene, stats))
     }
+
+    /// A scene with nothing in it yet, drawn with the retail shaders.
+    pub fn empty(r: &Renderer) -> Self {
+        let white = r.white_texture().create_view(&Default::default());
+        Self {
+            meshes: Vec::new(),
+            materials: vec![r.material(&white, 0.5, false, false, false)],
+            retail: Some(retail::Retail::new(r)),
+            retail_materials: Vec::new(),
+            retail_slots: HashMap::new(),
+            gamma_views: HashMap::new(),
+            skinned: Vec::new(),
+            environment: Environment::default(),
+            bounds: (Vec3::ZERO, Vec3::ZERO),
+        }
+    }
+
+    /// Adds a skinned mesh drawn with `materials` (one per submesh, each
+    /// with an optional TextureSet override); returns
+    /// its handle for [`Scene::set_skinned_pose`], or `None` without retail
+    /// shading. Submeshes whose material does not translate are skipped.
+    pub fn add_skinned(
+        &mut self,
+        r: &Renderer,
+        archive: &Archive,
+        mesh: &SkinnedMesh,
+        materials: &[(u32, Option<u32>)],
+    ) -> Option<usize> {
+        let retail = self.retail.as_mut()?;
+        let mut draws = Vec::new();
+        for (s, &(material, texture_set)) in mesh.submeshes.iter().zip(materials) {
+            if s.index_count == 0 || archive.material(material).is_some_and(|m| m.disabled) {
+                continue;
+            }
+            let Some(slot) = retail_slot(
+                r,
+                archive,
+                retail,
+                &mut self.retail_materials,
+                &mut self.retail_slots,
+                &mut self.gamma_views,
+                material,
+                texture_set,
+                (mesh.format, mesh.stride),
+            ) else {
+                continue;
+            };
+            let (frame, consts) = retail.skinned_consts(r, &self.retail_materials[slot]);
+            draws.push(SkinnedDraw {
+                range: s.first_index..s.first_index + s.index_count,
+                material: slot,
+                palette: s.palette.clone(),
+                frame,
+                consts,
+            });
+        }
+        let init = |label: &str, contents: &[u8], usage| {
+            r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some(label), contents, usage })
+        };
+        self.skinned.push(GpuSkinned {
+            vertices: init("skinned vertices", &mesh.raw, wgpu::BufferUsages::VERTEX),
+            indices: init("skinned indices", bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
+            instances: r.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("skinned instance"),
+                size: retail::INSTANCE_STRIDE,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            world: Mat4::IDENTITY,
+            skin: vec![Mat4::IDENTITY; mesh.bones.len()],
+            draws,
+        });
+        Some(self.skinned.len() - 1)
+    }
+
+    /// Places a skinned mesh: `world` = model -> world, `skin` = per mesh
+    /// bone, mesh space -> model space.
+    pub fn set_skinned_pose(&mut self, handle: usize, world: Mat4, skin: &[Mat4]) {
+        if let Some(s) = self.skinned.get_mut(handle) {
+            s.world = world;
+            s.skin.clear();
+            s.skin.extend_from_slice(skin);
+        }
+    }
+
+    /// Retail material statistics so far.
+    pub fn retail_stats(&self) -> Option<&RetailStats> {
+        self.retail.as_ref().map(|r| &r.stats)
+    }
+}
+
+/// The retail material slot of `material` drawn with a vertex format,
+/// translating its program on first use.
+#[allow(clippy::too_many_arguments)]
+fn retail_slot(
+    r: &Renderer,
+    archive: &Archive,
+    retail: &mut retail::Retail,
+    materials: &mut Vec<retail::Material>,
+    slots: &mut HashMap<(u32, Option<u32>, u32), Option<usize>>,
+    gamma_views: &mut HashMap<u32, Option<wgpu::TextureView>>,
+    material: u32,
+    texture_set: Option<u32>,
+    (format, stride): (u32, usize),
+) -> Option<usize> {
+    *slots.entry((material, texture_set, format)).or_insert_with(|| {
+        let mut load = |t: u32| {
+            gamma_views
+                .entry(t)
+                .or_insert_with(|| {
+                    let tex = archive.texture(t).ok().flatten()?;
+                    let gpu = r.upload_texture(&tex, false)?;
+                    Some(gpu.create_view(&Default::default()))
+                })
+                .clone()
+        };
+        let m = retail.material(r, archive, material, texture_set, (format, stride), &mut load)?;
+        materials.push(m);
+        Some(materials.len() - 1)
+    })
 }
 
 /// Renders one frame offscreen and returns tightly packed RGBA8 pixels.
