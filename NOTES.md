@@ -232,17 +232,33 @@ its exact byte length and by key continuity (`acbmp animstats`).
 - `--play` drives the first `--character`: WASD relative to the orbit
   camera, Shift runs, right mouse orbits, wheel zooms. `--hold w,shift`
   presses keys from the start for `--capture` runs.
-- Locomotion = `xx_l_wait_hipm_footl` / `xx_l_walk_hipm_footl` /
-  `xx_h_run_hipm_footl`, blended by a 0..2 speed parameter (idle<->walk,
-  walk<->run). Walk and run share one normalized phase (both start on the
-  left foot). Translation comes from the blended per-clip root-motion
-  steps; facing is the controller's, the clips' root yaw is ignored.
-  Measured: ~1.9 m/s walk.
+- Locomotion (`acb-viewer/src/locomotion.rs`): cycles
+  `xx_l_wait_hipm_footl` / `xx_l_walk_hipm_footl` / `xx_h_run_hipm_footl` /
+  `xx_h_sprint_hipm_footl` blended by a 0..3 speed (tent weights), sharing
+  one normalized phase (all start on the left foot). Space sprints.
+  Measured root speeds: walk 1.90, run 5.12, sprint 6.28 m/s.
+- One-shots (`acbmp rootmotion <forge> <clips>` prints length, displacement,
+  yaw curve and Reference bone start/end):
+  - releasing input at run speed plays `xx_h_runstop_foot{l,r}` (0.2 s,
+    0.72 m) + `xx_h_runstop_foot{l}_tr_h_wait_hipm_foot{r}` (0.47 s, in
+    place); from sprint `xx_h_sprintstop_foot{l,r}` (0.4 s, 1.33 m). The foot
+    is the variant whose first frame is nearest the current pose.
+  - standing with input > 60 degrees away:
+    `xx_h_wait_hipm_footl_to_h_waitturn_{left,right}_{090,180}_footl`
+    (0.2 s) + `xx_h_waitturn_..._footl_tr_h_wait_hipm_foot{l|r}` (0.4 s).
+    The `_to_` clip's root track turns 90/180 degrees between 0.05 and
+    0.1 s but its pose stays in the starting frame (Reference bone yaw
+    70 -> 137 for left 90; the follow-up starts at 47 = 137 - 90), so the
+    heading is applied when it ends. Stop clips' poses do follow their root.
+  - `xx_h_runturn180_*` have no root yaw at all: the engine turns the
+    entity itself (not used yet).
+  - Cross-fades of 0.15 s from the last displayed pose.
 - Collision = the map's fixed rigid-body shapes except camera layer 18, in
   a 2 m grid; normals with |nz| >= 0.6 are floor, the rest walls. Walls are swept at 0.55 m and 1.3 m (radius 0.3,
   one slide), floor snaps from 0.6 m above (step height); moves onto no
   floor are refused. No falling, jumping or climbing.
-- Open: turn-in-place / start / stop clips (xx_h_runstop, waitturn*),
-  sprint.
+- Open: start transitions (`xx_h_wait_foot*_tr_*`), run turns, the real
+  HumanGround state machine.
 - `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and
   never present, so they work with the window hidden and are repeatable.
+  `--input "0=w,shift 1.5= 2=d"` scripts held keys over simulated time.

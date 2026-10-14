@@ -4,9 +4,10 @@
 //! mouse wheel changes the base speed, Escape quits. `--character` puts
 //! MP personas on the map's standard player spawns, playing `--anim`.
 //! `--play` hands the first one to the keyboard: WASD walk relative to the
-//! camera, Shift runs, right mouse orbits, the wheel zooms.
+//! camera, Shift runs, Space sprints, right mouse orbits, the wheel zooms.
 
 mod ground;
+mod locomotion;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -15,12 +16,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use acb_anim::character::Character;
-use acb_anim::pose::{blend, Clip};
+use acb_anim::pose::Clip;
 use acb_anim::BuiltinTracks;
 use acb_render::{wgpu, Camera, Renderer, Scene, DEPTH_FORMAT};
 use clap::Parser;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use ground::Ground;
+use locomotion::{Clips, Gait, Locomotion};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -61,20 +63,42 @@ struct Args {
     /// Drive the first character (third-person, needs --character)
     #[arg(long)]
     play: bool,
-    /// Keys held from the start, for --capture runs (w, a, s, d, shift)
+    /// Keys held from the start, for --capture runs (w, a, s, d, shift,
+    /// space)
     #[arg(long, value_delimiter = ',')]
     hold: Vec<String>,
+    /// Scripted keys over simulated time, e.g. "0=w,shift 2= 2.5=d": from
+    /// each time on exactly these keys are held (replaces --hold)
+    #[arg(long)]
+    input: Option<String>,
 }
 
-/// Generic locomotion set the player blends by speed.
-const IDLE: &str = "xx_l_wait_hipm_footl";
-const WALK: &str = "xx_l_walk_hipm_footl";
-const RUN: &str = "xx_h_run_hipm_footl";
+fn parse_keys(list: &str) -> anyhow::Result<HashSet<KeyCode>> {
+    list.split(',')
+        .filter(|k| !k.is_empty())
+        .map(|k| {
+            Ok(match k.to_ascii_lowercase().as_str() {
+                "w" => KeyCode::KeyW,
+                "a" => KeyCode::KeyA,
+                "s" => KeyCode::KeyS,
+                "d" => KeyCode::KeyD,
+                "shift" => KeyCode::ShiftLeft,
+                "space" => KeyCode::Space,
+                other => anyhow::bail!("unknown key {other}"),
+            })
+        })
+        .collect()
+}
 
-struct Loco {
-    idle: Clip,
-    walk: Clip,
-    run: Clip,
+/// `--input`: (time, keys) in time order.
+fn parse_input(script: &str) -> anyhow::Result<Vec<(f32, HashSet<KeyCode>)>> {
+    let mut out = Vec::new();
+    for item in script.split_whitespace() {
+        let (t, keys) = item.split_once('=').ok_or_else(|| anyhow::anyhow!("--input: {item}: want time=keys"))?;
+        out.push((t.parse::<f32>()?, parse_keys(keys)?));
+    }
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Ok(out)
 }
 
 /// Keyboard-driven character (actor 0) and its follow camera.
@@ -82,11 +106,7 @@ struct Player {
     pos: Vec3,
     /// Facing: entity +Y is (-sin yaw, cos yaw).
     yaw: f32,
-    /// 0 idle, 1 walk, 2 run; eases toward the input.
-    speed: f32,
-    /// Shared normalized phase of the (left-foot-first) walk and run cycles.
-    phase: f32,
-    idle_time: f32,
+    loco: Locomotion,
     cam_yaw: f32,
     cam_pitch: f32,
     cam_dist: f32,
@@ -111,10 +131,6 @@ impl Player {
         }
         (target + back * dist, target)
     }
-}
-
-fn wrap_angle(a: f32) -> f32 {
-    (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
 /// A character placed in the scene.
@@ -154,7 +170,7 @@ struct Gfx {
     scene: Scene,
     actors: Vec<Actor>,
     clip: Option<Clip>,
-    loco: Option<Loco>,
+    loco: Option<Clips>,
     ground: Option<Ground>,
 }
 
@@ -169,6 +185,8 @@ struct App {
     frames: u32,
     fps_time: Instant,
     start: Instant,
+    /// `--input` events not yet applied.
+    script: Vec<(f32, HashSet<KeyCode>)>,
     /// Simulated seconds since start (fixed 60 Hz steps in --capture runs).
     sim_time: f32,
 }
@@ -254,7 +272,7 @@ impl App {
         r: &Renderer,
         archive: &acb_world::Archive,
         scene: &mut Scene,
-    ) -> anyhow::Result<(Vec<Actor>, Option<Clip>, Option<Loco>)> {
+    ) -> anyhow::Result<(Vec<Actor>, Option<Clip>, Option<Clips>)> {
         if self.args.characters.is_empty() {
             return Ok((Vec::new(), None, None));
         }
@@ -282,12 +300,7 @@ impl App {
             eprintln!("{}: animation not found, bind pose", self.args.anim);
         }
         let loco = if self.args.play {
-            let load = |name: &str| {
-                by_name("Animation", name)
-                    .and_then(|a| Clip::load_with(archive, a, builtins.as_ref()))
-                    .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))
-            };
-            Some(Loco { idle: load(IDLE)?, walk: load(WALK)?, run: load(RUN)? })
+            Some(Clips::load(archive, builtins.as_ref())?)
         } else {
             None
         };
@@ -300,7 +313,7 @@ impl App {
             let spawn = Mat4::from_cols_array(&spawn.matrix);
             // clips that animate Reference place the pelvis in entity space
             let root_bone = character.skeleton.bones.first().map(|b| b.id);
-            let clip_i = if i == 0 && loco.is_some() { loco.as_ref().map(|l| &l.walk) } else { clip.as_ref() };
+            let clip_i = if i == 0 && loco.is_some() { loco.as_ref().map(Clips::idle) } else { clip.as_ref() };
             let model = match (clip_i, root_bone) {
                 (Some(clip), Some(id)) if clip.drives(id) => Mat4::IDENTITY,
                 _ => character.model_to_entity(),
@@ -318,14 +331,12 @@ impl App {
             self.fly.yaw = facing.y.atan2(facing.x);
             self.fly.pitch = -0.15;
             self.fly.speed = 4.0;
-            if loco.is_some() {
+            if let (Some(clips), Some(actor)) = (&loco, actors.first()) {
                 let yaw = (-facing.x).atan2(facing.y);
                 self.player = Some(Player {
                     pos: at,
                     yaw,
-                    speed: 0.0,
-                    phase: 0.0,
-                    idle_time: 0.0,
+                    loco: Locomotion::new(clips, &actor.character.skeleton),
                     cam_yaw: self.fly.yaw,
                     cam_pitch: -0.25,
                     cam_dist: 3.5,
@@ -337,6 +348,9 @@ impl App {
 
     fn animate(&mut self, dt: f32) {
         self.sim_time += dt;
+        while self.script.first().is_some_and(|e| e.0 <= self.sim_time) {
+            self.keys = self.script.remove(0).1;
+        }
         self.drive_player(dt);
         let Some(g) = &mut self.gfx else { return };
         let t = self.sim_time;
@@ -372,11 +386,11 @@ impl App {
         }
     }
 
-    /// Player locomotion: input -> facing and speed, blended idle/walk/run
-    /// pose, root motion with wall sliding and floor snapping.
+    /// Player locomotion: input -> gait and facing, clip-driven pose and
+    /// root motion with wall sliding and floor snapping.
     fn drive_player(&mut self, dt: f32) {
         let (Some(p), Some(g)) = (&mut self.player, &mut self.gfx) else { return };
-        let (Some(loco), Some(actor)) = (&g.loco, g.actors.first()) else { return };
+        let (Some(clips), Some(actor)) = (&g.loco, g.actors.first()) else { return };
         let k = |c| self.keys.contains(&c);
         let fwd = Vec2::new(p.cam_yaw.cos(), p.cam_yaw.sin());
         let right = Vec2::new(fwd.y, -fwd.x);
@@ -385,42 +399,22 @@ impl App {
         if k(KeyCode::KeyS) { dir -= fwd; }
         if k(KeyCode::KeyD) { dir += right; }
         if k(KeyCode::KeyA) { dir -= right; }
-        let target = if dir == Vec2::ZERO {
-            0.0
+        let gait = if k(KeyCode::Space) {
+            Gait::Sprint
         } else if k(KeyCode::ShiftLeft) || k(KeyCode::ShiftRight) {
-            2.0
+            Gait::Run
         } else {
-            1.0
+            Gait::Walk
         };
-        let ease = 2.5 * dt;
-        p.speed += (target - p.speed).clamp(-ease, ease);
-        if dir != Vec2::ZERO {
-            let want = (-dir.x).atan2(dir.y);
-            let turn = 7.0 * dt;
-            p.yaw = wrap_angle(p.yaw + wrap_angle(want - p.yaw).clamp(-turn, turn));
-        }
-
-        // weights: idle<->walk below 1, walk<->run above
-        let s = p.speed;
-        let (w_walk, w_run) = if s <= 1.0 { (s, 0.0) } else { (2.0 - s, s - 1.0) };
-        let (lw, lr) = (loco.walk.length, loco.run.length);
-        let (tw0, tr0) = (p.phase * lw, p.phase * lr);
-        let moving = w_walk + w_run;
-        if moving > 1e-3 {
-            p.phase = (p.phase + dt * (w_walk / lw + w_run / lr) / moving).fract();
-        }
-        let (tw, tr) = (p.phase * lw, p.phase * lr);
-        p.idle_time = (p.idle_time + dt) % loco.idle.length.max(1e-3);
-
-        let step = loco.walk.root_step(tw0, tw) * w_walk + loco.run.root_step(tr0, tr) * w_run;
-        let delta = (Quat::from_rotation_z(p.yaw) * step).truncate();
+        let step = p.loco.update(clips, &actor.character.skeleton, dir.normalize_or_zero(), gait, &mut p.yaw, dt);
+        let delta = step.delta;
         if let Some(ground) = &g.ground {
             let to = move_on(ground, p.pos, delta);
             // pressing into a wall: ease out of the cycle instead of
             // running on the spot (the run lean would put the head through)
             let len = delta.length();
             if len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3 {
-                p.speed = (p.speed - 6.0 * dt).max(0.0);
+                p.loco.blocked(dt);
             }
             p.pos = to;
         } else {
@@ -428,14 +422,7 @@ impl App {
         }
 
         let c = &actor.character;
-        let mut pose = if s <= 1.0 { loco.idle.sample(&c.skeleton, p.idle_time) } else { loco.walk.sample(&c.skeleton, tw) };
-        if s <= 1.0 {
-            if w_walk > 0.0 {
-                blend(&mut pose, &loco.walk.sample(&c.skeleton, tw), w_walk);
-            }
-        } else {
-            blend(&mut pose, &loco.run.sample(&c.skeleton, tr), w_run);
-        }
+        let pose = step.pose;
         let globals = c.skeleton.globals(&pose);
         let world = p.entity() * actor.model;
         for (h, skin) in actor.handles.iter().zip(c.skin_matrices(&globals)) {
@@ -488,7 +475,7 @@ impl App {
             Err(e) => eprintln!("capture failed: {e:#}"),
         }
         if let Some(p) = &self.player {
-            eprintln!("player at {:.2} {:.2} {:.2}", p.pos.x, p.pos.y, p.pos.z);
+            eprintln!("player at {:.2} {:.2} {:.2} yaw {:.0} speed {:.2}", p.pos.x, p.pos.y, p.pos.z, p.yaw.to_degrees(), p.loco.speed);
         }
         std::process::exit(0);
     }
@@ -522,7 +509,7 @@ impl App {
                 pos.z
             );
             if let Some(p) = &self.player {
-                status += &format!("  yaw {:.0}  speed {:.2}", p.yaw.to_degrees(), p.speed);
+                status += &format!("  yaw {:.0}  speed {:.2}", p.yaw.to_degrees(), p.loco.speed);
             }
             g.window.set_title(&status);
             if std::env::var_os("ACB_VIEWER_LOG").is_some() {
@@ -671,17 +658,8 @@ fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Res
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let mut hold = HashSet::new();
-    for k in &args.hold {
-        hold.insert(match k.to_ascii_lowercase().as_str() {
-            "w" => KeyCode::KeyW,
-            "a" => KeyCode::KeyA,
-            "s" => KeyCode::KeyS,
-            "d" => KeyCode::KeyD,
-            "shift" => KeyCode::ShiftLeft,
-            other => anyhow::bail!("--hold: unknown key {other}"),
-        });
-    }
+    let hold = parse_keys(&args.hold.join(","))?;
+    let script = args.input.as_deref().map(parse_input).transpose()?.unwrap_or_default();
     let event_loop = EventLoop::new()?;
     let mut app = App {
         args,
@@ -689,6 +667,7 @@ fn main() -> anyhow::Result<()> {
         fly: Fly { pos: Vec3::new(-20.0, -60.0, 12.0), yaw: 1.2, pitch: -0.1, speed: 12.0 },
         player: None,
         keys: hold,
+        script,
         looking: false,
         last: Instant::now(),
         frames: 0,

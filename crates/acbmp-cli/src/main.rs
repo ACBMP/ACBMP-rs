@@ -180,6 +180,16 @@ enum Cmd {
         #[arg(long, default_value_t = 8)]
         frames: usize,
     },
+    /// Root motion of animations: length, displacement, yaw, speed profile
+    Rootmotion {
+        forge: PathBuf,
+        /// Animation names (exact, case-insensitive)
+        names: Vec<String>,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        #[arg(long, env = "ACBMP_EXE")]
+        exe: PathBuf,
+    },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
     /// Count sub-objects per type hash across every .data entry
@@ -202,6 +212,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
         Cmd::Animplay { forge, name, out, schemas, frames } => animplay(forge, &name, out, schemas, frames)?,
+        Cmd::Rootmotion { forge, names, schemas, exe } => rootmotion(forge, &names, schemas, exe)?,
         Cmd::Animstats { forge, schemas, exe } => animstats(forge, schemas, exe)?,
         Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
         Cmd::Shaders { forge, name, schemas, top, fields, disasm } => shaders(forge, &name, schemas, top, fields, disasm)?,
@@ -446,6 +457,69 @@ fn collision(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::
         println!("wrote {}", path.display());
     }
     println!("{:.1}s", t0.elapsed().as_secs_f64());
+    Ok(())
+}
+
+fn rootmotion(forge: PathBuf, names: &[String], schemas: PathBuf, exe: PathBuf) -> anyhow::Result<()> {
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    let builtins = acb_anim::BuiltinTracks::from_executable(&std::fs::read(&exe)?)
+        .ok_or_else(|| anyhow::anyhow!("no builtin track table in {}", exe.display()))?;
+    let uids = archive.uids_of("Animation");
+    for name in names {
+        let Some(uid) = uids.iter().copied().find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(name))) else {
+            println!("{name}: not found");
+            continue;
+        };
+        let clip = acb_anim::pose::Clip::load_with(&archive, uid, Some(&builtins)).ok_or_else(|| anyhow::anyhow!("{name}: decode"))?;
+        let end = clip.root_motion(clip.length);
+        let (_, rot, pos) = end.to_scale_rotation_translation();
+        let (yaw, _, _) = rot.to_euler(glam::EulerRot::ZXY);
+        // speed in 8 slices
+        let n = 8;
+        let speeds: Vec<String> = (0..n)
+            .map(|i| {
+                let (a, b) = (clip.length * i as f32 / n as f32, clip.length * (i + 1) as f32 / n as f32);
+                let d = clip.root_motion(a).w_axis.truncate().distance(clip.root_motion(b).w_axis.truncate());
+                format!("{:.2}", d / (b - a).max(1e-6))
+            })
+            .collect();
+        let yaws: Vec<String> = (0..=n)
+            .map(|i| {
+                let (_, r, _) = clip.root_motion(clip.length * i as f32 / n as f32).to_scale_rotation_translation();
+                format!("{:.0}", r.to_euler(glam::EulerRot::ZXY).0.to_degrees())
+            })
+            .collect();
+        // Reference bone (pelvis in entity space): yaw at start and end
+        let reference: Vec<String> = clip
+            .tracks
+            .iter()
+            .filter(|(id, _)| *id == 0x2c52cbb0)
+            .filter_map(|(_, t)| t.quats())
+            .map(|q| {
+                let y = |q: glam::Quat| q.to_euler(glam::EulerRot::ZXY).0.to_degrees();
+                format!("ref yaw {:.0}..{:.0}", y(q[0]), y(*q.last().unwrap()))
+            })
+            .collect();
+        let reference_pos: Vec<String> = clip
+            .tracks
+            .iter()
+            .filter(|(id, _)| *id == 0x2c52cbb0)
+            .filter_map(|(_, t)| t.vec3s())
+            .map(|v| format!("ref pos {:.2?}..{:.2?}", v[0].to_array(), v.last().unwrap().to_array()))
+            .collect();
+        print!("{} {} ", reference.join(" "), reference_pos.join(" "));
+        println!(
+            "{name}: {:.3}s  move ({:.2}, {:.2}, {:.2})  yaw {:.0} [{}]  m/s [{}]",
+            clip.length,
+            pos.x,
+            pos.y,
+            pos.z,
+            yaw.to_degrees(),
+            yaws.join(" "),
+            speeds.join(" ")
+        );
+    }
     Ok(())
 }
 
