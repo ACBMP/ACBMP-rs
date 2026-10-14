@@ -160,7 +160,12 @@ fn pose_actor(scene: &mut Scene, r: &Renderer, a: &mut Actor, globals: &[Mat4], 
     for (ci, sim) in a.cloth.iter_mut().enumerate() {
         let Some(part) = c.cloths[ci].part else { continue };
         let target: Vec<Vec3> = c.cloth_targets(ci, globals).into_iter().map(|p| world.transform_point3(p)).collect();
-        sim.step(&c.cloths[ci].lod, &target, dt);
+        let capsules: Vec<(Vec3, Vec3, f32)> = c
+            .cloth_capsules(ci, globals)
+            .into_iter()
+            .map(|(a, b, r)| (world.transform_point3(a), world.transform_point3(b), r))
+            .collect();
+        sim.step(&c.cloths[ci].lod, &target, &capsules, dt);
         let local: Vec<Vec3> = sim.pos.iter().map(|p| to_model.transform_point3(*p)).collect();
         if let (Some(raw), Some(h)) = (c.cloth_vertices(ci, &local, &skins[part]), a.handles[part]) {
             scene.set_skinned_vertices(r, h, &raw);

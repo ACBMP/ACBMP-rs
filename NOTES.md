@@ -222,10 +222,16 @@ its exact byte length and by key continuity (`acbmp animstats`).
   (seam splits, counts off by 1-2), so vertices are matched by bind
   position + UV. `ClothSettings`: gravity (0,0,-10), 3 constraint
   iterations, air friction, skinning velocity factors (unused yet),
-  `Ragdoll` (body collision shapes, unused yet).
+  `Ragdoll` -> `LiteRagdoll.Capsules` (`BoneID`, `Height`, `Radius`,
+  bone-local `LocalMatrix`). Segment convention not read from the engine
+  (`LiteRagdollInstance::Update` 0x5816a0 calls it through a stub): used
+  as origin -> +X * Height, since 60 of 89 child bones sit along +X;
+  bind-pose penetration tests (`acbmp cloth --character`) cannot tell the
+  conventions apart.
 - Viewer cloth: world-space Verlet at 60 Hz, pinned particles follow the
   skin, others are pulled by skin_factor^2 / 2 per step and clamped to
-  0.05 + 0.6 (1 - skin) m from the skin (stand-in for body collision);
+  0.05 + 0.6 (1 - skin) m from the skin, and pushed out of the ragdoll
+  capsules by capsule + particle radius;
   the part is posed on the CPU (model space, identity skin matrices).
 - MP personas: `AC2MP_IDxx_Main` (BuildTable from the builder) adds head,
   eyes, legs; the body/arms/robe/accessories live in `AC2MP_IDxx_Custom1..3`

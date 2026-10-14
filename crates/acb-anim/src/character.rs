@@ -233,6 +233,20 @@ impl Character {
         }
     }
 
+    /// Model-space collision capsules (segment ends, radius) of cloth `ci`.
+    pub fn cloth_capsules(&self, ci: usize, globals: &[Mat4]) -> Vec<(Vec3, Vec3, f32)> {
+        let index: HashMap<u32, usize> = self.skeleton.bones.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+        self.cloths[ci]
+            .lod
+            .capsules
+            .iter()
+            .filter_map(|k| {
+                let m = *globals.get(*index.get(&k.bone_id)?)? * k.local;
+                Some((m.transform_point3(Vec3::ZERO), m.transform_point3(Vec3::X * k.height), k.radius))
+            })
+            .collect()
+    }
+
     /// Model-space skinned particle positions of cloth `ci`.
     pub fn cloth_targets(&self, ci: usize, globals: &[Mat4]) -> Vec<Vec3> {
         let c = &self.cloths[ci];

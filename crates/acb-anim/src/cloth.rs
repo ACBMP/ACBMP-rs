@@ -28,6 +28,20 @@ pub struct VertexMapping {
     pub weights: [f32; 3],
 }
 
+/// A `LiteRagdollCapsule` of the cloth state's `Ragdoll`: body collision.
+/// The segment runs from `local`'s origin along its +X (the bone
+/// direction in these skeletons) for `height`; particles keep
+/// `radius` + their `VertexSphereRadius` from it. The convention is
+/// inferred, not read from the engine.
+#[derive(Debug, Clone)]
+pub struct Capsule {
+    pub bone_id: u32,
+    pub height: f32,
+    pub radius: f32,
+    /// Bone-local placement (column-vector matrix).
+    pub local: glam::Mat4,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ClothSettings {
     pub gravity: Vec3,
@@ -59,6 +73,7 @@ pub struct ClothLod {
     pub visual_indices: Vec<u16>,
     /// D3D convention (V down), per mapping.
     pub visual_uvs: Vec<[f32; 2]>,
+    pub capsules: Vec<Capsule>,
 }
 
 fn f32s(b: &[u8]) -> Vec<f32> {
@@ -84,6 +99,30 @@ impl ClothLod {
             .iter()
             .filter_map(Value::as_obj)
             .find_map(|l| Self::from_obj(archive, l).filter(|c| !c.positions.is_empty()))
+            .map(|mut c| {
+                let ragdoll = archive.field(state, "Ragdoll").and_then(Value::target_id).and_then(|r| archive.root(r).ok());
+                if let Some(r) = ragdoll {
+                    c.capsules = archive
+                        .field(&r.obj, "Capsules")
+                        .map(Value::items)
+                        .unwrap_or_default()
+                        .iter()
+                        .filter_map(Value::as_obj)
+                        .map(|k| Capsule {
+                            bone_id: archive.field(k, "BoneID").and_then(Value::as_u32).unwrap_or(0),
+                            height: f32_of(archive, k, "Height"),
+                            radius: f32_of(archive, k, "Radius"),
+                            local: archive
+                                .field(k, "LocalMatrix")
+                                .and_then(Value::as_f32s)
+                                .and_then(|m| <[f32; 16]>::try_from(m).ok())
+                                .map(|m| glam::Mat4::from_cols_array(&m))
+                                .unwrap_or_default(),
+                        })
+                        .collect();
+                }
+                c
+            })
     }
 
     pub fn from_obj(archive: &Archive, o: &Obj) -> Option<ClothLod> {
@@ -154,6 +193,7 @@ impl ClothLod {
             mappings,
             visual_indices: u16s(bytes("VisualIndices")),
             visual_uvs: f32s(bytes("VisualTextureCoords")).chunks_exact(2).map(|c| [c[0], c[1]]).collect(),
+            capsules: Vec::new(),
         })
     }
 
@@ -215,7 +255,10 @@ impl ClothSim {
     /// follow the skin; the others integrate with gravity and air friction,
     /// are pulled toward the skin by their skin factor and keep their
     /// constraint lengths.
-    pub fn step(&mut self, lod: &ClothLod, target: &[Vec3], dt: f32) {
+    /// `capsules`: world-space body segments and radii (see
+    /// [`ClothLod::capsules`]); particles are pushed out of them by their
+    /// own sphere radius.
+    pub fn step(&mut self, lod: &ClothLod, target: &[Vec3], capsules: &[(Vec3, Vec3, f32)], dt: f32) {
         let n = target.len();
         if self.pos.len() != n || !self.pos.iter().all(|p| p.is_finite()) {
             self.pos = target.to_vec();
@@ -265,7 +308,23 @@ impl ClothSim {
                     self.pos[b] -= corr * wb;
                 }
             }
-            // stand-in for body collision: stay within reach of the skin
+            for i in 0..n {
+                if pin(i) >= 1.0 {
+                    continue;
+                }
+                let pr = lod.radius.get(i).copied().unwrap_or(0.0);
+                for &(a, b, r) in capsules {
+                    let ab = b - a;
+                    let t = if ab.length_squared() > 0.0 { ((self.pos[i] - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                    let c = a + ab * t;
+                    let d = self.pos[i] - c;
+                    let (len, min) = (d.length(), r + pr);
+                    if len < min && len > 1e-6 {
+                        self.pos[i] = c + d * (min / len);
+                    }
+                }
+            }
+            // and within reach of the skin
             for i in 0..n {
                 let reach = 0.05 + 0.6 * (1.0 - pin(i));
                 let d = self.pos[i] - target[i];

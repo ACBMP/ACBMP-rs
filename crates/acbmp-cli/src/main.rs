@@ -91,6 +91,9 @@ enum Cmd {
         name: String,
         #[arg(long, env = "ACBMP_SCHEMAS")]
         schemas: PathBuf,
+        /// Check ragdoll capsule conventions on this character (builder)
+        #[arg(long)]
+        character: Option<String>,
     },
     /// Census of the map's rigid bodies and shapes; optionally export them
     Collision {
@@ -262,7 +265,8 @@ fn main() -> anyhow::Result<()> {
         Cmd::Skin { forge, name, schemas } => skin(forge, &name, schemas)?,
         Cmd::Dump { forge, name, schemas, depth } => dump(forge, &name, schemas, depth)?,
         Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
-        Cmd::Cloth { forge, name, schemas } => cloth(forge, &name, schemas)?,
+        Cmd::Cloth { forge, schemas, character: Some(ch), .. } => cloth_capsules(forge, &ch, schemas)?,
+        Cmd::Cloth { forge, name, schemas, character: None } => cloth(forge, &name, schemas)?,
         Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
         Cmd::Pick { forge, schemas, eye, target, width, height, px } => pick(forge, schemas, &eye, &target, width, height, &px)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
@@ -537,6 +541,65 @@ fn pick(forge: PathBuf, schemas: PathBuf, eye: &[f32], target: &[f32], width: u3
                     p[0], p[1], t, name(e), name(m), name(mat), template, n.to_array()
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+fn cloth_capsules(forge: PathBuf, builder: &str, schemas: PathBuf) -> anyhow::Result<()> {
+    use glam::{Mat4, Vec3};
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    let uid = find_uid(&archive, "EntityBuilder", builder)?;
+    let c = acb_anim::character::Character::load_built(&archive, uid).ok_or_else(|| anyhow::anyhow!("not a character"))?;
+    let globals = c.skeleton.globals(&c.skeleton.bind_pose());
+    let index: HashMap<u32, usize> = c.skeleton.bones.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
+    // which local axis child bones sit along (the bone direction)
+    let mut axes = [0usize; 6];
+    for bone in c.skeleton.bones.iter().filter(|b| b.parent.is_some() && b.local_pos.length() > 0.05) {
+        let v = bone.local_pos.normalize();
+        let i = (0..3).max_by(|&a, &b| v[a].abs().total_cmp(&v[b].abs())).unwrap();
+        axes[i * 2 + usize::from(v[i] < 0.0)] += 1;
+    }
+    println!("child offsets by axis (+X -X +Y -Y +Z -Z): {axes:?}");
+    for (ci, cl) in c.cloths.iter().enumerate() {
+        let p = c.cloth_targets(ci, &globals);
+        println!("cloth {ci}: {} particles, {} capsules", p.len(), cl.lod.capsules.len());
+        // segment conventions in the capsule frame
+        let conv: [(&str, fn(f32) -> (Vec3, Vec3)); 6] = [
+            ("+X from origin", |h| (Vec3::ZERO, Vec3::X * h)),
+            ("X centred", |h| (Vec3::X * -h / 2.0, Vec3::X * h / 2.0)),
+            ("+Y from origin", |h| (Vec3::ZERO, Vec3::Y * h)),
+            ("Y centred", |h| (Vec3::Y * -h / 2.0, Vec3::Y * h / 2.0)),
+            ("+Z from origin", |h| (Vec3::ZERO, Vec3::Z * h)),
+            ("Z centred", |h| (Vec3::Z * -h / 2.0, Vec3::Z * h / 2.0)),
+        ];
+        for (label, f) in conv {
+            let (mut pen, mut depth) = (0, 0f32);
+            for k in &cl.lod.capsules {
+                let Some(&b) = index.get(&k.bone_id) else { continue };
+                let m: Mat4 = globals[b] * k.local;
+                let (a0, a1) = f(k.height);
+                let (a, bb) = (m.transform_point3(a0), m.transform_point3(a1));
+                for (i, q) in p.iter().enumerate() {
+                    if cl.lod.flags.get(i) == Some(&1) {
+                        continue;
+                    }
+                    let ab = bb - a;
+                    let t = if ab.length_squared() > 0.0 { ((*q - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                    let d = q.distance(a + ab * t);
+                    let r = k.radius + if std::env::var_os("ACBMP_CAPSULE_ONLY").is_some() { 0.0 } else { cl.lod.radius.get(i).copied().unwrap_or(0.0) };
+                    if d < r {
+                        pen += 1;
+                        depth = depth.max(r - d);
+                    }
+                }
+            }
+            println!("  {label:16} {pen} penetrations, deepest {depth:.3} m");
+        }
+        for k in &cl.lod.capsules {
+            let found = index.get(&k.bone_id).is_some();
+            println!("  capsule bone {:#010x} {} h {:.2} r {:.2} at {:.2?}", k.bone_id, if found { "ok" } else { "MISSING" }, k.height, k.radius, k.local.w_axis.truncate().to_array());
         }
     }
     Ok(())
