@@ -6,6 +6,7 @@
 //! `--play` hands the first one to the keyboard: WASD walk relative to the
 //! camera, Shift runs, Space sprints, right mouse orbits, the wheel zooms.
 
+mod crowd;
 mod ground;
 mod locomotion;
 
@@ -22,6 +23,7 @@ use acb_anim::BuiltinTracks;
 use acb_render::{wgpu, Camera, Renderer, Scene, DEPTH_FORMAT};
 use clap::Parser;
 use glam::{Mat4, Quat, Vec2, Vec3};
+use crowd::{Agent, Nav};
 use ground::Ground;
 use locomotion::{Clips, Gait, Locomotion};
 use winit::application::ApplicationHandler;
@@ -68,6 +70,10 @@ struct Args {
     /// space)
     #[arg(long, value_delimiter = ',')]
     hold: Vec<String>,
+    /// Add this many NPCs wandering the navmesh (round-robin over
+    /// --character)
+    #[arg(long, default_value_t = 0)]
+    crowd: usize,
     /// Start the --play character here (world x,y,z) instead of its spawn
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
     at: Option<Vec<f32>>,
@@ -156,6 +162,15 @@ struct Actor {
     epoch: u32,
     /// One simulation per `character.cloths`.
     cloth: Vec<ClothSim>,
+    /// Navmesh wanderer (--crowd) instead of the looping clip.
+    agent: Option<Agent>,
+}
+
+/// --crowd: the navmesh and the clips wanderers blend.
+struct Crowd {
+    nav: Nav,
+    idle: Clip,
+    walk: Clip,
 }
 
 /// Skins every part of an actor at `world` and steps its cloth by `dt`:
@@ -210,6 +225,7 @@ struct Gfx {
     clip: Option<Clip>,
     loco: Option<Clips>,
     ground: Option<Ground>,
+    crowd: Option<Crowd>,
 }
 
 struct App {
@@ -285,7 +301,7 @@ impl App {
             "{} meshes, {} instances, {} triangles, {} textures, loaded in {:.1}s",
             s.meshes, s.instances, s.triangles, s.textures, t0.elapsed().as_secs_f64()
         );
-        let (actors, clip, loco) = self.place_characters(&renderer, &archive, &mut scene)?;
+        let (actors, clip, loco, crowd) = self.place_characters(&renderer, &archive, &mut scene)?;
         let ground = if loco.is_some() {
             let t = Instant::now();
             let g = Ground::load(&archive)?;
@@ -299,7 +315,7 @@ impl App {
                 p.pos.z = z;
             }
         }
-        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip, loco, ground });
+        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip, loco, ground, crowd });
         self.start = Instant::now();
         self.sim_time = 0.0;
         Ok(())
@@ -310,9 +326,9 @@ impl App {
         r: &Renderer,
         archive: &acb_world::Archive,
         scene: &mut Scene,
-    ) -> anyhow::Result<(Vec<Actor>, Option<Clip>, Option<Clips>)> {
+    ) -> anyhow::Result<(Vec<Actor>, Option<Clip>, Option<Clips>, Option<Crowd>)> {
         if self.args.characters.is_empty() {
-            return Ok((Vec::new(), None, None));
+            return Ok((Vec::new(), None, None, None));
         }
         let by_name = |ty: &str, name: &str| {
             archive.uids_of(ty).into_iter().find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(name)))
@@ -358,9 +374,35 @@ impl App {
             };
             let phase = i as f32 * 0.37;
             let cloth = vec![ClothSim::default(); character.cloths.len()];
-            actors.push(Actor { character, handles, spawn, entity: spawn, model, phase, clip_time: phase, epoch: 0, cloth });
+            actors.push(Actor { character, handles, spawn, entity: spawn, model, phase, clip_time: phase, epoch: 0, cloth, agent: None });
         }
         eprintln!("{} characters on {} standard spawns", actors.len(), spawns.len());
+        let crowd = if self.args.crowd > 0 {
+            let load = |name: &str| {
+                by_name("Animation", name)
+                    .and_then(|a| Clip::load_with(archive, a, builtins.as_ref()))
+                    .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))
+            };
+            let nav = Nav::load(archive).ok_or_else(|| anyhow::anyhow!("--crowd: the map has no navmesh"))?;
+            let crowd = Crowd { nav, idle: load("xx_l_wait_hipm_footl")?, walk: load("xx_l_walk_hipm_footl")? };
+            for i in 0..self.args.crowd {
+                let character = characters[(count + i) % characters.len()].clone();
+                let handles = character.parts.iter().map(|p| scene.add_skinned(r, archive, &p.mesh, &p.materials)).collect();
+                let root_bone = character.skeleton.bones.first().map(|b| b.id);
+                let model = match root_bone {
+                    Some(id) if crowd.walk.drives(id) => Mat4::IDENTITY,
+                    _ => character.model_to_entity(),
+                };
+                let agent = Agent::new(&crowd.nav, i as u64 + 1);
+                let entity = agent.entity();
+                let cloth = vec![ClothSim::default(); character.cloths.len()];
+                actors.push(Actor { character, handles, spawn: entity, entity, model, phase: 0.0, clip_time: 0.0, epoch: 0, cloth, agent: Some(agent) });
+            }
+            eprintln!("crowd: {} wanderers on {} navmesh triangles", self.args.crowd, crowd.nav.triangles());
+            Some(crowd)
+        } else {
+            None
+        };
         // start behind the first one, looking along its facing (+Y)
         if let Some(spawn) = spawns.first().filter(|_| !actors.is_empty()) {
             let m = Mat4::from_cols_array(&spawn.matrix);
@@ -388,7 +430,7 @@ impl App {
                 });
             }
         }
-        Ok((actors, clip, loco))
+        Ok((actors, clip, loco, crowd))
     }
 
     fn animate(&mut self, dt: f32) {
@@ -403,6 +445,14 @@ impl App {
         let skip = usize::from(self.player.is_some());
         for a in g.actors.iter_mut().skip(skip) {
             let c = &a.character;
+            if let (Some(agent), Some(crowd)) = (&mut a.agent, &g.crowd) {
+                let pose = agent.update(&crowd.nav, &crowd.idle, &crowd.walk, &c.skeleton, dt);
+                a.entity = agent.entity();
+                let globals = c.skeleton.globals(&pose);
+                let world = a.entity * a.model;
+                pose_actor(&mut g.scene, &g.renderer, a, &globals, world, dt);
+                continue;
+            }
             let local = match &g.clip {
                 Some(clip) if clip.length > 0.0 => {
                     let ct = (t + a.phase) % clip.length;

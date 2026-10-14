@@ -95,6 +95,15 @@ enum Cmd {
         #[arg(long)]
         character: Option<String>,
     },
+    /// Decode the map's navmeshes; optionally export them
+    Navmesh {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Write the joined navmesh as Wavefront OBJ
+        #[arg(long)]
+        obj: Option<PathBuf>,
+    },
     /// Census of the map's rigid bodies and shapes; optionally export them
     Collision {
         forge: PathBuf,
@@ -267,6 +276,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
         Cmd::Cloth { forge, schemas, character: Some(ch), .. } => cloth_capsules(forge, &ch, schemas)?,
         Cmd::Cloth { forge, name, schemas, character: None } => cloth(forge, &name, schemas)?,
+        Cmd::Navmesh { forge, schemas, obj } => navmesh(forge, schemas, obj)?,
         Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
         Cmd::Pick { forge, schemas, eye, target, width, height, px } => pick(forge, schemas, &eye, &target, width, height, &px)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
@@ -693,6 +703,78 @@ fn cloth(forge: PathBuf, needle: &str, schemas: PathBuf) -> anyhow::Result<()> {
             fit.unwrap_or_else(|| "no visual mesh".into())
         );
     }
+    Ok(())
+}
+
+fn navmesh(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::Result<()> {
+    let t0 = Instant::now();
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let meshes = archive.navmeshes();
+    let tris: usize = meshes.iter().map(|m| m.triangles.len()).sum();
+    let bad_nb = meshes
+        .iter()
+        .flat_map(|m| m.neighbors.iter().flatten().map(move |n| (*n, m.triangles.len())))
+        .filter(|(n, len)| *n != u16::MAX && *n as usize >= *len)
+        .count();
+    if std::env::var_os("ACBMP_NAV_DEBUG").is_some() {
+        for m in meshes.iter().filter(|m| m.triangles.len() > 20).take(2) {
+            println!("mesh with {} tris, {} verts", m.triangles.len(), m.vertices.len());
+            for (i, (t, n)) in m.triangles.iter().zip(&m.neighbors).enumerate().take(12) {
+                println!("  t{i} {t:?} nb {:04x?}", n);
+            }
+        }
+    }
+    let managers: std::collections::HashSet<u32> = meshes.iter().map(|m| m.manager).collect();
+    println!(
+        "{} managers, {} navmeshes ({} inactive), {tris} triangles, {bad_nb} out-of-range neighbours",
+        managers.len(),
+        meshes.len(),
+        meshes.iter().filter(|m| !m.active).count()
+    );
+    let g = archive.nav_graph();
+    // connected components
+    let mut comp = vec![u32::MAX; g.triangles.len()];
+    let mut sizes = Vec::new();
+    for s in 0..g.triangles.len() {
+        if comp[s] != u32::MAX {
+            continue;
+        }
+        let id = sizes.len() as u32;
+        let mut stack = vec![s];
+        let mut n = 0;
+        comp[s] = id;
+        while let Some(t) = stack.pop() {
+            n += 1;
+            for (nb, _) in &g.links[t] {
+                if comp[*nb as usize] == u32::MAX {
+                    comp[*nb as usize] = id;
+                    stack.push(*nb as usize);
+                }
+            }
+        }
+        sizes.push(n);
+    }
+    sizes.sort_unstable_by(|a, b| b.cmp(a));
+    println!(
+        "graph: {} vertices, {} triangles, {} components (largest {:?})",
+        g.vertices.len(),
+        g.triangles.len(),
+        sizes.len(),
+        &sizes[..sizes.len().min(5)]
+    );
+    if let Some(path) = obj {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        for v in &g.vertices {
+            writeln!(w, "v {} {} {}", v[0], v[2], -v[1])?;
+        }
+        for t in &g.triangles {
+            writeln!(w, "f {} {} {}", t[0] + 1, t[1] + 1, t[2] + 1)?;
+        }
+        println!("wrote {}", path.display());
+    }
+    println!("{:.1}s", t0.elapsed().as_secs_f64());
     Ok(())
 }
 

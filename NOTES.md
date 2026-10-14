@@ -126,6 +126,22 @@ as such; the rest is read from decompiled code and not yet exercised.
   10 hay cart / haystack bodies, 18 camera-only proxies (`*_CamCol_*`,
   `GEN_HayStack_01X`), 24 the OOB wall. `acbmp collision <map> [--obj]`.
 
+## Navmesh
+
+- `NavMeshManager` roots (one per tile, 18 on San Donato) hold
+  `NavigationMeshes`: `VertexList` f32x4 in world space, `TriangleVertex`
+  u16 x3, `Triangles[i].NeighborTriangleIndex` u16 x3 (same mesh; 0xffe2,
+  0xffe3, 0xffe4 = -30..-28 mark border edges), `SourceEntityHandle` (the
+  ground entity it was built from), MOPP. Cross-mesh links (`MetaLinks`
+  with `SafePositions`/`TriangleList`, `DirectConnectionSets`,
+  `WayPointNetwork`) are not decoded.
+- `Archive::nav_graph` welds vertices (2 cm) and joins collinear
+  overlapping border edges (T-junctions between meshes): San Donato 8321
+  triangles, main component 7809. Other maps split into many components
+  (rooftop islands, reached by climbing). `acbmp navmesh <map> [--obj]`.
+- Viewer `--crowd N`: NPCs on the main component, A* over triangles via
+  crossing points, idle/walk blend at the walk clip's root speed.
+
 ## Animation
 
 All from the Mac build; layouts verified by every core Animation decoding to

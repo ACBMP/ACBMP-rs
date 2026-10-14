@@ -17,12 +17,14 @@ use anvil_schema::Schema;
 
 pub mod collision;
 pub mod mesh;
+pub mod navmesh;
 pub mod shading;
 pub mod skin;
 pub mod texture;
 
 pub use collision::{Collider, CollisionMesh};
 pub use mesh::StaticMesh;
+pub use navmesh::{NavGraph, NavMesh};
 pub use skin::{MeshBone, SkinnedMesh, SkinnedSubmesh};
 pub use shading::{MaterialOverride, MaterialParams, ParamValue, Permutation, ShaderParam, TemplateShaders};
 pub use texture::{PixelFormat, Texture};
