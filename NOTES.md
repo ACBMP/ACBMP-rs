@@ -86,6 +86,11 @@ as such; the rest is read from decompiled code and not yet exercised.
   g_LODBlendFactor (dithered LOD cross-fade), g_TimeOfDay,
   g_LayeredSkyUserColor, g_EntityVisualScaleFactor, g_WorldToLightProjVS,
   g_NumLights/g_OmniLights/g_SpotLights, g_ShadowedDirect.
+- Saturation check (2026-10-14): five San Donato views have 0-52 pixels
+  at >= 250 in every channel, nearly all `GEN_FabricW_01A` (white cloth,
+  Layer0_Color 0.6 -> albedo ~1.2) and `GEN_Veg_Fougere_03A`; no blown-out
+  walls reproduced. `acbmp pick <map> --eye --target --px x,y` names the
+  entity/mesh/material under a `shot` pixel.
 - Next: `StaticPrimitive::StaticPrimitive(..., GfxVertexShaderKey, ...)`
   (0x009682b0) for the other key bits; sky/time-of-day constants; shadows.
 

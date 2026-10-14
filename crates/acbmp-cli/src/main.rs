@@ -55,6 +55,23 @@ enum Cmd {
         #[arg(long)]
         placeholder: bool,
     },
+    /// What a `shot` pixel shows: entity, mesh, material under it
+    Pick {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true, default_values_t = [60.0, -80.0, 45.0])]
+        eye: Vec<f32>,
+        #[arg(long, value_delimiter = ',', allow_hyphen_values = true, default_values_t = [0.0, 0.0, 0.0])]
+        target: Vec<f32>,
+        #[arg(long, default_value_t = 1600)]
+        width: u32,
+        #[arg(long, default_value_t = 900)]
+        height: u32,
+        /// Pixel x,y (repeatable)
+        #[arg(long = "px", value_delimiter = ',')]
+        px: Vec<f32>,
+    },
     /// List placed meshes, tallest first
     Meshes {
         forge: PathBuf,
@@ -234,6 +251,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Dump { forge, name, schemas, depth } => dump(forge, &name, schemas, depth)?,
         Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
         Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
+        Cmd::Pick { forge, schemas, eye, target, width, height, px } => pick(forge, schemas, &eye, &target, width, height, &px)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
             let shading =
                 if placeholder { acb_render::ShadingMode::Placeholder } else { acb_render::ShadingMode::Retail };
@@ -410,6 +428,90 @@ fn shot(
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()?.write_image_data(&rgba)?;
     println!("wrote {}", out.display());
+    Ok(())
+}
+
+fn pick(forge: PathBuf, schemas: PathBuf, eye: &[f32], target: &[f32], width: u32, height: u32, px: &[f32]) -> anyhow::Result<()> {
+    use glam::{Mat4, Vec3, Vec4};
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    let camera = acb_render::Camera {
+        eye: Vec3::from_slice(eye),
+        target: Vec3::from_slice(target),
+        fov_y: 60f32.to_radians(),
+        aspect: width as f32 / height as f32,
+    };
+    let inv = camera.view_proj().inverse();
+    let rays: Vec<(Vec3, Vec3)> = px
+        .chunks_exact(2)
+        .map(|p| {
+            let x = 2.0 * (p[0] + 0.5) / width as f32 - 1.0;
+            let y = 1.0 - 2.0 * (p[1] + 0.5) / height as f32;
+            let un = |z: f32| {
+                let v = inv * Vec4::new(x, y, z, 1.0);
+                v.truncate() / v.w
+            };
+            let (a, b) = (un(0.0), un(1.0));
+            (a, (b - a).normalize())
+        })
+        .collect();
+    // nearest hit per ray: (t, entity, mesh, material, normal)
+    let mut best: Vec<Option<(f32, u32, u32, u32, Vec3)>> = vec![None; rays.len()];
+    let mut meshes: HashMap<u32, Option<acb_world::StaticMesh>> = HashMap::new();
+    // what the renderer hides
+    let mut hidden: HashMap<u32, bool> = HashMap::new();
+    for inst in archive.instances().into_iter().filter(|i| !i.out_of_bounds) {
+        let mesh = meshes.entry(inst.mesh).or_insert_with(|| archive.static_mesh(inst.mesh).ok().flatten());
+        let Some(mesh) = mesh else { continue };
+        let m = Mat4::from_cols_array(&inst.matrix);
+        let world: Vec<Vec3> = mesh.positions.iter().map(|p| m.transform_point3(Vec3::from(*p))).collect();
+        for sub in &mesh.submeshes {
+            if *hidden.entry(sub.material).or_insert_with(|| archive.material(sub.material).is_some_and(|m| m.disabled)) {
+                continue;
+            }
+            let r = sub.first_index as usize..(sub.first_index + sub.index_count) as usize;
+            for t in mesh.indices[r].chunks_exact(3) {
+                let [a, b, c] = [t[0], t[1], t[2]].map(|i| world[i as usize]);
+                let (e1, e2) = (b - a, c - a);
+                for (ri, (o, d)) in rays.iter().enumerate() {
+                    let p = d.cross(e2);
+                    let det = e1.dot(p);
+                    if det.abs() < 1e-12 {
+                        continue;
+                    }
+                    let s = *o - a;
+                    let u = s.dot(p) / det;
+                    let q = s.cross(e1);
+                    let v = d.dot(q) / det;
+                    let tt = e2.dot(q) / det;
+                    if u < 0.0 || v < 0.0 || u + v > 1.0 || tt <= 0.0 {
+                        continue;
+                    }
+                    if best[ri].is_none_or(|b| tt < b.0) {
+                        best[ri] = Some((tt, inst.entity, inst.mesh, sub.material, e1.cross(e2).normalize()));
+                    }
+                }
+            }
+        }
+    }
+    let name = |u: u32| archive.loc(u).map(|l| l.name.clone()).unwrap_or_else(|| format!("{u:#010x}"));
+    for (p, b) in px.chunks_exact(2).zip(best) {
+        match b {
+            None => println!("{},{}: nothing", p[0], p[1]),
+            Some((t, e, m, mat, n)) => {
+                let template = archive
+                    .root(mat)
+                    .ok()
+                    .and_then(|r| archive.field(&r.obj, "Template").and_then(|v| v.target_id()))
+                    .map(name)
+                    .unwrap_or_default();
+                println!(
+                    "{},{}: {:.1} m  entity {} ({e:#010x})  mesh {}  material {} ({mat:#010x})  template {}  normal {:.2?}",
+                    p[0], p[1], t, name(e), name(m), name(mat), template, n.to_array()
+                );
+            }
+        }
+    }
     Ok(())
 }
 
