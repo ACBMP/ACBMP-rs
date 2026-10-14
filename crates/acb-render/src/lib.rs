@@ -892,8 +892,12 @@ pub fn render_to_rgba(r: &Renderer, scene: &Scene, camera: &Camera, width: u32, 
     for y in 0..height as usize {
         out.extend_from_slice(&data[y * row as usize..y * row as usize + width as usize * 4]);
     }
-    if bgra {
-        out.chunks_exact_mut(4).for_each(|p| p.swap(0, 2));
+    for p in out.chunks_exact_mut(4) {
+        if bgra {
+            p.swap(0, 2);
+        }
+        // shaders leave height masks etc. in alpha; the screen ignores it
+        p[3] = 255;
     }
     out
 }
