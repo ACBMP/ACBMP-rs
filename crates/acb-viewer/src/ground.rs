@@ -1,15 +1,17 @@
-//! Stand-in collision until MeshShape is decoded: the map's render
-//! triangles bucketed in a 2D grid, split into walkable (floor) and steep
-//! (wall) faces.
+//! Player collision: the map's Havok shapes (`MeshShape`, `BoxShape`)
+//! bucketed in a 2D grid, split into walkable (floor) and steep (wall)
+//! faces.
 
 use std::collections::HashMap;
 
-use acb_world::Archive;
+use acb_world::{Archive, CollisionMesh};
 use glam::{Mat4, Vec2, Vec3};
 
 const CELL: f32 = 2.0;
 /// Faces with a normal at least this upright are floor, the rest walls.
 const WALKABLE_NZ: f32 = 0.6;
+/// `CollisionFilterInfo.Layer` of camera-only shapes (`*_CamCol_*`).
+const CAMERA_LAYER: u32 = 18;
 
 pub struct Ground {
     tris: Vec<[Vec3; 3]>,
@@ -45,28 +47,17 @@ fn ray_tri(o: Vec3, d: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
 impl Ground {
     pub fn load(archive: &Archive) -> anyhow::Result<Ground> {
         let mut g = Ground { tris: Vec::new(), floor: HashMap::new(), wall: HashMap::new() };
-        let mut by_mesh: HashMap<u32, Vec<Mat4>> = HashMap::new();
-        for inst in archive.instances().into_iter().filter(|i| !i.out_of_bounds) {
-            by_mesh.entry(inst.mesh).or_default().push(Mat4::from_cols_array(&inst.matrix));
-        }
-        let mut solid: HashMap<u32, bool> = HashMap::new();
-        for (uid, matrices) in by_mesh {
-            let Some(mesh) = archive.static_mesh(uid)? else { continue };
-            for sub in &mesh.submeshes {
-                // blended layers (decals, glass, fx) don't stop anyone
-                let ok = *solid.entry(sub.material).or_insert_with(|| {
-                    archive.material(sub.material).is_none_or(|m| !m.disabled && m.blend_mode == 0)
-                });
-                if !ok {
-                    continue;
-                }
-                let range = sub.first_index as usize..(sub.first_index + sub.index_count) as usize;
-                for m in &matrices {
-                    for t in mesh.indices[range.clone()].chunks_exact(3) {
-                        let v = [t[0], t[1], t[2]].map(|i| m.transform_point3(Vec3::from(mesh.positions[i as usize])));
-                        g.add(v);
-                    }
-                }
+        let mut shapes: HashMap<u32, Option<CollisionMesh>> = HashMap::new();
+        for c in archive.colliders() {
+            // camera-only proxies (haystack CamCol) and loose debris
+            if c.layer == CAMERA_LAYER || !c.fixed {
+                continue;
+            }
+            let shape = shapes.entry(c.shape).or_insert_with(|| archive.collision_mesh(c.shape).ok().flatten());
+            let Some(shape) = shape else { continue };
+            let m = Mat4::from_cols_array(&c.matrix);
+            for t in &shape.triangles {
+                g.add(t.map(|i| m.transform_point3(Vec3::from(shape.vertices[i as usize]))));
             }
         }
         Ok(g)

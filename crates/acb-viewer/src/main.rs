@@ -169,6 +169,8 @@ struct App {
     frames: u32,
     fps_time: Instant,
     start: Instant,
+    /// Simulated seconds since start (fixed 60 Hz steps in --capture runs).
+    sim_time: f32,
 }
 
 fn depth_view(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
@@ -243,6 +245,7 @@ impl App {
         }
         self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip, loco, ground });
         self.start = Instant::now();
+        self.sim_time = 0.0;
         Ok(())
     }
 
@@ -333,9 +336,10 @@ impl App {
     }
 
     fn animate(&mut self, dt: f32) {
+        self.sim_time += dt;
         self.drive_player(dt);
         let Some(g) = &mut self.gfx else { return };
-        let t = self.start.elapsed().as_secs_f32();
+        let t = self.sim_time;
         let wander = self.args.wander;
         let skip = usize::from(self.player.is_some());
         for a in g.actors.iter_mut().skip(skip) {
@@ -452,7 +456,39 @@ impl App {
         self.fly.pos += dir.normalize_or_zero() * self.fly.speed * boost * dt;
     }
 
+    fn camera(&self, g: &Gfx) -> Camera {
+        let (eye, target) = match &self.player {
+            Some(p) => p.camera_eye_target(g.ground.as_ref()),
+            None => (self.fly.pos, self.fly.pos + self.fly.forward()),
+        };
+        Camera { eye, target, fov_y: 60f32.to_radians(), aspect: g.config.width as f32 / g.config.height as f32 }
+    }
+
+    /// --capture: steps the simulation at a fixed 60 Hz without presenting
+    /// (a hidden window may never get a frame), then writes one frame.
+    fn capture_step(&mut self, path: &std::path::Path) {
+        const DT: f32 = 1.0 / 60.0;
+        self.update(DT);
+        self.animate(DT);
+        if self.sim_time < self.args.capture_after {
+            return;
+        }
+        let Some(g) = &self.gfx else { return };
+        let camera = self.camera(g);
+        let rgba = acb_render::render_to_rgba(&g.renderer, &g.scene, &camera, g.config.width, g.config.height);
+        match write_png(path, g.config.width, g.config.height, &rgba) {
+            Ok(()) => eprintln!("wrote {}", path.display()),
+            Err(e) => eprintln!("capture failed: {e:#}"),
+        }
+        if let Some(p) = &self.player {
+            eprintln!("player at {:.2} {:.2} {:.2}", p.pos.x, p.pos.y, p.pos.z);
+        }
+        std::process::exit(0);
+    }
+
     fn draw(&mut self) {
+        let Some(g) = &self.gfx else { return };
+        let camera = self.camera(g);
         let Some(g) = &mut self.gfx else { return };
         let frame = match g.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -462,26 +498,6 @@ impl App {
             }
         };
         let view = frame.texture.create_view(&Default::default());
-        let (eye, target) = match &self.player {
-            Some(p) => p.camera_eye_target(g.ground.as_ref()),
-            None => (self.fly.pos, self.fly.pos + self.fly.forward()),
-        };
-        let camera = Camera {
-            eye,
-            target,
-            fov_y: 60f32.to_radians(),
-            aspect: g.config.width as f32 / g.config.height as f32,
-        };
-        if let Some(path) = &self.args.capture {
-            if self.start.elapsed().as_secs_f32() >= self.args.capture_after {
-                let rgba = acb_render::render_to_rgba(&g.renderer, &g.scene, &camera, g.config.width, g.config.height);
-                if let Err(e) = write_png(path, g.config.width, g.config.height, &rgba) {
-                    eprintln!("capture failed: {e:#}");
-                }
-                eprintln!("wrote {}", path.display());
-                std::process::exit(0);
-            }
-        }
         let mut enc = g.renderer.device().create_command_encoder(&Default::default());
         g.renderer.render(&mut enc, &view, &g.depth, &g.scene, &camera);
         g.renderer.queue().submit([enc.finish()]);
@@ -565,6 +581,7 @@ impl ApplicationHandler for App {
                     self.fly.speed = (self.fly.speed * 1.2f32.powf(d)).clamp(1.0, 500.0);
                 }
             }
+            WindowEvent::RedrawRequested if self.args.capture.is_some() => {}
             WindowEvent::RedrawRequested => {
                 let dt = self.last.elapsed().as_secs_f32().min(0.1);
                 self.last = Instant::now();
@@ -590,7 +607,14 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn about_to_wait(&mut self, _: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(path) = self.args.capture.clone() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+            if self.gfx.is_some() {
+                self.capture_step(&path);
+            }
+            return;
+        }
         if let Some(g) = &self.gfx {
             g.window.request_redraw();
         }
@@ -663,6 +687,7 @@ fn main() -> anyhow::Result<()> {
         frames: 0,
         fps_time: Instant::now(),
         start: Instant::now(),
+        sim_time: 0.0,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

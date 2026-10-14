@@ -97,6 +97,23 @@ as such; the rest is read from decompiled code and not yet exercised.
   `AC2MP_Hay_Lock_disable_01`). Hidden.
 - Maps reference TextureSets / MaterialTemplates in the core `DataPC.forge`.
 
+## Collision
+
+- Scenery collision hangs off entity components with a `RigidBody`
+  (`InertComponent` for static scenery, `RigidBodyComponent` for props,
+  `SuspendedObjectComponent`): `RigidBody.Shape` -> shape root,
+  `FilterInfo.Layer`, `IsFixed`; `InertComponent` also has `IsGround`,
+  `IsRoof`, `IsFreeRunStarter`, `GPSurfaceNavType`.
+- `MeshShape`: `Vertices` f32x3 in the entity frame (same matrix as the
+  Visual), `IndicesTriangles` u16x3, `IndicesMaterial` u8 per triangle into
+  `Materials` (PhysicMaterial roots such as `Stone_Dirt`). `MoppCode` is the
+  Havok BV tree over them, not needed. `BoxShape`: `HalfExtents` around
+  `Matrix`; `SphereShape`: `Center`, `Radius`.
+- San Donato: 1032 colliders, 203 MeshShapes, 56k triangles. Layers seen:
+  1 scenery, 2 props (benches, fixed; small loose spheres not fixed),
+  10 hay cart / haystack bodies, 18 camera-only proxies (`*_CamCol_*`,
+  `GEN_HayStack_01X`), 24 the OOB wall. `acbmp collision <map> [--obj]`.
+
 ## Animation
 
 All from the Mac build; layouts verified by every core Animation decoding to
@@ -221,10 +238,11 @@ its exact byte length and by key continuity (`acbmp animstats`).
   left foot). Translation comes from the blended per-clip root-motion
   steps; facing is the controller's, the clips' root yaw is ignored.
   Measured: ~1.9 m/s walk.
-- Collision is a stand-in until MeshShape is decoded: render triangles of
-  opaque, enabled materials in a 2 m grid; normals with |nz| >= 0.6 are
-  floor, the rest walls. Walls are swept at 0.55 m and 1.3 m (radius 0.3,
+- Collision = the map's fixed rigid-body shapes except camera layer 18, in
+  a 2 m grid; normals with |nz| >= 0.6 are floor, the rest walls. Walls are swept at 0.55 m and 1.3 m (radius 0.3,
   one slide), floor snaps from 0.6 m above (step height); moves onto no
   floor are refused. No falling, jumping or climbing.
 - Open: turn-in-place / start / stop clips (xx_h_runstop, waitturn*),
-  sprint, a real collision mesh.
+  sprint.
+- `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and
+  never present, so they work with the window hidden and are repeatable.

@@ -63,6 +63,15 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         top: usize,
     },
+    /// Census of the map's rigid bodies and shapes; optionally export them
+    Collision {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Write every decoded shape in world space as Wavefront OBJ
+        #[arg(long)]
+        obj: Option<PathBuf>,
+    },
     /// List the roots of one type whose name contains a string
     Names {
         forge: PathBuf,
@@ -213,6 +222,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Skin { forge, name, schemas } => skin(forge, &name, schemas)?,
         Cmd::Dump { forge, name, schemas, depth } => dump(forge, &name, schemas, depth)?,
         Cmd::Meshes { forge, schemas, top } => meshes(forge, schemas, top)?,
+        Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
             let shading =
                 if placeholder { acb_render::ShadingMode::Placeholder } else { acb_render::ShadingMode::Retail };
@@ -389,6 +399,53 @@ fn shot(
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()?.write_image_data(&rgba)?;
     println!("wrote {}", out.display());
+    Ok(())
+}
+
+fn collision(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::Result<()> {
+    let t0 = Instant::now();
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let colliders = archive.colliders();
+    let mut rows: std::collections::BTreeMap<(String, String, u32), (usize, HashMap<u32, ()>)> = Default::default();
+    for c in &colliders {
+        let key = (schema.name_or_hash(c.component), archive.type_name(c.shape).unwrap_or_else(|| "?".into()), c.layer);
+        let row = rows.entry(key).or_default();
+        row.0 += 1;
+        row.1.insert(c.shape, ());
+    }
+    println!("{} colliders", colliders.len());
+    if std::env::var_os("ACBMP_LIST").is_some() {
+        for c in &colliders {
+            let name = |u: u32| archive.loc(u).map(|l| l.name.clone()).unwrap_or_else(|| format!("{u:#010x}"));
+            println!("  layer {:2} {:24} {} -> {}", c.layer, schema.name_or_hash(c.component), name(c.entity), name(c.shape));
+        }
+    }
+    for ((comp, shape, layer), (n, shapes)) in &rows {
+        println!("{n:6} {:5} shapes  {comp:24} {shape:20} layer {layer}", shapes.len());
+    }
+    let flags = |f: fn(&acb_world::Collider) -> bool| colliders.iter().filter(|c| f(c)).count();
+    println!(
+        "ground {}  roof {}  out-of-bounds {}  not fixed {}",
+        flags(|c| c.is_ground),
+        flags(|c| c.is_roof),
+        flags(|c| c.out_of_bounds),
+        flags(|c| !c.fixed)
+    );
+    let (world, skipped) = archive.world_collision();
+    println!("{} vertices, {} triangles; skipped {skipped:?}", world.vertices.len(), world.triangles.len());
+    if let Some(path) = obj {
+        use std::io::Write;
+        let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        for v in &world.vertices {
+            writeln!(w, "v {} {} {}", v[0], v[2], -v[1])?;
+        }
+        for t in &world.triangles {
+            writeln!(w, "f {} {} {}", t[0] + 1, t[1] + 1, t[2] + 1)?;
+        }
+        println!("wrote {}", path.display());
+    }
+    println!("{:.1}s", t0.elapsed().as_secs_f64());
     Ok(())
 }
 
