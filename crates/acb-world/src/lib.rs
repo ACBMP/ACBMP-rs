@@ -273,16 +273,20 @@ impl Archive<'_> {
                 visit(&r.obj);
             }
         }
+        // groups nest: every Entity object inside one
+        let entity = self.schema.hash_of("Entity");
         for uid in self.uids_of_in("EntityGroup", 0) {
             if let Ok(r) = self.root(uid) {
                 visit(&r.obj);
-                if let Some(children) = self.field(&r.obj, "Entities") {
-                    for c in children.items().iter().filter_map(Value::as_obj) {
-                        visit(c);
+                r.obj.walk(&mut |o| {
+                    if Some(o.type_hash) == entity {
+                        visit(o)
                     }
-                }
+                });
             }
         }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|i| seen.insert((i.entity, i.mesh, i.matrix.map(f32::to_bits))));
         out
     }
 

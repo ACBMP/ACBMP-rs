@@ -1,7 +1,8 @@
 //! Map collision: the Havok shapes behind entities' `RigidBody` components.
 //!
 //! Static scenery carries an `InertComponent` (or another component) whose
-//! `RigidBody.Shape` points at a shape root. `MeshShape` is a plain
+//! `RigidBody.Shape` points at a shape root; a `MultiInertComponent` holds an
+//! inline `MultiMeshShape` listing other entities and their shapes. `MeshShape` is a plain
 //! triangle soup in the entity's frame: `Vertices` f32x3, `IndicesTriangles`
 //! u16x3 and `IndicesMaterial` one u8 per triangle into `Materials`
 //! (PhysicMaterial roots such as `Stone_Dirt`). The MOPP code is Havok's
@@ -74,9 +75,38 @@ impl Archive<'_> {
             let out_of_bounds =
                 comps.iter().filter_map(Value::as_obj).any(|c| self.is_type(c, "OutOfBoundsComponent"));
             for c in comps.iter().filter_map(Value::as_obj) {
+                let flag = |o: &Obj, n: &str| self.field(o, n).and_then(Value::as_bool).unwrap_or(false);
+                // MultiInertComponent: an inline MultiMeshShape merging other
+                // entities' shapes, each placed by its entity's matrix
+                if let Some(multi) = self.field(c, "Shape").and_then(Value::as_obj) {
+                    let list = |n: &str| -> Vec<u32> {
+                        self.field(multi, n).map(Value::items).unwrap_or_default().iter().map(|v| v.target_id().unwrap_or(0)).collect()
+                    };
+                    for (ent, shape) in list("ContainedEntities").into_iter().zip(list("ContainedShapes")) {
+                        let Some(Ok(m)) = self
+                            .root(ent)
+                            .ok()
+                            .and_then(|r| self.field(&r.obj, "GlobalMatrix").and_then(Value::as_f32s))
+                            .map(<[f32; 16]>::try_from)
+                        else {
+                            continue;
+                        };
+                        out.push(Collider {
+                            entity: ent,
+                            component: c.type_hash,
+                            shape,
+                            layer: 1,
+                            fixed: true,
+                            out_of_bounds: false,
+                            is_ground: false,
+                            is_roof: false,
+                            matrix: m,
+                        });
+                    }
+                    continue;
+                }
                 let Some(rb) = self.field(c, "RigidBody").and_then(Value::as_obj) else { continue };
                 let Some(shape) = self.field(rb, "Shape").and_then(Value::target_id) else { continue };
-                let flag = |o: &Obj, n: &str| self.field(o, n).and_then(Value::as_bool).unwrap_or(false);
                 let layer = self
                     .field(rb, "FilterInfo")
                     .and_then(Value::as_obj)
@@ -101,16 +131,25 @@ impl Archive<'_> {
                 visit(&r.obj);
             }
         }
+        // groups nest: every Entity object inside one
+        let entity = self.schema().hash_of("Entity");
         for uid in self.uids_of_in("EntityGroup", 0) {
             if let Ok(r) = self.root(uid) {
                 visit(&r.obj);
-                for c in self.field(&r.obj, "Entities").map(Value::items).unwrap_or_default() {
-                    if let Some(c) = c.as_obj() {
-                        visit(c);
+                r.obj.walk(&mut |o| {
+                    if Some(o.type_hash) == entity {
+                        visit(o)
                     }
-                }
+                });
             }
         }
+        // merged entities (InertComponent.IsMerged) are also listed by a
+        // MultiMeshShape: keep one collider per entity and shape, the
+        // entity's own component first
+        let multi = self.schema().hash_of("MultiInertComponent");
+        out.sort_by_key(|c| Some(c.component) == multi);
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|c| seen.insert((c.entity, c.shape)));
         out
     }
 

@@ -114,7 +114,14 @@ as such; the rest is read from decompiled code and not yet exercised.
   `Materials` (PhysicMaterial roots such as `Stone_Dirt`). `MoppCode` is the
   Havok BV tree over them, not needed. `BoxShape`: `HalfExtents` around
   `Matrix`; `SphereShape`: `Center`, `Radius`.
-- San Donato: 1032 colliders, 203 MeshShapes, 56k triangles. Layers seen:
+- `MultiInertComponent.Shape` is an inline `MultiMeshShape`
+  (`ContainedEntities[i]` + `ContainedShapes[i]`, own MOPP): a merged
+  copy of entities whose own `InertComponent` has `IsMerged`; colliders
+  are deduplicated by (entity, shape). EntityGroups are walked
+  recursively. All 11 AC2MP maps + ACR Rome decode (9k triangles Siena,
+  a small arena, to 296k Rome); Palazzio/SanMarco/Siena also use
+  `CapsuleShape`/`CylinderShape` props (not decoded).
+- San Donato: 998 colliders, 203 MeshShapes, 56k triangles. Layers seen:
   1 scenery, 2 props (benches, fixed; small loose spheres not fixed),
   10 hay cart / haystack bodies, 18 camera-only proxies (`*_CamCol_*`,
   `GEN_HayStack_01X`), 24 the OOB wall. `acbmp collision <map> [--obj]`.

@@ -709,6 +709,68 @@ fn collision(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::
         row.1.insert(c.shape, ());
     }
     println!("{} colliders", colliders.len());
+    if std::env::var_os("ACBMP_COMPONENTS").is_some() {
+        // component types across the map's entities (roots and grouped)
+        let mut census: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut count = |e: &anvil_fastload::Obj| {
+            for c in archive.field(e, "Components").map(|v| v.items()).unwrap_or_default().iter().filter_map(|v| v.as_obj()) {
+                *census.entry(schema.name_or_hash(c.type_hash)).or_default() += 1;
+                if archive.is_type(c, "MultiInertComponent") {
+                    let shape = archive.field(c, "Shape");
+                    println!(
+                        "  MultiInert on {:#010x}: shape {:?}",
+                        e.id,
+                        shape.map(|v| match v.as_obj() {
+                            Some(o) => {
+                                let list = |n: &str| {
+                                    let items = archive.field(o, n).map(|v| v.items()).unwrap_or_default();
+                                    let first: Vec<String> = items
+                                        .iter()
+                                        .take(3)
+                                        .map(|i| match i.as_obj() {
+                                            Some(x) => format!("<{}>", schema.name_or_hash(x.type_hash)),
+                                            None => format!(
+                                                "{:?}={}",
+                                                i.target_id(),
+                                                i.target_id().and_then(|t| archive.type_name(t)).unwrap_or_default()
+                                            ),
+                                        })
+                                        .collect();
+                                    format!("{n} {} {first:?}", items.len())
+                                };
+                                format!(
+                                    "inline {} #{:#x}: {}; {}; {}",
+                                    schema.name_or_hash(o.type_hash),
+                                    o.id,
+                                    list("ContainedEntities"),
+                                    list("ContainedShapes"),
+                                    list("ContainedInerts")
+                                )
+                            }
+                            None => format!("{:?}", v.target_id()),
+                        })
+                    );
+                }
+            }
+        };
+        for uid in archive.uids_of_in("Entity", 0) {
+            if let Ok(r) = archive.root(uid) {
+                count(&r.obj);
+            }
+        }
+        for uid in archive.uids_of_in("EntityGroup", 0) {
+            if let Ok(r) = archive.root(uid) {
+                r.obj.walk(&mut |o| {
+                    if archive.is_type(o, "Entity") {
+                        count(o)
+                    }
+                });
+            }
+        }
+        for (k, v) in &census {
+            println!("  {v:6} {k}");
+        }
+    }
     if std::env::var_os("ACBMP_LIST").is_some() {
         for c in &colliders {
             let name = |u: u32| archive.loc(u).map(|l| l.name.clone()).unwrap_or_else(|| format!("{u:#010x}"));
