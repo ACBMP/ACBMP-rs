@@ -371,7 +371,18 @@ its exact byte length and by key continuity (`acbmp animstats`).
   `--at x,y,z` starts the player elsewhere; `ACBMP_TRACE=1` prints its
   state four times a simulated second. Roof at (-31.3, 42.0, 7.5) next to
   the San Donato spawn plaza drops 4.5 m.
-- Open: run turns, jumping, climbing, the real HumanGround state machine.
+- Freerun jumps: `xx_h_run_{up,front,down}_{050,300,550}cm_foot{l,r}_to_air`
+  (takeoff, 0.13-0.2 s) and `xx_h_air_..._to_surface` (landing). Their
+  root tracks are not trajectories (run_up_050cm rises 0.87 m in place):
+  the engine flies the character. Viewer: while running, a guidance ledge
+  0.4-2.2 m up within 2 m ahead (with floor behind it) or a drop with
+  floor 1.5-5.5 m ahead triggers a jump; velocity = parabola landing on
+  the target at t = dist / 6 m/s (0.4-0.8 s); pose = takeoff clip held on
+  its last frame, landing clip at touchdown, then the run at the matching
+  phase. Kind by height/distance (up > 0.3 m, down < -1 m; 050/300/550 by
+  < 2.5 / < 4 m). Chains naturally (post -> stairs on San Donato).
+- Open: run turns, climbing/hanging (wall clips), the real HumanGround
+  state machine.
 - `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and
   never present, so they work with the window hidden and are repeatable.
   `--input "0=w,shift 1.5= 2=d"` scripts held keys over simulated time.

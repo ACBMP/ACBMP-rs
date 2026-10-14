@@ -52,6 +52,9 @@ enum Id {
     Fall(usize),
     /// from the wait into walk, jog (ending on the right foot)
     Start(usize),
+    /// jump kind (see [`JUMPS`]), foot: run into the air / air onto a surface
+    Takeoff(usize, usize),
+    JumpLand(usize, usize),
     /// soft/hard/damage x (to wait, to jog)
     Land(usize),
 }
@@ -69,7 +72,22 @@ pub struct Clips {
     fall: [Clip; 2],
     land: [Clip; 6],
     start: [Clip; 2],
+    takeoff: Vec<[Clip; 2]>,
+    jump_land: Vec<[Clip; 2]>,
 }
+
+/// Jump kinds: direction and distance class of `xx_h_run_{dir}_{dist}_foot*_to_air`
+/// / `xx_h_air_{dir}_{dist}_foot*_to_surface`.
+pub const JUMPS: [(&str, &str); 8] = [
+    ("up", "050cm"),
+    ("up", "300cm"),
+    ("front", "050cm"),
+    ("front", "300cm"),
+    ("front", "550cm"),
+    ("down", "050cm"),
+    ("down", "300cm"),
+    ("down", "550cm"),
+];
 
 impl Clips {
     pub fn load(archive: &Archive, builtins: Option<&BuiltinTracks>) -> anyhow::Result<Clips> {
@@ -103,6 +121,16 @@ impl Clips {
             turn: [turn(0)?, turn(1)?, turn(2)?, turn(3)?],
             turn_settle: [settle(0)?, settle(1)?, settle(2)?, settle(3)?],
             start: [load("xx_l_wait_footl_tr_l_walk_footr")?, load("xx_l_wait_footl_tr_h_jog_footr")?],
+            takeoff: JUMPS
+                .iter()
+                .map(|(d, n)| Ok([load(&format!("xx_h_run_{d}_{n}_footl_to_air"))?, load(&format!("xx_h_run_{d}_{n}_footr_to_air"))?]))
+                .collect::<anyhow::Result<_>>()?,
+            jump_land: JUMPS
+                .iter()
+                .map(|(d, n)| {
+                    Ok([load(&format!("xx_h_air_{d}_{n}_footl_to_surface"))?, load(&format!("xx_h_air_{d}_{n}_footr_to_surface"))?])
+                })
+                .collect::<anyhow::Result<_>>()?,
             fall: [load("xx_l_walklowfall_footl_tr_fall")?, load("xx_h_runlowfall_footl_tr_fall")?],
             land: [
                 load("xx_h_landing_forward_soft_footl_tr_h_wait_footl_a")?,
@@ -132,6 +160,8 @@ impl Clips {
             Id::TurnSettle(i) => &self.turn_settle[i],
             Id::Fall(i) => &self.fall[i],
             Id::Start(i) => &self.start[i],
+            Id::Takeoff(k, f) => &self.takeoff[k][f],
+            Id::JumpLand(k, f) => &self.jump_land[k][f],
             Id::Land(i) => &self.land[i],
         }
     }
@@ -176,6 +206,8 @@ pub struct Locomotion {
     fade: Option<(Pose, f32)>,
     /// Falling: the clip into the fall pose and its time.
     air: Option<(Id, f32)>,
+    /// The landing a jump in progress ends with.
+    jump_land: Option<Id>,
     last: Pose,
 }
 
@@ -202,7 +234,7 @@ fn pose_distance(a: &[(Vec3, Quat)], b: &[(Vec3, Quat)]) -> f32 {
 
 impl Locomotion {
     pub fn new(clips: &Clips, skeleton: &Skeleton) -> Self {
-        Locomotion { speed: 0.0, phase: 0.0, idle_time: 0.0, action: None, fade: None, air: None, last: clips.idle.sample(skeleton, 0.0) }
+        Locomotion { speed: 0.0, phase: 0.0, idle_time: 0.0, action: None, fade: None, air: None, jump_land: None, last: clips.idle.sample(skeleton, 0.0) }
     }
 
     fn start(&mut self, action: Action) {
@@ -238,9 +270,31 @@ impl Locomotion {
         }
     }
 
+    /// Took off on a freerun jump of kind `kind` ([`JUMPS`]); the caller
+    /// flies the character until [`Locomotion::land`].
+    pub fn start_jump(&mut self, clips: &Clips, sk: &Skeleton, kind: usize) {
+        let f = (0..2)
+            .min_by(|&a, &b| {
+                let d = |f| pose_distance(&self.last, &clips.get(Id::Takeoff(kind, f)).sample(sk, 0.0));
+                d(a).total_cmp(&d(b))
+            })
+            .unwrap_or(0);
+        self.air = Some((Id::Takeoff(kind, f), 0.0));
+        self.jump_land = Some(Id::JumpLand(kind, f));
+        self.action = None;
+        self.fade = Some((self.last.clone(), FADE * 0.5));
+    }
+
     /// Touched down after falling `height` metres; `moving`: input held.
     pub fn land(&mut self, height: f32, moving: bool) {
         if self.air.take().is_none() {
+            return;
+        }
+        if let Some(id) = self.jump_land.take() {
+            // a planned jump lands running
+            let mut a = Action::new(vec![id], Cancel::Never);
+            a.end = (if moving { 2.0 } else { 0.0 }, 0.0);
+            self.start(a);
             return;
         }
         let severity = if height < 3.0 {

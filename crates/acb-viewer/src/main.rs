@@ -664,19 +664,50 @@ impl App {
                 }
                 p.pos = at;
             } else {
+                let running = p.loco.speed >= 1.5 && dir != Vec2::ZERO;
+                let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+                // freerun: up onto a ledge ahead
+                let up = running.then(|| ground.ledge_ahead(p.pos, fwd, 2.0, 0.4, 2.2)).flatten();
                 let (to, ledge) = move_on(ground, p.pos, delta);
                 // pressing into a wall: ease out of the cycle instead of
                 // running on the spot (the run lean would put the head through)
                 let len = delta.length();
-                if len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3 {
+                if up.is_none() && len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3 {
                     p.loco.blocked(dt);
                 }
-                if ledge {
-                    p.loco.start_fall();
-                    p.vel = (delta / dt.max(1e-4)).extend(0.0);
-                    p.fall_from = p.pos.z;
+                // freerun: over a gap instead of dropping into it
+                let across = (ledge && running).then(|| jump_target(ground, p.pos, fwd)).flatten();
+                if let Some(target) = up.or(across) {
+                    let d = target - p.pos;
+                    let horiz = d.truncate().length();
+                    let kind = match (d.z, horiz) {
+                        (z, _) if z > 0.3 => usize::from(z > 1.2),          // up 050 / 300
+                        (z, h) if z < -1.0 => 5 + usize::from(h > 2.5) + usize::from(h > 4.0), // down
+                        (_, h) => 2 + usize::from(h > 2.5) + usize::from(h > 4.0), // front
+                    };
+                    // a parabola that comes down onto the target at `t`
+                    // (descending there, so it clears the edge before it)
+                    let t = (horiz / 6.0).clamp(0.4, 0.8);
+                    p.vel = (d.truncate() / t).extend((d.z + 0.05 + 0.5 * GRAVITY * t * t) / t);
+                    p.fall_from = p.pos.z.max(target.z);
+                    p.loco.start_jump(clips, &actor.character.skeleton, kind);
+                    if std::env::var_os("ACBMP_TRACE").is_some() {
+                        eprintln!(
+                            "jump {} from {:.2?} to {:.2?} ({}) in {t:.2}s",
+                            locomotion::JUMPS[kind].0,
+                            p.pos.to_array(),
+                            target.to_array(),
+                            if up.is_some() { "ledge" } else { "gap" }
+                        );
+                    }
+                } else {
+                    if ledge {
+                        p.loco.start_fall();
+                        p.vel = (delta / dt.max(1e-4)).extend(0.0);
+                        p.fall_from = p.pos.z;
+                    }
+                    p.pos = to;
                 }
-                p.pos = to;
             }
         } else {
             p.pos += delta.extend(0.0);
@@ -916,6 +947,21 @@ fn slide(ground: &Ground, pos: Vec3, delta: Vec2) -> Vec3 {
         }
     }
     at
+}
+
+/// Where a running jump off a drop at `pos` along `fwd` lands: the first
+/// floor 1.5 to 5.5 m ahead no more than 0.6 m higher and 5 m lower, with
+/// headroom on the way.
+fn jump_target(ground: &Ground, pos: Vec3, fwd: Vec2) -> Option<Vec3> {
+    (6..=22).map(|i| i as f32 * 0.25).find_map(|d| {
+        let q = pos + (fwd * d).extend(0.0);
+        let z = ground.floor_below(q + Vec3::Z * 0.6)?;
+        if z < pos.z - 5.0 {
+            return None;
+        }
+        // nothing in the way at chest height
+        ground.sweep_wall(pos + Vec3::Z * 1.3, fwd * d, 0.3).is_none().then(|| q.with_z(z))
+    })
 }
 
 /// Moves a character standing at `pos` by `delta`: slides along walls and

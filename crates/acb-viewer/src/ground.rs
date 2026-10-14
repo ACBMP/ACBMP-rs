@@ -17,6 +17,10 @@ pub struct Ground {
     tris: Vec<[Vec3; 3]>,
     floor: HashMap<(i32, i32), Vec<u32>>,
     wall: HashMap<(i32, i32), Vec<u32>>,
+    /// Freerun guidance edges with an upward face (ledges): ends, up
+    /// face normal.
+    ledges: Vec<(Vec3, Vec3)>,
+    ledge_grid: HashMap<(i32, i32), Vec<u32>>,
 }
 
 fn cell(p: Vec2) -> (i32, i32) {
@@ -46,7 +50,22 @@ fn ray_tri(o: Vec3, d: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
 
 impl Ground {
     pub fn load(archive: &Archive) -> anyhow::Result<Ground> {
-        let mut g = Ground { tris: Vec::new(), floor: HashMap::new(), wall: HashMap::new() };
+        let mut g = Ground { tris: Vec::new(), floor: HashMap::new(), wall: HashMap::new(), ledges: Vec::new(), ledge_grid: HashMap::new() };
+        for e in archive.guidance_edges() {
+            // keep edges with a walkable face on top
+            if !e.normals.iter().any(|n| n[2] > 0.7) {
+                continue;
+            }
+            let (a, b) = (Vec3::from(e.a), Vec3::from(e.b));
+            let id = g.ledges.len() as u32;
+            g.ledges.push((a, b));
+            let (lo, hi) = (cell(a.truncate().min(b.truncate())), cell(a.truncate().max(b.truncate())));
+            for x in lo.0..=hi.0 {
+                for y in lo.1..=hi.1 {
+                    g.ledge_grid.entry((x, y)).or_default().push(id);
+                }
+            }
+        }
         let mut shapes: HashMap<u32, Option<CollisionMesh>> = HashMap::new();
         for c in archive.colliders() {
             // camera-only proxies (haystack CamCol) and loose debris
@@ -79,6 +98,42 @@ impl Ground {
                 grid.entry((x, y)).or_default().push(id);
             }
         }
+    }
+
+    /// A ledge to jump up onto from `pos` running along `fwd` (unit): the
+    /// nearest guidance edge ahead within `reach` metres whose top is `min`
+    /// to `max` above the feet and has floor just behind it. Returns the
+    /// landing point on top.
+    pub fn ledge_ahead(&self, pos: Vec3, fwd: Vec2, reach: f32, min: f32, max: f32) -> Option<Vec3> {
+        let probe = pos.truncate() + fwd * reach * 0.5;
+        let (c0, c1) = (cell(probe - Vec2::splat(reach)), cell(probe + Vec2::splat(reach)));
+        let mut best: Option<(f32, Vec3)> = None;
+        for x in c0.0..=c1.0 {
+            for y in c0.1..=c1.1 {
+                for &i in self.ledge_grid.get(&(x, y)).into_iter().flatten() {
+                    let (a, b) = self.ledges[i as usize];
+                    // closest point of the edge to the line ahead
+                    let ab = b - a;
+                    let t = if ab.length_squared() > 1e-6 { ((pos - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                    let q = a + ab * t;
+                    let d = (q - pos).truncate();
+                    let (dist, dz) = (d.length(), q.z - pos.z);
+                    if dist < 0.3 || dist > reach || dz < min || dz > max || d.normalize().dot(fwd) < 0.8 {
+                        continue;
+                    }
+                    // somewhere to stand just past the edge
+                    let land = q + (fwd * 0.45).extend(0.0);
+                    let Some(z) = self.floor_below(land + Vec3::Z * 0.5) else { continue };
+                    if (z - q.z).abs() > 0.3 {
+                        continue;
+                    }
+                    if best.is_none_or(|(bd, _)| dist < bd) {
+                        best = Some((dist, land.with_z(z)));
+                    }
+                }
+            }
+        }
+        best.map(|b| b.1)
     }
 
     pub fn triangles(&self) -> usize {
