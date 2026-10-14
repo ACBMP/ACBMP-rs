@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use acb_world::{Archive, MaterialParams, ParamValue, Permutation};
+use acb_world::{Archive, MaterialOverride, MaterialParams, ParamValue, Permutation};
 use d3d9_shader::parse::{RegisterSet, SamplerType};
 use d3d9_shader::wgsl::{self, InputKind, Options};
 use glam::{Mat4, Vec3};
@@ -329,12 +329,12 @@ impl Retail {
         r: &Renderer,
         archive: &Archive,
         uid: u32,
-        texture_set: Option<u32>,
+        ov: &MaterialOverride,
         (format, stride): (u32, usize),
         textures: &mut dyn FnMut(u32) -> Option<wgpu::TextureView>,
     ) -> Option<Material> {
         let Some(info) = archive.material(uid) else { return self.fallback("no material") };
-        let Some(params) = archive.material_params_with_set(uid, texture_set) else { return self.fallback("no template") };
+        let Some(params) = archive.material_params_overridden(uid, ov) else { return self.fallback("no template") };
         let key = ProgramKey {
             template: params.template,
             format,

@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use acb_world::{Archive, SkinnedMesh};
+use acb_world::{Archive, MaterialOverride, SkinnedMesh};
 use anvil_fastload::{Obj, Value};
 use glam::{Mat4, Vec3, Vec4};
 
@@ -39,9 +39,9 @@ use crate::pose::{Bone, Skeleton};
 pub struct CharacterPart {
     pub mesh_uid: u32,
     pub mesh: SkinnedMesh,
-    /// Material per submesh after overrides, with the TextureSet an
-    /// EntityBuilder assigns it.
-    pub materials: Vec<(u32, Option<u32>)>,
+    /// Material per submesh after overrides, with what an EntityBuilder
+    /// changes on it (TextureSet, custom colours).
+    pub materials: Vec<(u32, MaterialOverride)>,
     /// Mesh bone -> skeleton bone; None only when no bone of the mesh maps.
     pub bone_map: Vec<Option<usize>>,
     /// Per mesh bone: mesh space -> bone space at bind time.
@@ -55,8 +55,8 @@ pub struct Character {
     pub parts: Vec<CharacterPart>,
     /// The Entity's MaterialOverrider: placeholder -> real material.
     overrides: HashMap<u32, u32>,
-    /// Builder-assigned TextureSets per material.
-    texture_sets: HashMap<u32, u32>,
+    /// Builder changes per material.
+    material_changes: HashMap<u32, MaterialOverride>,
 }
 
 /// Decodes a `PackedOrthonormalMatrix` (see the module docs).
@@ -128,7 +128,7 @@ impl Character {
             }
         }
 
-        let mut c = Character { entity, skeleton, parts: Vec::new(), overrides, texture_sets: HashMap::new() };
+        let mut c = Character { entity, skeleton, parts: Vec::new(), overrides, material_changes: HashMap::new() };
         for v in comps.iter().filter(|c| archive.is_type(c, "Visual")) {
             let Some(object) = archive.field(v, "Object").and_then(Value::target_id) else { continue };
             let mut local = HashMap::new();
@@ -175,7 +175,7 @@ impl Character {
             .iter()
             .map(|s| {
                 let m = self.overrides.get(&s.material).or(instance_materials.get(&s.material)).copied().unwrap_or(s.material);
-                (m, self.texture_sets.get(&m).copied())
+                (m, self.material_changes.get(&m).cloned().unwrap_or_default())
             })
             .collect();
         let mut bone_map: Vec<Option<usize>> = mesh.bones.iter().map(|b| bone_index.get(&b.id).copied()).collect();
@@ -244,10 +244,11 @@ impl Character {
         let row = archive.field(table, "Rows").map(Value::items).unwrap_or_default().first().and_then(Value::as_obj);
         let values: HashMap<u32, &Value> =
             row.and_then(|r| r.dyn_props.as_ref()).into_iter().flatten().map(|d| (d.name_hash, &d.value)).collect();
-        let (mut adds, mut sets) = (Vec::new(), Vec::new());
+        let (mut adds, mut changed) = (Vec::new(), Vec::new());
         for col in archive.field(table, "Columns").map(Value::items).unwrap_or_default().iter().filter_map(Value::as_obj) {
             let Some(id) = archive.field(col, "ColumnID").and_then(Value::as_u32) else { continue };
-            let Some(value) = values.get(&id).and_then(|v| v.target_id()).filter(|u| *u != 0) else { continue };
+            let Some(&raw) = values.get(&id) else { continue };
+            let value = raw.target_id().unwrap_or(0);
             let pass = archive.field(col, "Pass").and_then(Value::as_u32);
             let nodes = archive
                 .field(col, "TargetProperty")
@@ -256,7 +257,7 @@ impl Character {
                 .map(Value::items)
                 .unwrap_or_default();
             match (pass, nodes) {
-                (Some(5), []) => adds.push((archive.type_name(value).unwrap_or_default(), value)),
+                (Some(5), []) if value != 0 => adds.push((archive.type_name(value).unwrap_or_default(), value)),
                 (_, [first, second]) => {
                     let material = first
                         .as_obj()
@@ -266,9 +267,15 @@ impl Character {
                         .and_then(|s| archive.field(s, "TargetMaterial"))
                         .and_then(Value::target_id);
                     let property = second.as_obj().and_then(|n| archive.field(n, "TargetPropertyID")).and_then(Value::as_u32);
-                    if let (Some(material), Some(TEXTURE_SET)) = (material, property) {
-                        sets.push((material, value));
+                    let (Some(material), Some(property)) = (material, property) else { continue };
+                    let change = self.material_changes.entry(material).or_default();
+                    match (property, raw.as_f32s().as_deref()) {
+                        (TEXTURE_SET, _) if value != 0 => change.texture_set = Some(value),
+                        // `_Custom_Colors`: Custom_Color_1/2 and the like
+                        (_, Some(&[r, g, b, a])) => change.set_vector(property, [r, g, b, a]),
+                        _ => continue,
                     }
+                    changed.push(material);
                 }
                 _ => {}
             }
@@ -297,10 +304,10 @@ impl Character {
                 _ => {}
             }
         }
-        for (material, set) in sets {
-            self.texture_sets.insert(material, set);
+        for material in changed {
+            let change = &self.material_changes[&material];
             for m in self.parts.iter_mut().flat_map(|p| p.materials.iter_mut()).filter(|m| m.0 == material) {
-                m.1 = Some(set);
+                m.1 = change.clone();
             }
         }
     }

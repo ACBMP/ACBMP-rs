@@ -203,8 +203,11 @@ its exact byte length and by key continuity (`acbmp animstats`).
   ClothLOD particles/constraints, not simulated yet). Pass 4 with
   [MaterialPropertyPathNodeSolver(TargetMaterial), TargetPropertyID
   0xd70e6670 = CRC32("TextureSet")] sets a shared material's TextureSet
-  (`UA_Ezio_Head` -> `UA_Ezio_Head_Set`); `_Custom_Colors` columns use
-  property 0xdf1ed286 (colour, not applied yet).
+  (`UA_Ezio_Head` -> `UA_Ezio_Head_Set`); `_Custom_Colors` columns (same
+  pass-4 path) set `Custom_Color_1` 0xdf1f9c86 (some also
+  `Custom_Color_2` 0x4616cd3c) to row f32x4 colours; the
+  `AC2MP_Characters_Body` PS reads them at c128/c129 (materials default to
+  white). Applied as `MaterialOverride` vectors.
 - MP personas: `AC2MP_IDxx_Main` (BuildTable from the builder) adds head,
   eyes, legs; the body/arms/robe/accessories live in `AC2MP_IDxx_Custom1..3`
   (+`_ext`, spelling varies: `ID17_Cutom3_ext`) and `_Custom_Colors`

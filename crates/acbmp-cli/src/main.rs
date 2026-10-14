@@ -27,6 +27,9 @@ enum Cmd {
         /// Rows to print
         #[arg(long, default_value_t = 30)]
         top: usize,
+        /// Also list roots holding a dynamic property with this key
+        #[arg(long, value_parser = parse_u32)]
+        dyn_key: Option<u32>,
     },
     /// Export a map's static geometry as binary glTF
     Gltf {
@@ -267,7 +270,7 @@ fn main() -> anyhow::Result<()> {
                 s.instances, s.meshes, s.skipped_meshes, s.triangles, t0.elapsed().as_secs_f64()
             );
         }
-        Cmd::Fastload { forge, schemas, top } => fastload(forge, schemas, top)?,
+        Cmd::Fastload { forge, schemas, top, dyn_key } => fastload(forge, schemas, top, dyn_key)?,
     }
     Ok(())
 }
@@ -349,7 +352,7 @@ fn open_map<'s>(map: &std::path::Path, schema: &'s anvil_schema::Schema) -> anyh
     Ok(acb_world::open_map(map, schema)?)
 }
 
-fn fastload(path: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
+fn fastload(path: PathBuf, schemas: PathBuf, top: usize, dyn_key: Option<u32>) -> anyhow::Result<()> {
     let t0 = Instant::now();
     let schema = load_schema(&schemas)?;
     let codec = anvil_fastload::Codec::new(&schema);
@@ -360,11 +363,25 @@ fn fastload(path: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
     let mut nested = 0usize;
     for e in entries.iter().filter(|e| !e.is_metafile()) {
         for o in DataFile::parse(&forge.read(e)?)?.objects {
+            let o_name = o.name.clone();
             let slot = per_type.entry(o.type_hash).or_default();
             match codec.decode(&o.payload) {
                 Ok(root) => {
                     slot.0 += 1;
-                    root.obj.walk(&mut |_| nested += 1);
+                    root.obj.walk(&mut |o| {
+                        nested += 1;
+                        if let Some(k) = dyn_key {
+                            for d in o.dyn_props.iter().flatten().filter(|d| d.name_hash == k) {
+                                println!(
+                                    "{:#010x} ({}) in {}: {:?}",
+                                    o.id,
+                                    schema.name_or_hash(o.type_hash),
+                                    o_name,
+                                    d.value.as_f32s().unwrap_or_default()
+                                );
+                            }
+                        }
+                    });
                 }
                 Err(err) => {
                     slot.1 += 1;

@@ -38,6 +38,29 @@ pub enum ParamValue {
     Texture(Option<u32>),
 }
 
+/// What an EntityBuilder changes on a shared material: its TextureSet and
+/// vector properties by id (e.g. `Custom_Color_1` from `_Custom_Colors`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MaterialOverride {
+    pub texture_set: Option<u32>,
+    pub vectors: Vec<(u32, [f32; 4])>,
+}
+
+impl MaterialOverride {
+    /// Hashable identity, for caching translated materials.
+    pub fn key(&self) -> (Option<u32>, Vec<(u32, [u32; 4])>) {
+        (self.texture_set, self.vectors.iter().map(|(id, v)| (*id, v.map(f32::to_bits))).collect())
+    }
+
+    /// Sets (or replaces) one vector property.
+    pub fn set_vector(&mut self, id: u32, v: [f32; 4]) {
+        match self.vectors.iter_mut().find(|(i, _)| *i == id) {
+            Some(slot) => slot.1 = v,
+            None => self.vectors.push((id, v)),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MaterialParams {
     pub template: u32,
@@ -141,6 +164,15 @@ impl Archive<'_> {
     /// Template and parameter values of a Material.
     pub fn material_params(&self, uid: u32) -> Option<MaterialParams> {
         self.material_params_with_set(uid, None)
+    }
+
+    /// [`Archive::material_params`] with an EntityBuilder's changes applied.
+    pub fn material_params_overridden(&self, uid: u32, ov: &MaterialOverride) -> Option<MaterialParams> {
+        let mut p = self.material_params_with_set(uid, ov.texture_set)?;
+        for (id, v) in &ov.vectors {
+            p.values.insert(*id, ParamValue::Vector(*v));
+        }
+        Some(p)
     }
 
     /// [`Archive::material_params`] with the material's TextureSet replaced
