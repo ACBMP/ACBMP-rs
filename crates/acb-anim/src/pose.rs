@@ -170,6 +170,11 @@ impl Clip {
         }
     }
 
+    /// Translation of [`Clip::root_delta`], cheaper to blend.
+    pub fn root_step(&self, from: f32, to: f32) -> Vec3 {
+        self.root_delta(from, to).w_axis.truncate()
+    }
+
     /// Whether some track animates bone `id`.
     pub fn drives(&self, id: u32) -> bool {
         self.tracks.iter().any(|(t, _)| *t == id)
@@ -194,4 +199,14 @@ fn key_span(times: &[u32], frame: f32) -> (usize, usize, f32) {
     let k = times.partition_point(|&t| t as f32 <= frame) - 1;
     let (a, b) = (times[k] as f32, times[k + 1] as f32);
     (k, k + 1, if b > a { (frame - a) / (b - a) } else { 0.0 })
+}
+
+/// Blends `other` into `pose` by weight `w` (0 keeps `pose`): lerped
+/// translations, shortest-path normalized-lerped rotations.
+pub fn blend(pose: &mut [(Vec3, Quat)], other: &[(Vec3, Quat)], w: f32) {
+    for ((t, q), (ot, oq)) in pose.iter_mut().zip(other) {
+        *t = t.lerp(*ot, w);
+        let oq = if q.dot(*oq) < 0.0 { -*oq } else { *oq };
+        *q = q.lerp(oq, w).normalize();
+    }
 }

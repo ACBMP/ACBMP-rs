@@ -3,6 +3,10 @@
 //! WASD move, Space/C up/down, hold right mouse to look, Shift for speed,
 //! mouse wheel changes the base speed, Escape quits. `--character` puts
 //! MP personas on the map's standard player spawns, playing `--anim`.
+//! `--play` hands the first one to the keyboard: WASD walk relative to the
+//! camera, Shift runs, right mouse orbits, the wheel zooms.
+
+mod ground;
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -11,11 +15,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use acb_anim::character::Character;
-use acb_anim::pose::Clip;
+use acb_anim::pose::{blend, Clip};
 use acb_anim::BuiltinTracks;
 use acb_render::{wgpu, Camera, Renderer, Scene, DEPTH_FORMAT};
 use clap::Parser;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec2, Vec3};
+use ground::Ground;
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
@@ -53,6 +58,63 @@ struct Args {
     /// many seconds (no collision yet); 0 animates in place
     #[arg(long, default_value_t = 6.0)]
     wander: f32,
+    /// Drive the first character (third-person, needs --character)
+    #[arg(long)]
+    play: bool,
+    /// Keys held from the start, for --capture runs (w, a, s, d, shift)
+    #[arg(long, value_delimiter = ',')]
+    hold: Vec<String>,
+}
+
+/// Generic locomotion set the player blends by speed.
+const IDLE: &str = "xx_l_wait_hipm_footl";
+const WALK: &str = "xx_l_walk_hipm_footl";
+const RUN: &str = "xx_h_run_hipm_footl";
+
+struct Loco {
+    idle: Clip,
+    walk: Clip,
+    run: Clip,
+}
+
+/// Keyboard-driven character (actor 0) and its follow camera.
+struct Player {
+    pos: Vec3,
+    /// Facing: entity +Y is (-sin yaw, cos yaw).
+    yaw: f32,
+    /// 0 idle, 1 walk, 2 run; eases toward the input.
+    speed: f32,
+    /// Shared normalized phase of the (left-foot-first) walk and run cycles.
+    phase: f32,
+    idle_time: f32,
+    cam_yaw: f32,
+    cam_pitch: f32,
+    cam_dist: f32,
+}
+
+impl Player {
+    fn entity(&self) -> Mat4 {
+        Mat4::from_rotation_translation(Quat::from_rotation_z(self.yaw), self.pos)
+    }
+
+    fn look(&self) -> Vec3 {
+        Vec3::new(self.cam_yaw.cos() * self.cam_pitch.cos(), self.cam_yaw.sin() * self.cam_pitch.cos(), self.cam_pitch.sin())
+    }
+
+    fn camera_eye_target(&self, ground: Option<&Ground>) -> (Vec3, Vec3) {
+        let target = self.pos + Vec3::Z * 1.6;
+        let mut dist = self.cam_dist;
+        // pull in rather than look through a wall behind the player
+        let back = -self.look();
+        if let Some((f, _)) = ground.and_then(|g| g.sweep_wall(target, back.truncate() * dist, 0.3)) {
+            dist = (dist * f).max(0.8);
+        }
+        (target + back * dist, target)
+    }
+}
+
+fn wrap_angle(a: f32) -> f32 {
+    (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
 /// A character placed in the scene.
@@ -92,12 +154,15 @@ struct Gfx {
     scene: Scene,
     actors: Vec<Actor>,
     clip: Option<Clip>,
+    loco: Option<Loco>,
+    ground: Option<Ground>,
 }
 
 struct App {
     args: Args,
     gfx: Option<Gfx>,
     fly: Fly,
+    player: Option<Player>,
     keys: HashSet<KeyCode>,
     looking: bool,
     last: Instant,
@@ -162,8 +227,21 @@ impl App {
             "{} meshes, {} instances, {} triangles, {} textures, loaded in {:.1}s",
             s.meshes, s.instances, s.triangles, s.textures, t0.elapsed().as_secs_f64()
         );
-        let (actors, clip) = self.place_characters(&renderer, &archive, &mut scene)?;
-        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip });
+        let (actors, clip, loco) = self.place_characters(&renderer, &archive, &mut scene)?;
+        let ground = if loco.is_some() {
+            let t = Instant::now();
+            let g = Ground::load(&archive)?;
+            eprintln!("ground: {} triangles in {:.1}s", g.triangles(), t.elapsed().as_secs_f64());
+            Some(g)
+        } else {
+            None
+        };
+        if let (Some(p), Some(g)) = (&mut self.player, &ground) {
+            if let Some(z) = g.floor_below(p.pos + Vec3::Z * 1.0) {
+                p.pos.z = z;
+            }
+        }
+        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, actors, clip, loco, ground });
         self.start = Instant::now();
         Ok(())
     }
@@ -173,9 +251,9 @@ impl App {
         r: &Renderer,
         archive: &acb_world::Archive,
         scene: &mut Scene,
-    ) -> anyhow::Result<(Vec<Actor>, Option<Clip>)> {
+    ) -> anyhow::Result<(Vec<Actor>, Option<Clip>, Option<Loco>)> {
         if self.args.characters.is_empty() {
-            return Ok((Vec::new(), None));
+            return Ok((Vec::new(), None, None));
         }
         let by_name = |ty: &str, name: &str| {
             archive.uids_of(ty).into_iter().find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(name)))
@@ -200,6 +278,16 @@ impl App {
         if clip.is_none() {
             eprintln!("{}: animation not found, bind pose", self.args.anim);
         }
+        let loco = if self.args.play {
+            let load = |name: &str| {
+                by_name("Animation", name)
+                    .and_then(|a| Clip::load_with(archive, a, builtins.as_ref()))
+                    .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))
+            };
+            Some(Loco { idle: load(IDLE)?, walk: load(WALK)?, run: load(RUN)? })
+        } else {
+            None
+        };
         let spawns: Vec<_> = archive.player_spawns().into_iter().filter(|s| s.kind == 0).collect();
         let count = self.args.count.unwrap_or(characters.len()).min(spawns.len());
         let mut actors = Vec::new();
@@ -209,7 +297,8 @@ impl App {
             let spawn = Mat4::from_cols_array(&spawn.matrix);
             // clips that animate Reference place the pelvis in entity space
             let root_bone = character.skeleton.bones.first().map(|b| b.id);
-            let model = match (&clip, root_bone) {
+            let clip_i = if i == 0 && loco.is_some() { loco.as_ref().map(|l| &l.walk) } else { clip.as_ref() };
+            let model = match (clip_i, root_bone) {
                 (Some(clip), Some(id)) if clip.drives(id) => Mat4::IDENTITY,
                 _ => character.model_to_entity(),
             };
@@ -226,15 +315,30 @@ impl App {
             self.fly.yaw = facing.y.atan2(facing.x);
             self.fly.pitch = -0.15;
             self.fly.speed = 4.0;
+            if loco.is_some() {
+                let yaw = (-facing.x).atan2(facing.y);
+                self.player = Some(Player {
+                    pos: at,
+                    yaw,
+                    speed: 0.0,
+                    phase: 0.0,
+                    idle_time: 0.0,
+                    cam_yaw: self.fly.yaw,
+                    cam_pitch: -0.25,
+                    cam_dist: 3.5,
+                });
+            }
         }
-        Ok((actors, clip))
+        Ok((actors, clip, loco))
     }
 
-    fn animate(&mut self) {
+    fn animate(&mut self, dt: f32) {
+        self.drive_player(dt);
         let Some(g) = &mut self.gfx else { return };
         let t = self.start.elapsed().as_secs_f32();
         let wander = self.args.wander;
-        for a in &mut g.actors {
+        let skip = usize::from(self.player.is_some());
+        for a in g.actors.iter_mut().skip(skip) {
             let c = &a.character;
             let local = match &g.clip {
                 Some(clip) if clip.length > 0.0 => {
@@ -264,7 +368,76 @@ impl App {
         }
     }
 
+    /// Player locomotion: input -> facing and speed, blended idle/walk/run
+    /// pose, root motion with wall sliding and floor snapping.
+    fn drive_player(&mut self, dt: f32) {
+        let (Some(p), Some(g)) = (&mut self.player, &mut self.gfx) else { return };
+        let (Some(loco), Some(actor)) = (&g.loco, g.actors.first()) else { return };
+        let k = |c| self.keys.contains(&c);
+        let fwd = Vec2::new(p.cam_yaw.cos(), p.cam_yaw.sin());
+        let right = Vec2::new(fwd.y, -fwd.x);
+        let mut dir = Vec2::ZERO;
+        if k(KeyCode::KeyW) { dir += fwd; }
+        if k(KeyCode::KeyS) { dir -= fwd; }
+        if k(KeyCode::KeyD) { dir += right; }
+        if k(KeyCode::KeyA) { dir -= right; }
+        let target = if dir == Vec2::ZERO {
+            0.0
+        } else if k(KeyCode::ShiftLeft) || k(KeyCode::ShiftRight) {
+            2.0
+        } else {
+            1.0
+        };
+        let ease = 2.5 * dt;
+        p.speed += (target - p.speed).clamp(-ease, ease);
+        if dir != Vec2::ZERO {
+            let want = (-dir.x).atan2(dir.y);
+            let turn = 7.0 * dt;
+            p.yaw = wrap_angle(p.yaw + wrap_angle(want - p.yaw).clamp(-turn, turn));
+        }
+
+        // weights: idle<->walk below 1, walk<->run above
+        let s = p.speed;
+        let (w_walk, w_run) = if s <= 1.0 { (s, 0.0) } else { (2.0 - s, s - 1.0) };
+        let (lw, lr) = (loco.walk.length, loco.run.length);
+        let (tw0, tr0) = (p.phase * lw, p.phase * lr);
+        let moving = w_walk + w_run;
+        if moving > 1e-3 {
+            p.phase = (p.phase + dt * (w_walk / lw + w_run / lr) / moving).fract();
+        }
+        let (tw, tr) = (p.phase * lw, p.phase * lr);
+        p.idle_time = (p.idle_time + dt) % loco.idle.length.max(1e-3);
+
+        let step = loco.walk.root_step(tw0, tw) * w_walk + loco.run.root_step(tr0, tr) * w_run;
+        let delta = (Quat::from_rotation_z(p.yaw) * step).truncate();
+        if let Some(ground) = &g.ground {
+            p.pos = move_on(ground, p.pos, delta);
+        } else {
+            p.pos += delta.extend(0.0);
+        }
+
+        let c = &actor.character;
+        let mut pose = if s <= 1.0 { loco.idle.sample(&c.skeleton, p.idle_time) } else { loco.walk.sample(&c.skeleton, tw) };
+        if s <= 1.0 {
+            if w_walk > 0.0 {
+                blend(&mut pose, &loco.walk.sample(&c.skeleton, tw), w_walk);
+            }
+        } else {
+            blend(&mut pose, &loco.run.sample(&c.skeleton, tr), w_run);
+        }
+        let globals = c.skeleton.globals(&pose);
+        let world = p.entity() * actor.model;
+        for (h, skin) in actor.handles.iter().zip(c.skin_matrices(&globals)) {
+            if let Some(h) = h {
+                g.scene.set_skinned_pose(*h, world, &skin);
+            }
+        }
+    }
+
     fn update(&mut self, dt: f32) {
+        if self.player.is_some() {
+            return;
+        }
         let k = |c| self.keys.contains(&c);
         let fwd = self.fly.forward();
         let right = fwd.cross(Vec3::Z).normalize_or_zero();
@@ -289,9 +462,13 @@ impl App {
             }
         };
         let view = frame.texture.create_view(&Default::default());
+        let (eye, target) = match &self.player {
+            Some(p) => p.camera_eye_target(g.ground.as_ref()),
+            None => (self.fly.pos, self.fly.pos + self.fly.forward()),
+        };
         let camera = Camera {
-            eye: self.fly.pos,
-            target: self.fly.pos + self.fly.forward(),
+            eye,
+            target,
             fov_y: 60f32.to_radians(),
             aspect: g.config.width as f32 / g.config.height as f32,
         };
@@ -313,13 +490,17 @@ impl App {
         self.frames += 1;
         let t = self.fps_time.elapsed().as_secs_f32();
         if t >= 1.0 {
-            let status = format!(
-                "acb-viewer: {:.0} fps  pos {:.0} {:.0} {:.0}",
+            let pos = self.player.as_ref().map_or(self.fly.pos, |p| p.pos);
+            let mut status = format!(
+                "acb-viewer: {:.0} fps  pos {:.1} {:.1} {:.1}",
                 self.frames as f32 / t,
-                self.fly.pos.x,
-                self.fly.pos.y,
-                self.fly.pos.z
+                pos.x,
+                pos.y,
+                pos.z
             );
+            if let Some(p) = &self.player {
+                status += &format!("  yaw {:.0}  speed {:.2}", p.yaw.to_degrees(), p.speed);
+            }
             g.window.set_title(&status);
             if std::env::var_os("ACB_VIEWER_LOG").is_some() {
                 eprintln!("{status}");
@@ -351,7 +532,7 @@ impl ApplicationHandler for App {
                     g.depth = depth_view(g.renderer.device(), g.config.width, g.config.height);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
+            WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     if code == KeyCode::Escape {
                         event_loop.exit();
@@ -378,13 +559,17 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::LineDelta(_, y) => y,
                     MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
-                self.fly.speed = (self.fly.speed * 1.2f32.powf(d)).clamp(1.0, 500.0);
+                if let Some(p) = &mut self.player {
+                    p.cam_dist = (p.cam_dist / 1.15f32.powf(d)).clamp(1.0, 20.0);
+                } else {
+                    self.fly.speed = (self.fly.speed * 1.2f32.powf(d)).clamp(1.0, 500.0);
+                }
             }
             WindowEvent::RedrawRequested => {
                 let dt = self.last.elapsed().as_secs_f32().min(0.1);
                 self.last = Instant::now();
                 self.update(dt);
-                self.animate();
+                self.animate(dt);
                 self.draw();
             }
             _ => {}
@@ -394,8 +579,13 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, event: DeviceEvent) {
         if let DeviceEvent::MouseMotion { delta } = event {
             if self.looking {
-                self.fly.yaw -= delta.0 as f32 * 0.003;
-                self.fly.pitch = (self.fly.pitch - delta.1 as f32 * 0.003).clamp(-1.5, 1.5);
+                if let Some(p) = &mut self.player {
+                    p.cam_yaw -= delta.0 as f32 * 0.003;
+                    p.cam_pitch = (p.cam_pitch - delta.1 as f32 * 0.003).clamp(-1.3, 1.0);
+                } else {
+                    self.fly.yaw -= delta.0 as f32 * 0.003;
+                    self.fly.pitch = (self.fly.pitch - delta.1 as f32 * 0.003).clamp(-1.5, 1.5);
+                }
             }
         }
     }
@@ -404,6 +594,39 @@ impl ApplicationHandler for App {
         if let Some(g) = &self.gfx {
             g.window.request_redraw();
         }
+    }
+}
+
+/// Moves a character standing at `pos` by `delta`: slides along walls
+/// (swept at knee and chest height, so steps and curbs pass) and snaps to
+/// the floor, refusing moves onto nothing.
+fn move_on(ground: &Ground, pos: Vec3, delta: Vec2) -> Vec3 {
+    const RADIUS: f32 = 0.3;
+    const STEP: f32 = 0.6;
+    let blocked = |from: Vec3, d: Vec2| {
+        [0.55, 1.3]
+            .into_iter()
+            .filter_map(|h| ground.sweep_wall(from + Vec3::Z * h, d, RADIUS))
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+    };
+    let mut at = pos;
+    let mut d = delta;
+    for _ in 0..2 {
+        match blocked(at, d) {
+            None => {
+                at += d.extend(0.0);
+                break;
+            }
+            Some((f, n)) => {
+                at += (d * f).extend(0.0);
+                let rest = d * (1.0 - f);
+                d = rest - n * rest.dot(n);
+            }
+        }
+    }
+    match ground.floor_below(at + Vec3::Z * STEP) {
+        Some(z) => at.with_z(z),
+        None => pos,
     }
 }
 
@@ -417,12 +640,24 @@ fn write_png(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> anyhow::Res
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let mut hold = HashSet::new();
+    for k in &args.hold {
+        hold.insert(match k.to_ascii_lowercase().as_str() {
+            "w" => KeyCode::KeyW,
+            "a" => KeyCode::KeyA,
+            "s" => KeyCode::KeyS,
+            "d" => KeyCode::KeyD,
+            "shift" => KeyCode::ShiftLeft,
+            other => anyhow::bail!("--hold: unknown key {other}"),
+        });
+    }
     let event_loop = EventLoop::new()?;
     let mut app = App {
         args,
         gfx: None,
         fly: Fly { pos: Vec3::new(-20.0, -60.0, 12.0), yaw: 1.2, pitch: -0.1, speed: 12.0 },
-        keys: HashSet::new(),
+        player: None,
+        keys: hold,
         looking: false,
         last: Instant::now(),
         frames: 0,

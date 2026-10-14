@@ -209,3 +209,22 @@ its exact byte length and by key continuity (`acbmp animstats`).
   (use this instead of desktop screenshots). With ACBMP.exe found (`--exe`,
   default next to `multi/`) characters follow root motion and return to
   their spawn every `--wander` seconds.
+
+## Player control (viewer `--play`)
+
+- `--play` drives the first `--character`: WASD relative to the orbit
+  camera, Shift runs, right mouse orbits, wheel zooms. `--hold w,shift`
+  presses keys from the start for `--capture` runs.
+- Locomotion = `xx_l_wait_hipm_footl` / `xx_l_walk_hipm_footl` /
+  `xx_h_run_hipm_footl`, blended by a 0..2 speed parameter (idle<->walk,
+  walk<->run). Walk and run share one normalized phase (both start on the
+  left foot). Translation comes from the blended per-clip root-motion
+  steps; facing is the controller's, the clips' root yaw is ignored.
+  Measured: ~1.9 m/s walk.
+- Collision is a stand-in until MeshShape is decoded: render triangles of
+  opaque, enabled materials in a 2 m grid; normals with |nz| >= 0.6 are
+  floor, the rest walls. Walls are swept at 0.55 m and 1.3 m (radius 0.3,
+  one slide), floor snaps from 0.6 m above (step height); moves onto no
+  floor are refused. No falling, jumping or climbing.
+- Open: turn-in-place / start / stop clips (xx_h_runstop, waitturn*),
+  sprint, a real collision mesh.
