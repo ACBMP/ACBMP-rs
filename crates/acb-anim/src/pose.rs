@@ -6,7 +6,7 @@ use acb_world::Archive;
 use anvil_fastload::{Obj, Value};
 use glam::{Mat4, Quat, Vec3};
 
-use crate::{parse_tracks, RawTrack, Track, ValueKind};
+use crate::{parse_tracks, BuiltinTracks, RawTrack, Track, ValueKind};
 
 /// Frames per second of key times (`max key / Length` is 60 for every
 /// retail animation).
@@ -85,6 +85,12 @@ pub struct Clip {
 
 impl Clip {
     pub fn load(archive: &Archive, uid: u32) -> Option<Clip> {
+        Self::load_with(archive, uid, None)
+    }
+
+    /// Like [`Clip::load`], resolving builtin tracks through `builtins`
+    /// (without it they are skipped, which drops e.g. root motion).
+    pub fn load_with(archive: &Archive, uid: u32, builtins: Option<&BuiltinTracks>) -> Option<Clip> {
         let root = archive.root(uid).ok()?;
         let tracks = parse_tracks(root.obj.custom.as_ref()?).ok()?;
         let ids: Vec<u32> = archive
@@ -105,7 +111,7 @@ impl Clip {
             .zip(tracks)
             .filter_map(|(id, t)| match t {
                 Track::Data(d) => Some((id, d)),
-                Track::Builtin(_) => None,
+                Track::Builtin(b) => Some((id, builtins?.track(b).ok()?)),
             })
             .collect();
         Some(Clip { uid, length, tracks })
@@ -135,6 +141,38 @@ impl Clip {
             }
         }
         pose
+    }
+
+    /// Root motion: the entity's displacement from the clip's start at
+    /// `seconds`, in entity space (TrackID 0's vector and quaternion tracks,
+    /// usually builtin; locomotion cycles move along +Y).
+    pub fn root_motion(&self, seconds: f32) -> Mat4 {
+        let frame = seconds * FRAME_RATE;
+        let (mut pos, mut rot) = (Vec3::ZERO, Quat::IDENTITY);
+        for (_, t) in self.tracks.iter().filter(|(id, _)| *id == 0) {
+            let (k0, k1, f) = key_span(&t.times, frame);
+            if let Some(v) = t.vec3s() {
+                pos = v[k0].lerp(v[k1], f);
+            } else if let Some(q) = t.quats() {
+                rot = q[k0].slerp(q[k1], f).normalize();
+            }
+        }
+        Mat4::from_rotation_translation(rot, pos)
+    }
+
+    /// Root motion between two clip times, wrapping when `to < from`.
+    pub fn root_delta(&self, from: f32, to: f32) -> Mat4 {
+        let m = |t| self.root_motion(t);
+        if to >= from {
+            m(from).inverse() * m(to)
+        } else {
+            m(from).inverse() * m(self.length) * m(0.0).inverse() * m(to)
+        }
+    }
+
+    /// Whether some track animates bone `id`.
+    pub fn drives(&self, id: u32) -> bool {
+        self.tracks.iter().any(|(t, _)| *t == id)
     }
 
     /// TrackIDs that are bones of `skeleton`.

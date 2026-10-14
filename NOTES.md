@@ -123,6 +123,21 @@ its exact byte length and by key continuity (`acbmp animstats`).
 - Keys are at 60 fps (`max key frame / Length` = 60.00 for every animation).
 - `AnimTrackDataMapping.TrackID` (one per track, same order) equals a
   skeleton `Bone.BoneID` for 91% of tracks; others are 0 and small ints.
+- Builtin tracks (0xFE + u32 id, 35% of all tracks) point into
+  `AnimTrackBuiltinTracks::ms_trackDataTable` (Mac 0x02205760, 0xc1cb4
+  bytes; `GetPermanentTrack(id)` = table + id - 1). It is byte-identical in
+  ACBMP.exe (file offset 0x1daad80), found there by signature. Entries are
+  in-memory `AnimTrackData2`: u8 descriptor, then 8and8: u8 count + (n-1)
+  x u8 times; Var16: u8 count (0 = u16 count at +2) + (n-1) x u16;
+  Bitmap: u8 (len | shift << 6) + bitmap. Values start at the compression's
+  alignment (`GetKeyDataPtr`): QuatNone 16; Quat32/64/96, FloatNone,
+  Vector3None/332 4; Quat16/48, QuatZFloat16, Float16, Vector348 2; the rest
+  1. All 209,458 references in DataPC decode, fit their clips, and give
+  unit quaternions (`acbmp animstats --exe`).
+- Root motion: TrackID 0 carries the entity's displacement (a Vector3 and a
+  Quat track, builtin): walk 1.012 m / 32 frames, run 1.707 m / 20 frames,
+  along +Y. The Reference bone (0x2c52cbb0) is the pelvis in entity space
+  (z ~0.93, yaw ~90 degrees). TrackID 2 is a Byte track (unknown).
 
 ## Skinned meshes and characters
 
@@ -184,10 +199,13 @@ its exact byte length and by key continuity (`acbmp animstats`).
   drive Reference only through builtin tracks. Meshes are authored feet on
   z = 0 facing -Y; entities face +Y (`FightUtils::IsInFrontOfPlayer` dots
   the matrix's Y row). `Character::model_to_entity` = Rz(180) * inverse
-  bind-pose skin residual.
+  bind-pose skin residual; only needed for poses without a Reference
+  track (with builtins loaded, model space is entity space).
 - Spawns: Entities with `MultiSpawnPlayerComponent{SpawnType, TeamIndex}`
   (`Archive::player_spawns`); SpawnType 0 = standard.
 - `acb-viewer <map.forge> --character <builder> [...] --count 12 --anim
   xx_l_walk_hipm_footl` places personas round-robin on standard spawns;
   `--capture out.png --capture-after 3` writes one frame offscreen and exits
-  (use this instead of desktop screenshots).
+  (use this instead of desktop screenshots). With ACBMP.exe found (`--exe`,
+  default next to `multi/`) characters follow root motion and return to
+  their spawn every `--wander` seconds.

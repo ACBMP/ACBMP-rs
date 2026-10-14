@@ -305,13 +305,16 @@ impl Character {
         }
     }
 
-    /// Skeleton model space -> entity space. The skeleton's `Reference` root
-    /// sits at pelvis height (animations drive it through builtin tracks we
-    /// do not decode yet); bone 1 is the ground. Meshes are authored with feet
+    /// Skeleton model space -> entity space for poses that leave `Reference`
+    /// (bone 0) at its bind transform, i.e. clips without a Reference track.
+    /// Animations put Reference at the pelvis in entity space (z ~0.93, yaw
+    /// ~90 degrees, usually via builtin tracks); its bind is the origin, which
+    /// would sink the body by the pelvis height. Meshes are authored with feet
     /// on z = 0 facing -Y, and bind-pose skinning is the same rigid transform
     /// for every bone, so its inverse lands the model in mesh space. Entities
-    /// face +Y (`FightUtils::IsInFrontOfPlayer` tests the matrix's Y row), so
-    /// the mesh is turned around on top of that.
+    /// face +Y (`FightUtils::IsInFrontOfPlayer` tests the matrix's Y row, and
+    /// locomotion root motion runs along +Y), so the mesh is turned around on
+    /// top of that.
     pub fn model_to_entity(&self) -> Mat4 {
         let globals = self.skeleton.globals(&self.skeleton.bind_pose());
         let model_to_mesh = self

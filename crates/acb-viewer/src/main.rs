@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use acb_anim::character::Character;
 use acb_anim::pose::Clip;
+use acb_anim::BuiltinTracks;
 use acb_render::{wgpu, Camera, Renderer, Scene, DEPTH_FORMAT};
 use clap::Parser;
 use glam::{Mat4, Vec3};
@@ -44,14 +45,29 @@ struct Args {
     capture: Option<PathBuf>,
     #[arg(long, default_value_t = 3.0)]
     capture_after: f32,
+    /// ACBMP.exe, for the engine's builtin animation tracks (root motion);
+    /// default: the one next to the map's `multi` directory
+    #[arg(long, env = "ACBMP_EXE")]
+    exe: Option<PathBuf>,
+    /// Characters follow root motion and return to their spawn after this
+    /// many seconds (no collision yet); 0 animates in place
+    #[arg(long, default_value_t = 6.0)]
+    wander: f32,
 }
 
 /// A character placed in the scene.
 struct Actor {
     character: Rc<Character>,
     handles: Vec<Option<usize>>,
-    world: Mat4,
+    spawn: Mat4,
+    /// Entity transform, advanced by root motion.
+    entity: Mat4,
+    /// Skeleton model space -> entity space.
+    model: Mat4,
     phase: f32,
+    /// Clip time of the previous frame.
+    clip_time: f32,
+    epoch: u32,
 }
 
 struct Fly {
@@ -172,7 +188,15 @@ impl App {
             };
             characters.push(Rc::new(c.ok_or_else(|| anyhow::anyhow!("{name}: no such character"))?));
         }
-        let clip = by_name("Animation", &self.args.anim).and_then(|a| Clip::load(archive, a));
+        let exe = self.args.exe.clone().or_else(|| {
+            let p = self.args.map.parent()?.parent()?.join("ACBMP.exe");
+            p.exists().then_some(p)
+        });
+        let builtins = exe.as_ref().and_then(|p| BuiltinTracks::from_executable(&std::fs::read(p).ok()?));
+        if builtins.is_none() {
+            eprintln!("no ACBMP.exe builtin tracks (--exe): no root motion");
+        }
+        let clip = by_name("Animation", &self.args.anim).and_then(|a| Clip::load_with(archive, a, builtins.as_ref()));
         if clip.is_none() {
             eprintln!("{}: animation not found, bind pose", self.args.anim);
         }
@@ -182,8 +206,15 @@ impl App {
         for (i, spawn) in spawns.iter().take(count).enumerate() {
             let character = characters[i % characters.len()].clone();
             let handles = character.parts.iter().map(|p| scene.add_skinned(r, archive, &p.mesh, &p.materials)).collect();
-            let world = Mat4::from_cols_array(&spawn.matrix) * character.model_to_entity();
-            actors.push(Actor { character, handles, world, phase: i as f32 * 0.37 });
+            let spawn = Mat4::from_cols_array(&spawn.matrix);
+            // clips that animate Reference place the pelvis in entity space
+            let root_bone = character.skeleton.bones.first().map(|b| b.id);
+            let model = match (&clip, root_bone) {
+                (Some(clip), Some(id)) if clip.drives(id) => Mat4::IDENTITY,
+                _ => character.model_to_entity(),
+            };
+            let phase = i as f32 * 0.37;
+            actors.push(Actor { character, handles, spawn, entity: spawn, model, phase, clip_time: phase, epoch: 0 });
         }
         eprintln!("{} characters on {} standard spawns", actors.len(), spawns.len());
         // start behind the first one, looking along its facing (+Y)
@@ -202,16 +233,32 @@ impl App {
     fn animate(&mut self) {
         let Some(g) = &mut self.gfx else { return };
         let t = self.start.elapsed().as_secs_f32();
-        for a in &g.actors {
+        let wander = self.args.wander;
+        for a in &mut g.actors {
             let c = &a.character;
             let local = match &g.clip {
-                Some(clip) if clip.length > 0.0 => clip.sample(&c.skeleton, (t + a.phase) % clip.length),
+                Some(clip) if clip.length > 0.0 => {
+                    let ct = (t + a.phase) % clip.length;
+                    if wander > 0.0 {
+                        // back to the spawn every `wander` seconds
+                        let epoch = ((t + a.phase) / wander) as u32;
+                        if epoch != a.epoch {
+                            a.epoch = epoch;
+                            a.entity = a.spawn;
+                        } else {
+                            a.entity *= clip.root_delta(a.clip_time, ct);
+                        }
+                    }
+                    a.clip_time = ct;
+                    clip.sample(&c.skeleton, ct)
+                }
                 _ => c.skeleton.bind_pose(),
             };
             let globals = c.skeleton.globals(&local);
+            let world = a.entity * a.model;
             for (h, skin) in a.handles.iter().zip(c.skin_matrices(&globals)) {
                 if let Some(h) = h {
-                    g.scene.set_skinned_pose(*h, a.world, &skin);
+                    g.scene.set_skinned_pose(*h, world, &skin);
                 }
             }
         }

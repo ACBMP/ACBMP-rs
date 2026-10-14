@@ -67,6 +67,17 @@ impl Compression {
         anvil_fastload::ANIM_VALUE_SIZES[self as usize]
     }
 
+    /// Alignment of in-memory key values (`GetKeyDataPtr`).
+    pub fn data_alignment(self) -> usize {
+        use Compression::*;
+        match self {
+            QuatNone => 16,
+            Quat32 | Quat64 | Quat96 | FloatNone | Vector3None | Vector332 => 4,
+            Quat16 | Quat48 | QuatZFloat16 | Float16 | Vector348 => 2,
+            Quat24 | QuatZFloat8 | Float8 | ByteLinear | ByteLowest | ByteNearest => 1,
+        }
+    }
+
     pub fn kind(self) -> ValueKind {
         use Compression::*;
         match self {
@@ -161,24 +172,89 @@ pub fn parse_tracks(tail: &[u8]) -> Result<Vec<Track>, Error> {
             }
             _ => {
                 let head = r.u8()?;
-                let shift = head >> 6;
                 let bitmap = r.take((head & 0x3f) as usize)?;
-                let mut t = Vec::with_capacity(keys);
-                for bit in 0..bitmap.len() * 8 {
-                    if t.len() == keys {
-                        break;
-                    }
-                    if bitmap[bit / 8] & (1 << (bit % 8)) != 0 {
-                        t.push((bit as u32) << shift);
-                    }
-                }
-                (TimeFormat::Bitmap, t)
+                (TimeFormat::Bitmap, bitmap_times(head, bitmap, keys))
             }
         };
         let values = r.take(keys * compression.value_size())?.to_vec();
         out.push(Track::Data(RawTrack { descriptor: d, compression, format, times, values }));
     }
     Ok(out)
+}
+
+/// Bitmap key times: frames whose bit is set, scaled by `1 << shift`.
+fn bitmap_times(head: u8, bitmap: &[u8], keys: usize) -> Vec<u32> {
+    let shift = head >> 6;
+    (0..bitmap.len() * 8)
+        .filter(|bit| bitmap[bit / 8] & (1 << (bit % 8)) != 0)
+        .map(|bit| (bit as u32) << shift)
+        .take(keys)
+        .collect()
+}
+
+/// The engine's permanent tracks (`AnimTrackBuiltinTracks::ms_trackDataTable`),
+/// a static table of in-memory `AnimTrackData2` that animations reference
+/// by offset instead of carrying shared data (e.g. the Reference root motion
+/// of locomotion cycles). The table is part of the executable; this copy is
+/// read from the player's own `ACBMP.exe`.
+#[derive(Debug, Clone)]
+pub struct BuiltinTracks {
+    table: Vec<u8>,
+}
+
+impl BuiltinTracks {
+    /// First bytes of the table: a one-key Quat64 identity, then one-key
+    /// Vector332 tracks.
+    const SIGNATURE: [u8; 16] = [0x0f, 0x01, 0, 0, 0x7f, 0xff, 0xff, 0xc7, 0xff, 0xff, 0xf7, 0xff, 0x1e, 0x01, 0, 0];
+    /// `ms_trackDataTable` .. end of the table (`IsPermanentTrack` bounds).
+    const SIZE: usize = 0xc1cb4;
+
+    /// Locates the table in an executable image (Windows `ACBMP.exe` or the
+    /// Mac build; both carry it byte-identical).
+    pub fn from_executable(image: &[u8]) -> Option<Self> {
+        let at = image.windows(Self::SIGNATURE.len()).position(|w| w == Self::SIGNATURE)?;
+        Some(BuiltinTracks { table: image.get(at..at + Self::SIZE)?.to_vec() })
+    }
+
+    /// Decodes builtin track `id` (`GetPermanentTrack`: table address + id - 1).
+    /// In memory a track is a descriptor byte, then 8and8: u8 key count +
+    /// (n - 1) x u8 times; Var16: u8 count (0 = u16 count at +2) + (n - 1) x
+    /// u16; Bitmap: u8 (len | shift << 6) + len bytes. Values follow at the
+    /// [`Compression::data_alignment`].
+    pub fn track(&self, id: u32) -> Result<RawTrack, Error> {
+        let t = self.table.get(id.checked_sub(1).ok_or(Error::Truncated)? as usize..).ok_or(Error::Truncated)?;
+        let at = |i: usize| t.get(i).copied().ok_or(Error::Truncated);
+        let d = at(0)?;
+        let compression = *Compression::ALL.get(d as usize / 3).ok_or(Error::Descriptor(d))?;
+        let (format, times, data) = match d % 3 {
+            0 => {
+                let n = at(1)? as usize;
+                let times = std::iter::once(0).chain((2..n + 1).map(|i| t[i] as u32)).take(n).collect::<Vec<_>>();
+                let _ = at(n)?;
+                (TimeFormat::EightAndEight, times, n + 1)
+            }
+            1 => {
+                let (n, first) = match at(1)? {
+                    0 => (u16::from_le_bytes([at(2)?, at(3)?]) as usize, 4),
+                    n => (n as usize, 2),
+                };
+                let _ = at(first + 2 * n)?;
+                let rest = (0..n.saturating_sub(1)).map(|k| u16::from_le_bytes([t[first + 2 * k], t[first + 2 * k + 1]]) as u32);
+                (TimeFormat::Var16, std::iter::once(0).chain(rest).collect(), first + 2 * n.saturating_sub(1))
+            }
+            _ => {
+                let head = at(1)?;
+                let len = (head & 0x3f) as usize;
+                let bitmap = t.get(2..2 + len).ok_or(Error::Truncated)?;
+                let keys = bitmap.iter().map(|b| b.count_ones() as usize).sum();
+                (TimeFormat::Bitmap, bitmap_times(head, bitmap, keys), 2 + len)
+            }
+        };
+        let align = compression.data_alignment();
+        let data = (data + align - 1) & !(align - 1);
+        let values = t.get(data..data + times.len() * compression.value_size()).ok_or(Error::Truncated)?.to_vec();
+        Ok(RawTrack { descriptor: d, compression, format, times, values })
+    }
 }
 
 const FRAC_1_SQRT_2: f32 = std::f32::consts::FRAC_1_SQRT_2;

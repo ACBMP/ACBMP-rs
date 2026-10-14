@@ -156,6 +156,9 @@ enum Cmd {
         forge: PathBuf,
         #[arg(long, env = "ACBMP_SCHEMAS")]
         schemas: PathBuf,
+        /// ACBMP.exe, to decode built-in tracks too
+        #[arg(long, env = "ACBMP_EXE")]
+        exe: Option<PathBuf>,
     },
     /// Play an animation on its best-matching skeleton; draw stick figures
     Animplay {
@@ -190,7 +193,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
         Cmd::Animplay { forge, name, out, schemas, frames } => animplay(forge, &name, out, schemas, frames)?,
-        Cmd::Animstats { forge, schemas } => animstats(forge, schemas)?,
+        Cmd::Animstats { forge, schemas, exe } => animstats(forge, schemas, exe)?,
         Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
         Cmd::Shaders { forge, name, schemas, top, fields, disasm } => shaders(forge, &name, schemas, top, fields, disasm)?,
         Cmd::Names { forge, type_name, needle, schemas } => {
@@ -622,9 +625,14 @@ fn shaderlab(forge: PathBuf, schemas: PathBuf, sample_dir: Option<PathBuf>) -> a
     Ok(())
 }
 
-fn animstats(forge: PathBuf, schemas: PathBuf) -> anyhow::Result<()> {
-    use acb_anim::{parse_tracks, Track};
+fn animstats(forge: PathBuf, schemas: PathBuf, exe: Option<PathBuf>) -> anyhow::Result<()> {
+    use acb_anim::{parse_tracks, BuiltinTracks, Track};
     use anvil_fastload::Value;
+    let builtins = match exe {
+        Some(p) => Some(BuiltinTracks::from_executable(&std::fs::read(&p)?).ok_or_else(|| anyhow::anyhow!("no builtin track table in {}", p.display()))?),
+        None => None,
+    };
+    let (mut b_ok, mut b_failed, mut b_late) = (0usize, 0usize, 0usize);
     let schema = load_schema(&schemas)?;
     let archive = acb_world::Archive::open(&forge, &schema)?;
 
@@ -672,6 +680,28 @@ fn animstats(forge: PathBuf, schemas: PathBuf) -> anyhow::Result<()> {
         let mut max_t = 0;
         for t in &ts {
             tracks += 1;
+            let resolved;
+            let t = match (t, &builtins) {
+                (Track::Builtin(b), Some(bt)) => {
+                    builtin += 1;
+                    match bt.track(*b) {
+                        Ok(d) => {
+                            b_ok += 1;
+                            // shared tracks must still fit the clip
+                            if d.times.last().copied().unwrap_or(0) as f32 > length * 60.0 + 1.0 {
+                                b_late += 1;
+                            }
+                            resolved = Track::Data(d);
+                            &resolved
+                        }
+                        Err(_) => {
+                            b_failed += 1;
+                            continue;
+                        }
+                    }
+                }
+                (t, _) => t,
+            };
             match t {
                 Track::Builtin(_) => builtin += 1,
                 Track::Data(d) => {
@@ -683,6 +713,9 @@ fn animstats(forge: PathBuf, schemas: PathBuf) -> anyhow::Result<()> {
                             quats += 1;
                             if (q.length() - 1.0).abs() > 0.01 {
                                 bad_quats += 1;
+                                if std::env::var_os("ACBMP_DEBUG_BUILTINS").is_some() {
+                                    eprintln!("bad quat {:?}/{:?} {} keys", d.compression, d.format, qs.len());
+                                }
                             }
                             if i > 0 {
                                 // angle between consecutive keys, degrees
@@ -706,6 +739,9 @@ fn animstats(forge: PathBuf, schemas: PathBuf) -> anyhow::Result<()> {
     fps_samples.sort_by(|a, b| a.total_cmp(b));
     let median = fps_samples.get(fps_samples.len() / 2).copied().unwrap_or(0.0);
     println!("{anims} animations ({failed} failed), {tracks} tracks ({builtin} built-in), {} skeleton bone ids", bones.len());
+    if builtins.is_some() {
+        println!("built-in tracks: {b_ok} decoded, {b_failed} failed, {b_late} with keys past the clip end");
+    }
     println!("frames per Length unit: median {median:.2} (p10 {:.2}, p90 {:.2})",
         fps_samples.get(fps_samples.len() / 10).copied().unwrap_or(0.0),
         fps_samples.get(fps_samples.len() * 9 / 10).copied().unwrap_or(0.0));
@@ -1095,7 +1131,22 @@ fn charshot(
             .unwrap_or_default();
         for (id, t) in ids.iter().zip(&raw).filter(|(id, _)| [0, 2, 0x2c52cbb0, 0x21895793].contains(*id)) {
             match t {
-                acb_anim::Track::Builtin(b) => println!("  track {id:#x}: builtin {b:#x}"),
+                acb_anim::Track::Builtin(b) => {
+                    let exe = std::env::var_os("ACBMP_EXE").and_then(|p| std::fs::read(p).ok());
+                    match exe.as_deref().and_then(acb_anim::BuiltinTracks::from_executable).map(|bt| bt.track(*b)) {
+                        Some(Ok(d)) => {
+                            println!("  track {id:#x}: builtin {b:#x} {:?} times {:?}", d.compression, d.times);
+                            if let Some(v) = d.vec3s() {
+                                println!("    {v:.3?}");
+                            }
+                            if let Some(q) = d.quats() {
+                                let yaw: Vec<f32> = q.iter().map(|q| q.to_euler(glam::EulerRot::ZYX).0.to_degrees()).collect();
+                                println!("    yaw {yaw:.1?}");
+                            }
+                        }
+                        _ => println!("  track {id:#x}: builtin {b:#x}"),
+                    }
+                }
                 acb_anim::Track::Data(d) => println!(
                     "  track {id:#x}: {:?} {} keys, first {:?} last {:?}",
                     d.compression.kind(),
