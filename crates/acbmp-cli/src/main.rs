@@ -763,6 +763,21 @@ fn navmesh(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::Re
         sizes.len(),
         &sizes[..sizes.len().min(5)]
     );
+    let flows = archive.crowd_flows();
+    let ids: std::collections::HashSet<u32> = flows.iter().map(|f| f.entity).collect();
+    let links: usize = flows.iter().map(|f| f.head.len() + f.tail.len()).sum();
+    let dangling = flows.iter().flat_map(|f| f.head.iter().chain(&f.tail)).filter(|e| !ids.contains(e)).count();
+    let length: f32 = flows
+        .iter()
+        .flat_map(|f| f.points.windows(2).map(|w| glam::Vec3::from(w[0]).distance(glam::Vec3::from(w[1]))))
+        .sum();
+    println!(
+        "{} crowd flows ({} one-way, {} wander), {length:.0} m of lanes, {links} links ({dangling} to unknown flows), widths {:?}",
+        flows.len(),
+        flows.iter().filter(|f| !f.bidirectional).count(),
+        flows.iter().filter(|f| f.wander).count(),
+        flows.iter().map(|f| f.width).fold((f32::MAX, f32::MIN), |(a, b), w| (a.min(w), b.max(w)))
+    );
     if let Some(path) = obj {
         use std::io::Write;
         let mut w = std::io::BufWriter::new(std::fs::File::create(&path)?);
@@ -797,6 +812,10 @@ fn collision(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::
         let mut count = |e: &anvil_fastload::Obj| {
             for c in archive.field(e, "Components").map(|v| v.items()).unwrap_or_default().iter().filter_map(|v| v.as_obj()) {
                 *census.entry(schema.name_or_hash(c.type_hash)).or_default() += 1;
+                if archive.is_type(c, "CrowdFlow") && std::env::var_os("ACBMP_FLOWS").is_some() {
+                    println!("  CrowdFlow on {:#010x} {}", e.id, archive.loc(e.id).map(|l| l.name.as_str()).unwrap_or("(inline)"));
+                    dump_obj(&archive, &schema, c, 2, 2);
+                }
                 if archive.is_type(c, "MultiInertComponent") {
                     let shape = archive.field(c, "Shape");
                     println!(

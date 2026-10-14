@@ -195,3 +195,74 @@ fn overlap(a0: [f32; 3], a1: [f32; 3], b0: [f32; 3], b1: [f32; 3]) -> Option<[f3
     let zb = if (s1 - s0).abs() > 1e-4 { b0[2] + (b1[2] - b0[2]) * (m - s0) / (s1 - s0) } else { b0[2] };
     ((za - zb).abs() < 0.4).then(|| [a0[0] + u[0] * m, a0[1] + u[1] * m, (za + zb) / 2.0])
 }
+
+/// A `CrowdFlow` component: a lane ambient NPCs walk along.
+#[derive(Debug, Clone)]
+pub struct CrowdFlow {
+    pub entity: u32,
+    /// World-space polyline (`NavFlowPointsLocal` through the entity
+    /// matrix); one-way flows run first to last.
+    pub points: Vec<[f32; 3]>,
+    pub width: f32,
+    pub bidirectional: bool,
+    pub wander: bool,
+    pub weight: f32,
+    /// Entities of the flows joining at the first / last point.
+    pub head: Vec<u32>,
+    pub tail: Vec<u32>,
+}
+
+impl Archive<'_> {
+    /// The map's crowd flows (on Entity roots and inside EntityGroups).
+    pub fn crowd_flows(&self) -> Vec<CrowdFlow> {
+        let mut out = Vec::new();
+        let mut visit = |e: &anvil_fastload::Obj| {
+            let Some(Ok(m)) = self.field(e, "GlobalMatrix").and_then(Value::as_f32s).map(<[f32; 16]>::try_from) else { return };
+            for c in self.field(e, "Components").map(Value::items).unwrap_or_default().iter().filter_map(Value::as_obj) {
+                if !self.is_type(c, "CrowdFlow") {
+                    continue;
+                }
+                let f32_of = |n: &str| self.field(c, n).and_then(Value::as_f32s).and_then(|v| v.first().copied()).unwrap_or(0.0);
+                let flag = |n: &str| self.field(c, n).and_then(Value::as_bool).unwrap_or(false);
+                let refs = |n: &str| self.field(c, n).map(Value::items).unwrap_or_default().iter().filter_map(Value::target_id).collect();
+                let points = self
+                    .field(c, "NavFlowPointsLocal")
+                    .map(Value::items)
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(Value::as_obj)
+                    .filter_map(|p| self.field(p, "FlowPosition").and_then(Value::as_f32s))
+                    .map(|p| crate::collision::xform(&m, [p[0], p[1], p[2]]))
+                    .collect();
+                out.push(CrowdFlow {
+                    entity: e.id,
+                    points,
+                    width: f32_of("FlowWidth"),
+                    bidirectional: flag("BiDirectionalFlag"),
+                    wander: flag("Wander"),
+                    weight: f32_of("Weight"),
+                    head: refs("HeadConnectingNavFlows"),
+                    tail: refs("TailConnectingNavFlows"),
+                });
+            }
+        };
+        for uid in self.uids_of_in("Entity", 0) {
+            if let Ok(r) = self.root(uid) {
+                visit(&r.obj);
+            }
+        }
+        let entity = self.schema().hash_of("Entity");
+        for uid in self.uids_of_in("EntityGroup", 0) {
+            if let Ok(r) = self.root(uid) {
+                r.obj.walk(&mut |o| {
+                    if Some(o.type_hash) == entity {
+                        visit(o)
+                    }
+                });
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|f| seen.insert(f.entity));
+        out
+    }
+}

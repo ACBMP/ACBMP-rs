@@ -1,19 +1,23 @@
-//! Ambient crowd: NPCs wandering the map's navmesh. Each picks a random
-//! point on the main walkable component, follows an A* path across the
-//! triangle graph (through the links' crossing points), idles a while and
-//! repeats. Animation is the idle/walk blend; the walk cycle's root speed
-//! sets the pace.
+//! Ambient crowd. On maps with `CrowdFlow` lanes NPCs walk them: along a
+//! lane at a lateral offset within its width, then onto a connected lane
+//! (weighted; one-way lanes are entered at their first point only), now
+//! and then pausing. Without lanes they wander the navmesh: a random point
+//! on the main walkable component, an A* path across the triangle graph
+//! (through the links' crossing points), a pause, repeat. Animation is the
+//! idle/walk blend; the walk cycle's root speed sets the pace.
 
 use std::collections::{BinaryHeap, HashMap};
 
 use acb_anim::pose::{blend, Clip, Skeleton};
-use acb_world::{Archive, NavGraph};
+use acb_world::{Archive, CrowdFlow, NavGraph};
 use glam::{Mat4, Quat, Vec2, Vec3};
 
 const CELL: f32 = 4.0;
 
 pub struct Nav {
     graph: NavGraph,
+    flows: Vec<CrowdFlow>,
+    flow_index: HashMap<u32, usize>,
     /// Triangles of the largest connected component.
     main: Vec<u32>,
     centroid: Vec<Vec3>,
@@ -81,11 +85,80 @@ impl Nav {
                 }
             }
         }
-        Some(Nav { graph, main: best, centroid, grid })
+        let flows: Vec<CrowdFlow> = archive.crowd_flows().into_iter().filter(|f| f.points.len() >= 2).collect();
+        let flow_index = flows.iter().enumerate().map(|(i, f)| (f.entity, i)).collect();
+        Some(Nav { graph, flows, flow_index, main: best, centroid, grid })
     }
 
     pub fn triangles(&self) -> usize {
         self.main.len()
+    }
+
+    pub fn flows(&self) -> usize {
+        self.flows.len()
+    }
+
+    /// Points of lane `f` walked forward or backward from point `from`,
+    /// shifted sideways by `offset` metres.
+    fn lane(&self, f: usize, forward: bool, from: usize, offset: f32) -> Vec<Vec3> {
+        let p: Vec<Vec3> = self.flows[f].points.iter().map(|v| Vec3::from(*v)).collect();
+        let n = p.len();
+        let side = |i: usize| {
+            let d = (p[(i + 1).min(n - 1)] - p[i.saturating_sub(1)]).truncate().normalize_or_zero();
+            Vec3::new(d.y, -d.x, 0.0) * offset
+        };
+        let order: Vec<usize> = if forward { (from..n).collect() } else { (0..=from).rev().collect() };
+        order.into_iter().map(|i| p[i] + side(i)).collect()
+    }
+
+    /// Start somewhere on a random lane (by length).
+    fn lane_start(&self, rng: &mut Rng) -> Option<FlowState> {
+        let len = |f: &CrowdFlow| f.points.windows(2).map(|w| Vec3::from(w[0]).distance(Vec3::from(w[1]))).sum::<f32>();
+        let total: f32 = self.flows.iter().map(len).sum();
+        let mut pick = rng.unit() * total;
+        let f = self.flows.iter().position(|f| {
+            pick -= len(f);
+            pick <= 0.0
+        })?;
+        let flow = &self.flows[f];
+        let forward = !flow.bidirectional || rng.unit() < 0.5;
+        let offset = (rng.unit() - 0.5) * flow.width * 0.8;
+        Some(FlowState { flow: f, forward, offset, from: rng.below(flow.points.len() - 1) + usize::from(!forward) })
+    }
+
+    /// The lane to take at the end of `s` (connected, weighted), or the
+    /// same lane back when nothing connects.
+    fn next_lane(&self, s: &FlowState, at: Vec3, rng: &mut Rng) -> FlowState {
+        let flow = &self.flows[s.flow];
+        let ends = if s.forward { &flow.tail } else { &flow.head };
+        let options: Vec<(usize, bool, f32)> = ends
+            .iter()
+            .filter_map(|e| self.flow_index.get(e).copied())
+            .filter_map(|f| {
+                let g = &self.flows[f];
+                let (first, last) = (Vec3::from(g.points[0]), Vec3::from(*g.points.last().unwrap()));
+                let forward = first.distance(at) <= last.distance(at);
+                (forward || g.bidirectional).then_some((f, forward, g.weight.max(0.05)))
+            })
+            .collect();
+        let total: f32 = options.iter().map(|o| o.2).sum();
+        let mut pick = rng.unit() * total;
+        let chosen = options.iter().find(|o| {
+            pick -= o.2;
+            pick <= 0.0
+        });
+        match chosen {
+            Some(&(f, forward, _)) => {
+                let n = self.flows[f].points.len();
+                let offset = s.offset.clamp(-self.flows[f].width * 0.4, self.flows[f].width * 0.4);
+                FlowState { flow: f, forward, offset, from: if forward { 0 } else { n - 1 } }
+            }
+            None => {
+                let n = flow.points.len();
+                let forward = !s.forward && flow.bidirectional || !flow.bidirectional;
+                FlowState { flow: s.flow, forward, offset: -s.offset, from: if forward { 0 } else { n - 1 } }
+            }
+        }
     }
 
     fn corners(&self, t: u32) -> [Vec3; 3] {
@@ -183,7 +256,18 @@ impl Rng {
     }
 }
 
+/// Where an agent is in the lane network.
+#[derive(Clone, Copy)]
+struct FlowState {
+    flow: usize,
+    forward: bool,
+    offset: f32,
+    /// Point index the current path starts at.
+    from: usize,
+}
+
 pub struct Agent {
+    flow: Option<FlowState>,
     pub pos: Vec3,
     /// Facing: entity +Y is (-sin yaw, cos yaw).
     pub yaw: f32,
@@ -204,10 +288,21 @@ fn wrap_angle(a: f32) -> f32 {
 impl Agent {
     pub fn new(nav: &Nav, seed: u64) -> Agent {
         let mut rng = Rng::new(seed);
-        let (_, pos) = nav.random_point(&mut rng);
-        let yaw = rng.unit() * std::f32::consts::TAU;
+        let flow = nav.lane_start(&mut rng);
+        let (path, pos) = match flow {
+            Some(s) => {
+                let path = nav.lane(s.flow, s.forward, s.from, s.offset);
+                let pos = path[0];
+                (path, nav.locate(pos + Vec3::Z * 0.5).map_or(pos, |(_, z)| pos.with_z(z)))
+            }
+            None => (Vec::new(), nav.random_point(&mut rng).1),
+        };
+        let yaw = match path.get(1) {
+            Some(n) => (-(n.x - pos.x)).atan2(n.y - pos.y),
+            None => rng.unit() * std::f32::consts::TAU,
+        };
         let wait = rng.unit() * 3.0;
-        Agent { pos, yaw, path: Vec::new(), wait, speed: 0.0, phase: rng.unit(), idle_time: rng.unit() * 5.0, rng }
+        Agent { flow, pos, yaw, path, wait, speed: 0.0, phase: rng.unit(), idle_time: rng.unit() * 5.0, rng }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -219,11 +314,22 @@ impl Agent {
         if self.path.is_empty() {
             self.wait -= dt;
             if self.wait <= 0.0 {
-                let (to, goal) = nav.random_point(&mut self.rng);
-                if let Some((from, _)) = nav.locate(self.pos) {
-                    self.path = nav.path(from, to, goal).unwrap_or_default();
+                match self.flow {
+                    Some(s) => {
+                        let next = nav.next_lane(&s, self.pos, &mut self.rng);
+                        self.path = nav.lane(next.flow, next.forward, next.from, next.offset);
+                        self.flow = Some(next);
+                        // most keep walking; some stop for a while
+                        self.wait = if self.rng.unit() < 0.15 { 2.0 + self.rng.unit() * 6.0 } else { 0.0 };
+                    }
+                    None => {
+                        let (to, goal) = nav.random_point(&mut self.rng);
+                        if let Some((from, _)) = nav.locate(self.pos) {
+                            self.path = nav.path(from, to, goal).unwrap_or_default();
+                        }
+                        self.wait = 2.0 + self.rng.unit() * 6.0;
+                    }
                 }
-                self.wait = 2.0 + self.rng.unit() * 6.0;
             }
         }
         let walking = !self.path.is_empty();

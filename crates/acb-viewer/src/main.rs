@@ -398,7 +398,12 @@ impl App {
                 let cloth = vec![ClothSim::default(); character.cloths.len()];
                 actors.push(Actor { character, handles, spawn: entity, entity, model, phase: 0.0, clip_time: 0.0, epoch: 0, cloth, agent: Some(agent) });
             }
-            eprintln!("crowd: {} wanderers on {} navmesh triangles", self.args.crowd, crowd.nav.triangles());
+            eprintln!(
+                "crowd: {} NPCs, {} lanes, {} navmesh triangles",
+                self.args.crowd,
+                crowd.nav.flows(),
+                crowd.nav.triangles()
+            );
             Some(crowd)
         } else {
             None

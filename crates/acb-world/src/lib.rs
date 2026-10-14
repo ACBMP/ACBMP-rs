@@ -24,7 +24,7 @@ pub mod texture;
 
 pub use collision::{Collider, CollisionMesh};
 pub use mesh::StaticMesh;
-pub use navmesh::{NavGraph, NavMesh};
+pub use navmesh::{CrowdFlow, NavGraph, NavMesh};
 pub use skin::{MeshBone, SkinnedMesh, SkinnedSubmesh};
 pub use shading::{MaterialOverride, MaterialParams, ParamValue, Permutation, ShaderParam, TemplateShaders};
 pub use texture::{PixelFormat, Texture};
