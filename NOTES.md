@@ -461,3 +461,30 @@ its exact byte length and by key continuity (`acbmp animstats`).
 - `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and
   never present, so they work with the window hidden and are repeatable.
   `--input "0=w,shift 1.5= 2=d"` scripts held keys over simulated time.
+
+## Netcode (survey)
+
+- Mac symbols: standard Net-Z DOs only (`_DO_Session`, `_DO_Station`,
+  `_DO_SessionClock`, `_DO_RootDO`, `_DO_IDGenerator`, `_DO_DefaultCell`,
+  `_DO_PromotionReferee`) and game datasets `_DS_RoundDataSet`,
+  `_DS_TeamSpawnPointInfo`, `_DS_BufferAbilityManager`, ... The game layer
+  replicates through its own classes: `NetEntity`/`NetEntityManager`
+  (master/duplica, promotion, migration), `NetPlayer`, `NetObject`,
+  `NetDataSet`, `NetRequest`, statechart transitions
+  (`NetOnTransit*`, `NetReplicateAdditionalInfoForTransitions`), pickups,
+  abilities, chatter, voice.
+- Serializers are DDL-generated `Quazal::_Type_<X>::Add/Extract(DNZ::
+  BitStream*, NetPlayerData::...)` thunks into `Serialize<X>` functions;
+  the bit stream calls are dyld stubs. `tools/dis.py <bin> <symbol>`
+  disassembles with stub calls named (Mach-O indirect symbol table) and
+  `tools/rd.py <bin> f <vmaddr>...` reads constant-pool values.
+- `SerializePlayerNetPos` (Mac 0x10b7c46), `HumanPlayerNetPos` fields by
+  offset: x, y (+0, +4) as int16 = trunc(m * 100) clamped; z (+8) as
+  trunc(z * 100 + 1) clamped to +-16383 in the low 15 bits, bit 15 = the
+  bool at +0x1c ("moving"); float = u64 at +0x14 (ms) * 0.001, negated if
+  bool +0x10; if moving: int16 x, y of +0x20/+0x24 (* 100), u8 yaw =
+  floor((frac_signed(+0x28 / pi) + 1) * 128), i8 +0x2c; then 1 bit "has
+  extra" (type +0x2d in 1..7 and length +0x2e <= 1023), and if set 3-bit
+  type, 10-bit byte length, float +0x30, length bytes of the type's add
+  data (+0x34). `operator<<` writes whole values; `WriteType<T>(v, bits)`
+  packs bits.
