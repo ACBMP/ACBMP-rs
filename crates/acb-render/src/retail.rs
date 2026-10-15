@@ -35,6 +35,8 @@ use crate::{Renderer, DEPTH_FORMAT};
 pub const MAIN_PASS: u32 = 1;
 /// One direct light, no omni/spot lights, no shadows.
 pub const LIGHTING_KEY: u32 = 1;
+/// The shadowed sun (cascaded shadow map) instead of the direct light.
+pub const SHADOWED_LIGHTING_KEY: u32 = 0x80;
 /// Instance attribute locations: WVP rows, then World rows.
 const INSTANCE_LOC: u32 = 24;
 /// Pixel material register holding the alpha-test reference.
@@ -183,6 +185,8 @@ pub struct FrameView {
     pub view: Mat4,
     pub tan_half: (f32, f32),
     pub size: (u32, u32),
+    /// Sun shadow cascades, when shadows are on.
+    pub shadow: Option<crate::shadow::ShadowFrame>,
 }
 
 impl FrameView {
@@ -195,6 +199,7 @@ impl FrameView {
             view,
             tan_half: (ty * camera.aspect, ty),
             size,
+            shadow: None,
         }
     }
 }
@@ -238,6 +243,30 @@ fn fill_globals(block: &mut ConstBlock, globals: &[Global], env: &Environment, f
             "g_WorldLightmapZOffsetParameters" => vec![[0.0, 60.0, 0.0, 0.0]],
             "g_DeconstructionRanges" => vec![[1.0e6, 1.0e6 + 1.0, 0.0, 0.0]],
             "g_EyeDirection" => vec![v(fv.forward, 0.0)],
+            // shadowed sun: same rows as g_DirectLights
+            "g_ShadowedDirect" => vec![v(env.sun_dir, 0.0), v(env.sun_color, 1.0)],
+            "g_WorldToLightProjVS" => match &fv.shadow {
+                Some(s) => (0..3).map(|i| s.light_view.row(i).to_array()).collect(),
+                None => vec![[0.0; 4]; 3],
+            },
+            "g_ShadowScalesX" | "g_ShadowScalesY" | "g_ShadowScalesZ" | "g_ShadowScalesW" | "g_ShadowOffsetsX" | "g_ShadowOffsetsY"
+            | "g_ShadowOffsetsZ" | "g_ShadowOffsetsW" => {
+                let Some(s) = &fv.shadow else { continue };
+                let i = "XYZW".find(g.name.chars().last().unwrap()).unwrap();
+                let (scale, offset) = crate::shadow::cascade_rows(s, i);
+                vec![if g.name.contains("Scales") { scale } else { offset }]
+            }
+            "g_ShadowCascadesRangesMin" => vec![fv.shadow.map_or([0.0; 4], |s| {
+                // ACBMP_SHADOW_XONLY: debug, the widest cascade everywhere
+                let m = if std::env::var_os("ACBMP_SHADOW_XONLY").is_some() { 2.0 } else { s.margin };
+                [0.0, m, m, m]
+            })],
+            "g_ShadowCascadesRangesMax" => vec![fv.shadow.map_or([1.0; 4], |s| [1.0, 1.0 - s.margin, 1.0 - s.margin, 1.0 - s.margin])],
+            "g_ShadowMapSize" => vec![fv.shadow.map_or([1.0; 4], |s| [s.atlas_size.x, s.atlas_size.y, 0.0, 0.0])],
+            "g_ShadowNoiseScale" => vec![[fv.shadow.map_or(0.0, |s| s.noise_scale), 0.0, 0.0, 0.0]],
+            // without shadows everything fades to fully lit
+            "g_ShadowFadeParams" => vec![fv.shadow.map_or([0.0, 1.0, 0.0, 0.0], |s| [s.fade[0], s.fade[1], 0.0, 0.0])],
+            "g_CloudUVScaleOffset" => vec![[0.0, 0.0, 0.0, 0.0]],
             // sky ramps are sampled at u = 0.125 + .x: noon mid-ramp
             "g_TimeOfDay" => vec![[env.time_of_day / 24.0 - 0.125, 0.0, 0.0, 0.0]],
             // world -> view with z = distance ahead (the shaders compare it
@@ -285,6 +314,7 @@ pub(crate) struct Material {
     pub textures: wgpu::BindGroup,
     pub two_sided: bool,
     pub blended: bool,
+    pub alpha_test: bool,
     /// Texture views by binding, and the binding of `g_DepthSampler` if
     /// the program reads the scene depth.
     views: Vec<(u32, wgpu::TextureView)>,
@@ -348,6 +378,8 @@ impl Defaults {
 }
 
 pub(crate) struct Retail {
+    /// Sun shadows (`ACBMP_NO_SHADOWS=1` disables): LightingKey 0x80.
+    pub shadows: Option<crate::shadow::Shadows>,
     pub programs: Vec<Program>,
     keys: HashMap<ProgramKey, Option<usize>>,
     consts_layout: wgpu::BindGroupLayout,
@@ -389,6 +421,7 @@ impl Retail {
             defaults: Defaults::new(r),
             stats: RetailStats::default(),
             world_lightmap: None,
+            shadows: std::env::var_os("ACBMP_NO_SHADOWS").is_none().then(|| crate::shadow::Shadows::new(r)),
         }
     }
 
@@ -444,7 +477,9 @@ impl Retail {
         };
         let Some(pi) = program else { return self.fallback("no program") };
         self.stats.materials += 1;
-        Some(self.bind_material(r, pi, &params, info.alpha_ref as f32 / 255.0, info.two_sided, key.blended, textures))
+        let mut m = self.bind_material(r, pi, &params, info.alpha_ref as f32 / 255.0, info.two_sided, key.blended, textures);
+        m.alpha_test = key.alpha_test;
+        Some(m)
     }
 
     fn program(
@@ -458,8 +493,10 @@ impl Retail {
         let vs_perm: &Permutation = shaders
             .vertex((key.format << 16) | MAIN_PASS)
             .ok_or_else(|| anyhow::anyhow!("no vertex permutation"))?;
-        let ps_perm = shaders
-            .lighting(MAIN_PASS, LIGHTING_KEY)
+        let ps_perm = (self.shadows.is_some())
+            .then(|| shaders.lighting(MAIN_PASS, SHADOWED_LIGHTING_KEY))
+            .flatten()
+            .or_else(|| shaders.lighting(MAIN_PASS, LIGHTING_KEY))
             .or_else(|| shaders.pixel(MAIN_PASS).cloned())
             .ok_or_else(|| anyhow::anyhow!("no pixel permutation"))?;
         let attrs = vertex_attributes(key.format, stride).ok_or_else(|| anyhow::anyhow!("vertex format"))?;
@@ -633,7 +670,7 @@ impl Retail {
         };
         let (vs_globals, ps_globals) = (globals(&vs_prog), globals(&ps_prog));
         let env = Environment::default();
-        let fv = FrameView { eye: Vec3::ZERO, forward: Vec3::Y, view: Mat4::IDENTITY, tan_half: (1.0, 1.0), size: (1, 1) };
+        let fv = FrameView { eye: Vec3::ZERO, forward: Vec3::Y, view: Mat4::IDENTITY, tan_half: (1.0, 1.0), size: (1, 1), shadow: None };
         let mut unknown = fill_globals(&mut ConstBlock::new(wgsl::VS_CONSTS), &vs_globals, &env, &fv);
         unknown.extend(fill_globals(&mut ConstBlock::new(wgsl::PS_CONSTS), &ps_globals, &env, &fv));
         Ok((Program {
@@ -704,6 +741,8 @@ impl Retail {
             let view = match ty {
                 SamplerType::Cube => self.defaults.cube.clone(),
                 SamplerType::Volume => self.defaults.volume.clone(),
+                _ if name == "g_ShadowSampler" && self.shadows.is_some() => self.shadows.as_ref().unwrap().atlas.clone(),
+                _ if name == "g_ShadowNoiseSampler" && self.shadows.is_some() => self.shadows.as_ref().unwrap().noise.clone(),
                 _ if name == "g_WorldLightMapSampler" && self.world_lightmap.is_some() => {
                     self.world_lightmap.clone().unwrap()
                 }
@@ -733,7 +772,7 @@ impl Retail {
             layout: &p.tex_layout,
             entries: &entries,
         });
-        Material { program: pi, consts, vs_mat, ps_mat, textures, two_sided, blended, views, depth_binding }
+        Material { program: pi, consts, vs_mat, ps_mat, textures, two_sided, blended, alpha_test: false, views, depth_binding }
     }
 
     /// Uploads this frame's engine globals for every program.

@@ -1287,7 +1287,9 @@ fn shaders(forge: PathBuf, needle: &str, schemas: PathBuf, top: usize, fields: b
                             format!("{}@{c}x{n}t{t}", schema.name_or_hash(id))
                         })
                         .collect();
-                    println!("    key {key:#010x} code {} B ver {ver:#010x} params {}", code.len(), params.join(" "));
+                    let lk = archive.field(p, "LightingKey").and_then(Value::as_u32);
+                    let lk = lk.map(|l| format!(" lighting {l:#x}")).unwrap_or_default();
+                    println!("    key {key:#010x}{lk} code {} B ver {ver:#010x} params {}", code.len(), params.join(" "));
                     if fields {
                         for (h, v) in &p.fields {
                             let text = match v {

@@ -125,6 +125,28 @@ as such; the rest is read from decompiled code and not yet exercised.
   `AC2MP_SanDonato_NightDay_SkyColor_Map`, 32x16: u = time of day, dark
   at both ends) at u = 0.125 + g_TimeOfDay.x, so g_TimeOfDay.x = hours /
   24 - 0.125 (`AmbianceCurrentTime` 12 on every MP map). `ACBMP_NO_SKY=1`.
+- LightingKey bits: 0-1 direct lights (1, 2), 2-3 omni lights, 0x10+
+  spot/projector lights (`g_ProjectorShadow` s11, cookies s9), 0x80 =
+  shadowed sun (`g_ShadowedDirect` instead of `g_DirectLights`, cascaded
+  shadow map `g_ShadowSampler` s15, `g_ShadowNoiseSampler` s6, cloud
+  shadows `g_CloudShadowSampler` s14 at world xy * `g_CloudUVScaleOffset`).
+  The VS writes TexCoord6 = dot4(worldpos, `g_WorldToLightProjVS` rows).
+- Shadow PS (key 1 / 0x80): cascades X, Y, Z, W = v8 * `g_ShadowScales*` +
+  `g_ShadowOffsets*` (u, v, depth); the last of Y, Z, W with min(u,v) >=
+  RangesMin and max(u,v) <= RangesMax (.y/.z/.w) wins, X otherwise, so W
+  is the finest; atlas u = u * 0.25 + 0.25 k (X..W); 4 Poisson taps
+  (constants in the shader) rotated by the 64x64 noise at vPos / 64,
+  radius `g_ShadowNoiseScale` texels of `g_ShadowMapSize`; lit = texel >=
+  depth (b15 `g_UseDepthTextureShadows` off); shadow = sat(sum / 4 +
+  sat(dist^2 * `g_ShadowFadeParams`.x + .y)) * cloud.
+- Renderer (`acb-render/src/shadow.rs`): 4 x 1024^2 R32Float atlas
+  (FLOAT32_FILTERABLE requested; R16Float otherwise), cascades to 8 / 25 /
+  70 / 200 m fitted as texel-snapped spheres in light space, casters 150 m
+  towards the sun, depth range 400 m beyond (the shader selects by u, v
+  only, so receivers behind a small cascade must still fit its depth).
+  Opaque static meshes cast (no alpha-tested/blended, no characters yet).
+  `ACBMP_NO_SHADOWS=1`, `ACBMP_SHADOW_DUMP=file.pgm`,
+  `ACBMP_SHADOW_XONLY=1` (debug). Sun direction is still hand-set.
 - Saturation check (2026-10-14): five San Donato views have 0-52 pixels
   at >= 250 in every channel, nearly all `GEN_FabricW_01A` (white cloth,
   Layer0_Color 0.6 -> albedo ~1.2) and `GEN_Veg_Fougere_03A`; no blown-out

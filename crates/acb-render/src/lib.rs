@@ -13,6 +13,7 @@
 //! them with per-bone skin matrices ([`Scene::set_skinned_pose`]).
 
 mod retail;
+mod shadow;
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -63,7 +64,9 @@ pub async fn request_device(adapter: &wgpu::Adapter) -> anyhow::Result<(wgpu::De
     Ok(adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("acb"),
-            required_features: wgpu::Features::TEXTURE_COMPRESSION_BC,
+            // filterable R32Float for the shadow atlas where available
+            required_features: wgpu::Features::TEXTURE_COMPRESSION_BC
+                | (adapter.features() & wgpu::Features::FLOAT32_FILTERABLE),
             // the retail path feeds instance matrices through locations 24..31
             required_limits: wgpu::Limits {
                 max_vertex_attributes: adapter.limits().max_vertex_attributes.min(32),
@@ -159,6 +162,8 @@ pub struct Renderer {
     depth_blit: wgpu::RenderPipeline,
     depth_blit_layout: wgpu::BindGroupLayout,
     depth_copy: std::cell::RefCell<Option<((u32, u32), wgpu::TextureView)>>,
+    /// Shadow atlas format: R32Float when filterable, else R16Float.
+    shadow_format: wgpu::TextureFormat,
 }
 
 /// Camera clip planes (see [`Camera::view_proj`]).
@@ -203,6 +208,7 @@ pub struct Scene {
 
 impl Renderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, color_format: wgpu::TextureFormat) -> Self {
+        let device_features = device.features();
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("basic"),
             source: wgpu::ShaderSource::Wgsl(include_str!("basic.wgsl").into()),
@@ -413,6 +419,11 @@ impl Renderer {
             depth_blit,
             depth_blit_layout,
             depth_copy: Default::default(),
+            shadow_format: if device_features.contains(wgpu::Features::FLOAT32_FILTERABLE) {
+                wgpu::TextureFormat::R32Float
+            } else {
+                wgpu::TextureFormat::R16Float
+            },
         }
     }
 
@@ -574,7 +585,17 @@ impl Renderer {
             fog: [fog[0], fog[1], fog[2], 0.0006],
         };
         self.queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));
-        let fv = retail::FrameView::new(camera, size);
+        let mut fv = retail::FrameView::new(camera, size);
+        if let Some(sh) = scene.retail.as_ref().and_then(|r| r.shadows.as_ref()) {
+            let (frame, view_projs) = shadow::Shadows::plan(camera, env.sun_dir);
+            sh.render(self, encoder, scene, &view_projs);
+            if let Ok(path) = std::env::var("ACBMP_SHADOW_DUMP") {
+                let done = std::mem::replace(encoder, self.device.create_command_encoder(&Default::default()));
+                self.queue.submit([done.finish()]);
+                sh.dump(self, &path);
+            }
+            fv.shadow = Some(frame);
+        }
         if let Some(retail) = &scene.retail {
             retail.update_frame(self, env, &fv);
             let view_proj = camera.view_proj();
