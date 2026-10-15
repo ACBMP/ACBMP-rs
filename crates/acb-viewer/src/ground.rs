@@ -177,6 +177,21 @@ impl Ground {
             .map(|x| x.1)
     }
 
+    /// A hold to grab while falling at `pos` facing `fwd`: a wall edge
+    /// facing us within 0.7 m ahead, 1.3-2.2 m above the feet.
+    pub fn catch_hold(&self, pos: Vec3, fwd: Vec2) -> Option<Hold> {
+        self.holds_near(pos, 1.5)
+            .filter(|h| h.wall.dot(fwd) < -0.5)
+            .filter_map(|h| {
+                let q = h.nearest(pos);
+                let d = (q - pos).truncate();
+                let dz = q.z - pos.z;
+                (d.length() < 0.7 && d.dot(fwd) > -0.1 && (1.3..=2.2).contains(&dz)).then_some((d.length(), *h))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| x.1)
+    }
+
     /// The next hold from hands at `hand` on a wall facing `n`, moving
     /// `dir`: an edge on the same wall plane, 0.5-2 m away that way.
     pub fn next_hold(&self, hand: Vec3, n: Vec2, dir: Dir) -> Option<(Hold, Vec3)> {

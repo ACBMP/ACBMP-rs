@@ -73,6 +73,8 @@ pub enum Dir {
 enum Phase {
     /// Getting onto the wall: clip time.
     Mount(f32),
+    /// Grabbed a hold while falling: glide onto it.
+    Catch(f32),
     Wait(f32),
     /// Move direction, size class, stage 0..3, stage time, entity at start
     /// and end.
@@ -137,6 +139,12 @@ impl Climb {
         Climb { hold, pos, yaw, phase: Phase::Mount(0.0), from: pos }
     }
 
+    /// Grabs `hold` while falling past it at `pos`.
+    pub fn catch(hold: Hold, pos: Vec3) -> Climb {
+        let yaw = yaw_into(hold.wall);
+        Climb { hold, pos, yaw, phase: Phase::Catch(0.0), from: pos }
+    }
+
     /// Advances; `want` is the stick direction (up/down/left/right on the
     /// wall) and `find` looks for the next hold from a point in a
     /// direction. Returns the pose and what happened.
@@ -162,6 +170,18 @@ impl Climb {
                     self.phase = Phase::Wait(0.0);
                 }
                 (pose, Outcome::Climbing)
+            }
+            Phase::Catch(t) => {
+                const GLIDE: f32 = 0.15;
+                *t += dt;
+                let target = entity_for(self.hold.nearest(self.from), n);
+                let k = (*t / GLIDE).min(1.0);
+                self.pos = self.from.lerp(target, k * k * (3.0 - 2.0 * k));
+                if *t >= GLIDE {
+                    self.pos = target;
+                    self.phase = Phase::Wait(0.0);
+                }
+                (clips.wait.sample(sk, 0.0), Outcome::Climbing)
             }
             Phase::Wait(t) => {
                 *t += dt;

@@ -206,6 +206,16 @@ pub(crate) fn drive(p: &mut Player, g: &mut Gfx, keys: &HashSet<KeyCode>, sim_ti
     if let Some(ground) = &g.ground {
         if p.loco.airborne() {
             p.vel.z -= GRAVITY * dt;
+            // falling past a hold: grab it (not right after letting go)
+            let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            if p.vel.z < -1.0 && g.climbs.is_some() && p.fall_from - p.pos.z > 0.3 {
+                if let Some(hold) = ground.catch_hold(p.pos, fwd) {
+                    p.climb = Some(Climb::catch(hold, p.pos));
+                    p.loco.resume(p.loco.last_pose().clone());
+                    p.vel = Vec3::ZERO;
+                    return;
+                }
+            }
             let mut at = slide(ground, p.pos, p.vel.truncate() * dt);
             let z = p.pos.z + p.vel.z * dt;
             match ground.floor_below(at + Vec3::Z * 0.1) {

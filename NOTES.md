@@ -440,6 +440,11 @@ its exact byte length and by key continuity (`acbmp animstats`).
   (`hangwall`, `hangfree`), corner turns and `xx_h_hangwall_tr_passover_*`
   are not used yet; `xx_l_climb_1m_to_groundentry_*` steps off at the
   bottom.
+- Falling (vz < -1, 0.3 m below the fall start) facing a hold 1.3-2.2 m
+  above the feet within 0.7 m grabs it: 0.15 s glide into the wall pose
+  (`xx_fall_tr_climb_*` are 4-frame blips, not used). `--at x,y,z,yaw`
+  more than 1.5 m above the floor starts falling (test: --at=-31.67,49.0,
+  7,0 catches the stone post by the San Donato spawn).
 - Open: run turns, hanging, the real HumanGround state machine, camera
   near walls.
 - `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and

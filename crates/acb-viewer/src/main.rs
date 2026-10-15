@@ -84,7 +84,8 @@ struct Args {
     /// spawn's transform and play these two clips (assassin,victim)
     #[arg(long, value_delimiter = ',')]
     pair: Vec<String>,
-    /// Start the --play character here (world x,y,z) instead of its spawn
+    /// Start the --play character here (world x,y,z[,yaw degrees, 0 = +Y,
+    /// 90 = -X]) instead of its spawn
     #[arg(long, value_delimiter = ',', allow_hyphen_values = true)]
     at: Option<Vec<f32>>,
     /// Scripted keys over simulated time, e.g. "0=w,shift 2= 2.5=d": from
@@ -301,8 +302,14 @@ impl App {
             None
         };
         if let (Some(p), Some(g)) = (&mut self.player, &ground) {
-            if let Some(z) = g.floor_below(p.pos + Vec3::Z * 1.0) {
-                p.pos.z = z;
+            match g.floor_below(p.pos + Vec3::Z * 1.0) {
+                // --at well above the floor: start falling from there
+                Some(z) if self.args.at.is_some() && p.pos.z - z > 1.5 => {
+                    p.loco.start_fall();
+                    p.fall_from = p.pos.z;
+                }
+                Some(z) => p.pos.z = z,
+                None => {}
             }
             if std::env::var_os("ACBMP_TRACE").is_some() {
                 for (spot, face) in g.mount_spots(p.pos, 5) {
@@ -440,9 +447,11 @@ impl App {
             self.fly.speed = 4.0;
             if let (Some(clips), Some(actor)) = (&loco, actors.first()) {
                 let yaw = (-facing.x).atan2(facing.y);
-                let at = match self.args.at.as_deref() {
-                    Some([x, y, z]) => Vec3::new(*x, *y, *z),
-                    _ => at,
+                let (at, yaw) = match self.args.at.as_deref() {
+                    Some([x, y, z]) => (Vec3::new(*x, *y, *z), yaw),
+                    // facing as a compass-free angle: 0 = +Y, 90 = -X
+                    Some([x, y, z, deg]) => (Vec3::new(*x, *y, *z), deg.to_radians()),
+                    _ => (at, yaw),
                 };
                 self.player = Some(Player {
                     pos: at,
