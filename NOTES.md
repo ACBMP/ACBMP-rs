@@ -374,7 +374,12 @@ its exact byte length and by key continuity (`acbmp animstats`).
   {ass,npc}`, `_tr_out`, `_positionf_*`) do NOT share a frame like kills:
   both Reference bones start within 0.2 m of their own origins (ass yaw
   -90, npc front +90). The relative placement comes from the positionf
-  step; not implemented.
+  step. Viewer Q stuns with `IDXX_G2G_Humil_{Front,Back}_Win_{ass,npc}`
+  reading ref yaw -90 as "faces +Y" and +90 as "faces -Y" (as the kills
+  show): the assassin plays in the player's own entity frame, the victim
+  in the same frame moved 0.9 m ahead (`kill::STUN_SPACING`, a guess that
+  looks right: shove, the victim falls and stays down). Victims hold
+  their last frame; get-up is not modelled.
 
 ## Player control (viewer `--play`)
 

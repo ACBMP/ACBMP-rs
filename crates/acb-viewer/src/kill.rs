@@ -15,9 +15,16 @@ use glam::{Mat4, Quat, Vec3};
 const REFERENCE: u32 = 0x2c52_cbb0;
 
 pub struct KillClips {
-    /// [front, back] x (assassin, victim)
-    pub sets: [(Clip, Clip); 2],
+    /// [kill front, kill back, stun front, stun back] x (assassin, victim)
+    pub sets: Vec<(Clip, Clip)>,
 }
+
+/// Victim offset of a stun: `IDXX_G2G_Humil_*_Win_{ass,npc}` are authored
+/// each around its own origin (assassin facing +Y, the victim's frame
+/// turned the same way), so the victim's frame sits ahead of the
+/// assassin's. The engine's spacing (from its positionf step) is unknown;
+/// this matches the kills' ~1 m pelvis spacing.
+pub const STUN_SPACING: f32 = 0.9;
 
 /// Reference bone translation and yaw of a clip at `t` (entity space).
 pub fn reference(clip: &Clip, t: f32) -> Option<(Vec3, f32)> {
@@ -54,16 +61,18 @@ impl KillClips {
                 load(format!("{id}_G2G_{side}_Walk2All_Killed_Npc"))?,
             ))
         };
-        Some(KillClips { sets: [set("Front")?, set("Back")?] })
+        let stun = |side: &str| {
+            Some((load(format!("IDXX_G2G_Humil_{side}_Win_ass"))?, load(format!("IDXX_G2G_Humil_{side}_Win_npc"))?))
+        };
+        Some(KillClips { sets: vec![set("Front")?, set("Back")?, stun("Front")?, stun("Back")?] })
     }
 
     /// The set for an assassin at `from` attacking a victim at `victim`
     /// facing `victim_yaw` (front when the assassin is ahead of the victim),
     /// and the shared frame to play it in.
     pub fn plan(&self, from: Vec3, victim: Vec3, victim_yaw: f32) -> Option<(usize, Mat4)> {
+        let side = side(from, victim, victim_yaw);
         let to_ass = (from - victim).truncate();
-        let facing = glam::Vec2::new(-victim_yaw.sin(), victim_yaw.cos());
-        let side = usize::from(to_ass.dot(facing) < 0.0);
         let (ass, _) = &self.sets[side];
         let (start, _) = reference(ass, 0.0)?;
         // turn the frame so the assassin's start pelvis points at `from`
@@ -71,6 +80,14 @@ impl KillClips {
         let world = to_ass.y.atan2(to_ass.x);
         Some((side, Mat4::from_rotation_translation(Quat::from_rotation_z(world - local), victim)))
     }
+}
+
+/// 0 when the assassin at `from` is in front of a victim at `victim`
+/// facing `victim_yaw`, 1 when behind.
+pub fn side(from: Vec3, victim: Vec3, victim_yaw: f32) -> usize {
+    let to_ass = (from - victim).truncate();
+    let facing = glam::Vec2::new(-victim_yaw.sin(), victim_yaw.cos());
+    usize::from(to_ass.dot(facing) < 0.0)
 }
 
 /// Where to put an entity so that a pose whose Reference is at `pos`/`yaw`

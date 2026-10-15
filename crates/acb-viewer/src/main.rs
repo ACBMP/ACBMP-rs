@@ -106,6 +106,7 @@ fn parse_keys(list: &str) -> anyhow::Result<HashSet<KeyCode>> {
                 "shift" => KeyCode::ShiftLeft,
                 "space" => KeyCode::Space,
                 "e" => KeyCode::KeyE,
+                "q" => KeyCode::KeyQ,
                 other => anyhow::bail!("unknown key {other}"),
             })
         })

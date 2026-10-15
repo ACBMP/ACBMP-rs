@@ -73,8 +73,9 @@ pub(crate) fn drive(p: &mut Player, g: &mut Gfx, keys: &HashSet<KeyCode>, sim_ti
         return;
     }
     let k = |c| keys.contains(&c);
-    // E: kill the nearest person in reach ahead
-    if k(KeyCode::KeyE) && p.kill.is_none() && !p.loco.airborne() {
+    // E: kill, Q: stun the nearest person in reach ahead
+    let stun = k(KeyCode::KeyQ);
+    if (k(KeyCode::KeyE) || stun) && p.kill.is_none() && !p.loco.airborne() {
         if let Some(kills) = &g.kills {
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
             let victim = g
@@ -92,11 +93,19 @@ pub(crate) fn drive(p: &mut Player, g: &mut Gfx, keys: &HashSet<KeyCode>, sim_ti
             if let Some((vi, vpos)) = victim {
                 let (_, rot, _) = g.actors[vi].entity.to_scale_rotation_translation();
                 let vyaw = rot.to_euler(glam::EulerRot::ZXY).0;
-                if let Some((side, frame)) = kills.plan(p.pos, vpos, vyaw) {
+                // a kill plays in the victim's frame; a stun in the player's,
+                // with the victim's frame ahead of it
+                let plan = if stun {
+                    let side = 2 + kill::side(p.pos, vpos, vyaw);
+                    Some((side, p.entity(), p.entity() * Mat4::from_translation(Vec3::Y * kill::STUN_SPACING)))
+                } else {
+                    kills.plan(p.pos, vpos, vyaw).map(|(side, frame)| (side, frame, frame))
+                };
+                if let Some((side, frame, victim_frame)) = plan {
                     let v = &mut g.actors[vi];
                     v.agent = None;
                     v.model = Mat4::IDENTITY;
-                    v.scripted = Some(Scripted { clip: kills.sets[side].1.clone(), frame, start: sim_time });
+                    v.scripted = Some(Scripted { clip: kills.sets[side].1.clone(), frame: victim_frame, start: sim_time });
                     let from_pose = p.loco.last_pose().clone();
                     p.kill = Some(PlayerKill { side, frame, t: 0.0, from_pose, from_world: p.entity() });
                 }
