@@ -208,3 +208,21 @@ impl Climb {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_entity_faces_the_wall_with_its_hands_on_the_hold() {
+        for n in [Vec2::X, -Vec2::X, Vec2::Y, Vec2::new(0.6, -0.8)] {
+            let yaw = yaw_into(n);
+            let facing = Vec2::new(-yaw.sin(), yaw.cos());
+            assert!(facing.dot(-n) > 0.999, "{n:?}");
+            let hold = Vec3::new(3.0, 4.0, 5.0);
+            let e = entity_for(hold, n);
+            let hands = e + (facing * HAND_FORWARD).extend(0.0) + Vec3::Z * HAND_UP;
+            assert!(hands.distance(hold) < 1e-5);
+        }
+    }
+}

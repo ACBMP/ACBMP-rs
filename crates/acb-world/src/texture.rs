@@ -161,3 +161,29 @@ impl Texture {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bc1_block_decodes_to_its_endpoints() {
+        // c0 = pure red (0xf800), c1 = pure blue (0x001f), every texel
+        // index 1 except the first (index 0)
+        let block = [0x00, 0xf8, 0x1f, 0x00, 0b0101_0100, 0x55, 0x55, 0x55];
+        let t = Texture { width: 4, height: 4, format: PixelFormat::Bc1, mips: 1, data: block.to_vec() };
+        let px = t.rgba();
+        assert_eq!(&px[..4], &[255, 0, 0, 255]);
+        assert_eq!(&px[4..8], &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn bc2_alpha_is_explicit_4_bit() {
+        let mut block = [0u8; 16];
+        block[0] = 0x0f; // texel 0 alpha 15 -> 255, texel 1 alpha 0
+        let t = Texture { width: 4, height: 4, format: PixelFormat::Bc2, mips: 1, data: block.to_vec() };
+        let px = t.rgba();
+        assert_eq!(px[3], 255);
+        assert_eq!(px[7], 0);
+    }
+}

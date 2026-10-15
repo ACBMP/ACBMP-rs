@@ -266,3 +266,25 @@ impl Archive<'_> {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::overlap;
+
+    #[test]
+    fn t_junction_edges_join_at_the_middle_of_their_overlap() {
+        // a 4 m edge and a 1 m piece of it on the same line
+        let m = overlap([0.0, 0.0, 1.0], [4.0, 0.0, 1.0], [1.0, 0.0, 1.0], [2.0, 0.0, 1.0]).unwrap();
+        assert!((m[0] - 1.5).abs() < 1e-5 && m[1].abs() < 1e-5 && (m[2] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn parallel_offset_or_stacked_edges_do_not_join() {
+        // 10 cm to the side
+        assert!(overlap([0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [1.0, 0.1, 0.0], [2.0, 0.1, 0.0]).is_none());
+        // a floor above
+        assert!(overlap([0.0, 0.0, 0.0], [4.0, 0.0, 0.0], [1.0, 0.0, 3.0], [2.0, 0.0, 3.0]).is_none());
+        // touching only at an end
+        assert!(overlap([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]).is_none());
+    }
+}

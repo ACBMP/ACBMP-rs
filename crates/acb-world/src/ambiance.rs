@@ -133,3 +133,15 @@ impl Archive<'_> {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::hsv_saturate;
+
+    #[test]
+    fn saturation_scales_toward_grey_keeping_the_max() {
+        assert_eq!(hsv_saturate([1.0, 0.5, 0.0], 1.0), [1.0, 0.5, 0.0]);
+        assert_eq!(hsv_saturate([1.0, 0.5, 0.0], 0.0), [1.0, 1.0, 1.0]);
+        assert_eq!(hsv_saturate([1.0, 0.5, 0.0], 0.5), [1.0, 0.75, 0.5]);
+    }
+}

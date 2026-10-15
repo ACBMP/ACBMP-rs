@@ -335,3 +335,68 @@ impl ClothSim {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lod() -> ClothLod {
+        // a 1 m square: particles 0, 1 pinned at the top, 2, 3 free below
+        ClothLod {
+            uid: 0,
+            visual_mesh: 0,
+            settings: ClothSettings { gravity: Vec3::Z * -10.0, air_friction: 0.0, iterations: 4, enable_physics: true, ..Default::default() },
+            positions: vec![Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)],
+            normals: vec![Vec3::Y; 4],
+            flags: vec![1, 1, 2, 2],
+            radius: vec![0.02; 4],
+            rigidity: vec![1.0, 1.0, 0.0, 0.0],
+            skin_factor: vec![1.0, 1.0, 0.0, 0.0],
+            bone_indices: vec![[0; 4]; 4],
+            bone_weights: vec![Vec4::X; 4],
+            bones: Vec::new(),
+            indices: vec![0, 1, 2, 1, 3, 2],
+            constraints: [(0, 2), (1, 3), (2, 3), (0, 1)]
+                .iter()
+                .map(|&(a, b)| Constraint { a, b, rest: 1.0, contractibility: 0.0 })
+                .collect(),
+            mappings: vec![VertexMapping { skinned: false, offset: 0.1, indices: [0, 1, 2], weights: [0.25, 0.25, 0.5] }],
+            visual_indices: Vec::new(),
+            visual_uvs: Vec::new(),
+            capsules: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn visual_vertices_are_barycentric_plus_normal_offset() {
+        let l = lod();
+        let v = l.visual_positions(&l.positions)[0];
+        // centroid-weighted point, pushed 0.1 m along the triangle normal
+        let base = Vec3::new(0.25, 0.0, 0.5);
+        let n = (l.positions[1] - l.positions[0]).cross(l.positions[2] - l.positions[0]).normalize();
+        assert!(v.distance(base + n * 0.1) < 1e-5);
+    }
+
+    #[test]
+    fn pinned_particles_follow_the_skin_and_the_rest_keep_their_lengths() {
+        let l = lod();
+        let mut sim = ClothSim::default();
+        let mut target = l.positions.clone();
+        sim.step(&l, &target, &[], 0.0);
+        // move the top sideways and let it settle
+        for p in target.iter_mut() {
+            p.x += 0.5;
+        }
+        for _ in 0..240 {
+            sim.step(&l, &target, &[], 1.0 / 60.0);
+        }
+        assert!(sim.pos[0].distance(target[0]) < 1e-5);
+        assert!(sim.pos[1].distance(target[1]) < 1e-5);
+        for c in &l.constraints {
+            let d = sim.pos[c.a as usize].distance(sim.pos[c.b as usize]);
+            assert!((d - 1.0).abs() < 0.05, "constraint {}-{} at {d}", c.a, c.b);
+        }
+        // the free edge hangs below the pinned one
+        assert!(sim.pos[2].z < 0.1 && sim.pos[3].z < 0.1);
+    }
+}

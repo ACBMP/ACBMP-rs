@@ -1,5 +1,9 @@
 # RE notes
 
+Tests: `cargo test` (unit); with `ACBMP_SCHEMAS` and `ACBMP_MULTI` (the
+game's `multi` directory) set, `crates/acb-world/tests/san_donato.rs`
+checks this file's San Donato numbers against the retail data.
+
 Findings from the Mac build (`acbmp_sf.exe`, full symbols; Ghidra addresses
 are Mac VAs) that the code relies on or will need. Verified facts are marked
 as such; the rest is read from decompiled code and not yet exercised.
@@ -359,6 +363,12 @@ its exact byte length and by key continuity (`acbmp animstats`).
   (Reference relative to the idle's neutral (0.03,-0.02,0.96)/66 deg) and
   locomotion fades back in. The victim holds the last frame. The game's
   approach (`positionf` clips) and target rules are not modelled.
+
+- Stuns (`IDXX_G2G_Humil_{Front,Back}_{Win,Failed,DoubleHumil,Missed}_
+  {ass,npc}`, `_tr_out`, `_positionf_*`) do NOT share a frame like kills:
+  both Reference bones start within 0.2 m of their own origins (ass yaw
+  -90, npc front +90). The relative placement comes from the positionf
+  step; not implemented.
 
 ## Player control (viewer `--play`)
 
