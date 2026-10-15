@@ -135,6 +135,9 @@ as such; the rest is read from decompiled code and not yet exercised.
 
 ## Maps
 
+- No sound data in this install (no Wwise `.pck`/`.bnk` next to the forges,
+  no SoundBank roots): audio cannot be done from this copy.
+
 - Out-of-bounds walls: entity with `OutOfBoundsComponent`, material
   `AC2MP_Oob` (no diffuse). Hidden in the renderer.
 - `Material.MaterialDisabled` marks gameplay helpers (e.g.
@@ -178,6 +181,9 @@ as such; the rest is read from decompiled code and not yet exercised.
   overlapping border edges (T-junctions between meshes): San Donato 8321
   triangles, main component 7809. Other maps split into many components
   (rooftop islands, reached by climbing). `acbmp navmesh <map> [--obj]`.
+- Cost: 150 crowd NPCs (with cloth, CPU-posed cloth parts) take about
+  3.4 ms of simulation per 60 Hz frame on the dev PC (20 simulated seconds
+  in 5.1 s vs 1.1 s with none).
 - `CrowdFlow` components (59 on San Donato, 610 m of lanes):
   `NavFlowPointsLocal[i].FlowPosition` (entity-local polyline),
   `FlowWidth` (2-7 m), `BiDirectionalFlag` (else first -> last),
