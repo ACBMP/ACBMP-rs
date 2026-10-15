@@ -52,6 +52,10 @@ enum Id {
     Fall(usize),
     /// from the wait into walk, jog (ending on the right foot)
     Start(usize),
+    /// foot: 180 turn at a run (no root yaw: the heading flips when it
+    /// ends) and the jog out of it
+    RunTurn(usize),
+    RunTurnOut(usize),
     /// jump kind (see [`JUMPS`]), foot: run into the air / air onto a surface
     Takeoff(usize, usize),
     JumpLand(usize, usize),
@@ -72,6 +76,8 @@ pub struct Clips {
     fall: [Clip; 2],
     land: [Clip; 6],
     start: [Clip; 2],
+    run_turn: [Clip; 2],
+    run_turn_out: [Clip; 2],
     takeoff: Vec<[Clip; 2]>,
     jump_land: Vec<[Clip; 2]>,
 }
@@ -121,6 +127,8 @@ impl Clips {
             turn: [turn(0)?, turn(1)?, turn(2)?, turn(3)?],
             turn_settle: [settle(0)?, settle(1)?, settle(2)?, settle(3)?],
             start: [load("xx_l_wait_footl_tr_l_walk_footr")?, load("xx_l_wait_footl_tr_h_jog_footr")?],
+            run_turn: [load("xx_h_runturn180_footl")?, load("xx_h_runturn180_footr")?],
+            run_turn_out: [load("xx_h_runturn180_footl_tr_jog_hipm_footl")?, load("xx_h_runturn180_footr_tr_jog_hipm_footr")?],
             takeoff: JUMPS
                 .iter()
                 .map(|(d, n)| Ok([load(&format!("xx_h_run_{d}_{n}_footl_to_air"))?, load(&format!("xx_h_run_{d}_{n}_footr_to_air"))?]))
@@ -160,6 +168,8 @@ impl Clips {
             Id::TurnSettle(i) => &self.turn_settle[i],
             Id::Fall(i) => &self.fall[i],
             Id::Start(i) => &self.start[i],
+            Id::RunTurn(f) => &self.run_turn[f],
+            Id::RunTurnOut(f) => &self.run_turn_out[f],
             Id::Takeoff(k, f) => &self.takeoff[k][f],
             Id::JumpLand(k, f) => &self.jump_land[k][f],
             Id::Land(i) => &self.land[i],
@@ -385,6 +395,18 @@ impl Locomotion {
                 self.idle_time = 0.0;
                 self.start(Action::new(queue, Cancel::OnInput));
             }
+            // running and asked to go back the way we came: run turn
+            Some(w) if self.speed >= 1.5 && wrap_angle(w - yaw).abs() > 135f32.to_radians() => {
+                let f = (0..2)
+                    .min_by(|&a, &b| {
+                        let d = |f| pose_distance(&self.last, &clips.get(Id::RunTurn(f)).sample(sk, 0.0));
+                        d(a).total_cmp(&d(b))
+                    })
+                    .unwrap();
+                let mut a = Action::new(vec![Id::RunTurn(f), Id::RunTurnOut(f)], Cancel::Never);
+                a.end = (1.6, 0.0);
+                self.start(a);
+            }
             // standing and asked to face well away: turn on the spot
             Some(w) if self.speed < 0.1 => {
                 let d = wrap_angle(w - yaw);
@@ -433,6 +455,9 @@ impl Locomotion {
             }
             if matches!(id, Id::Turn(_)) {
                 *yaw = wrap_angle(*yaw + yaw_of(&clip.root_motion(clip.length)));
+            }
+            if matches!(id, Id::RunTurn(_)) {
+                *yaw = wrap_angle(*yaw + std::f32::consts::PI);
             }
             a.queue.remove(0);
             a.t = 0.0;

@@ -410,8 +410,11 @@ its exact byte length and by key continuity (`acbmp animstats`).
     3.23 m/s), steered by the controller, cancelled on release; the cycle
     then continues at speed 1 / 1.6 from the phase whose pose is nearest
     the clip's last frame (32-sample search; a fixed phase fits badly).
-  - `xx_h_runturn180_*` have no root yaw at all: the engine turns the
-    entity itself (not used yet).
+  - `xx_h_runturn180_foot{l,r}` (0.2 s, in place) has no root yaw: its
+    Reference ends at yaw 31 / (-0.25, -0.03) and
+    `..._tr_jog_hipm_foot{l,r}` (0.47 s, to 3.5 m/s) starts at -149 /
+    (0.25, 0.03), i.e. the heading flips 180 degrees between them. Used
+    when running with input > 135 degrees behind; foot by pose match.
   - Cross-fades of 0.15 s from the last displayed pose.
 - Collision = the map's fixed rigid-body shapes except camera layer 18, in
   a 2 m grid; normals with |nz| >= 0.6 are floor, the rest walls. Walls are swept at 0.55 m and 1.3 m (radius 0.3,
@@ -456,8 +459,7 @@ its exact byte length and by key continuity (`acbmp animstats`).
   (`xx_fall_tr_climb_*` are 4-frame blips, not used). `--at x,y,z,yaw`
   more than 1.5 m above the floor starts falling (test: --at=-31.67,49.0,
   7,0 catches the stone post by the San Donato spawn).
-- Open: run turns, hanging, the real HumanGround state machine, camera
-  near walls.
+- Open: hanging, the real HumanGround state machine.
 - `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and
   never present, so they work with the window hidden and are repeatable.
   `--input "0=w,shift 1.5= 2=d"` scripts held keys over simulated time.
