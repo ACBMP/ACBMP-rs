@@ -57,6 +57,9 @@ enum Cmd {
         /// Draw with the placeholder shading instead of the retail shaders
         #[arg(long)]
         placeholder: bool,
+        /// Also time this many frames and print the average
+        #[arg(long, default_value_t = 0)]
+        bench: u32,
     },
     /// What a `shot` pixel shows: entity, mesh, material under it
     Pick {
@@ -349,10 +352,10 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
         Cmd::Pick { forge, schemas, eye, target, width, height, px } => pick(forge, schemas, &eye, &target, width, height, &px)?,
-        Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {
+        Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder, bench } => {
             let shading =
                 if placeholder { acb_render::ShadingMode::Placeholder } else { acb_render::ShadingMode::Retail };
-            shot(forge, out, schemas, &eye, &target, width, height, shading)?
+            shot(forge, out, schemas, &eye, &target, width, height, shading, bench)?
         }
         Cmd::Gltf { forge, out, schemas } => {
             let t0 = Instant::now();
@@ -509,6 +512,7 @@ fn shot(
     width: u32,
     height: u32,
     shading: acb_render::ShadingMode,
+    bench: u32,
 ) -> anyhow::Result<()> {
     let t0 = Instant::now();
     let schema = load_schema(&schemas)?;
@@ -534,6 +538,13 @@ fn shot(
         aspect: width as f32 / height as f32,
     };
     let rgba = acb_render::render_to_rgba(&r, &scene, &camera, width, height);
+    if bench > 0 {
+        let t = Instant::now();
+        for _ in 0..bench {
+            acb_render::render_to_rgba(&r, &scene, &camera, width, height);
+        }
+        println!("{:.2} ms per frame (with readback) over {bench}", t.elapsed().as_secs_f64() * 1000.0 / bench as f64);
+    }
     let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&out)?), width, height);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);

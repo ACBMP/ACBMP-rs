@@ -147,6 +147,8 @@ as such; the rest is read from decompiled code and not yet exercised.
   Opaque static meshes and skinned characters cast (no alpha-tested or
   blended surfaces): the skinned caster reads each draw's own VS constant
   block (bone rows at c120 + 3 slot) and its instance World rows.
+  Cost (`acbmp shot --bench 30`, San Donato street, 1600x900 incl.
+  readback): 3.7 ms with shadows, 3.0 ms without.
   `ACBMP_NO_SHADOWS=1`, `ACBMP_SHADOW_DUMP=file.pgm`,
   `ACBMP_SHADOW_XONLY=1` (debug). Sun direction is still hand-set.
 - Saturation check (2026-10-14): five San Donato views have 0-52 pixels
