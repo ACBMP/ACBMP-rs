@@ -126,6 +126,20 @@ enum Cmd {
         #[arg(long, default_value_t = 0.0)]
         t: f32,
     },
+    /// Write a TextureMap's top mip level as PNG (RGB and alpha side by side)
+    Texture {
+        forge: PathBuf,
+        name: String,
+        out: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+    },
+    /// Print the map's lighting setup (sky, sun, ambient, fog, lightmaps)
+    Ambiance {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+    },
     /// Census of the map's rigid bodies and shapes; optionally export them
     Collision {
         forge: PathBuf,
@@ -301,6 +315,38 @@ fn main() -> anyhow::Result<()> {
         Cmd::Navmesh { forge, schemas, obj } => navmesh(forge, schemas, obj)?,
         Cmd::Guidance { forge, schemas, obj } => guidance(forge, schemas, obj)?,
         Cmd::Posebounds { forge, builder, clip, schemas, exe, t } => posebounds(forge, &builder, &clip, schemas, exe, t)?,
+        Cmd::Texture { forge, name, out, schemas } => {
+            let schema = load_schema(&schemas)?;
+            let archive = open_map(&forge, &schema)?;
+            let uid = find_uid(&archive, "TextureMap", &name)?;
+            let t = archive.texture(uid)?.ok_or_else(|| anyhow::anyhow!("undecodable texture"))?;
+            let rgba = t.rgba();
+            let (w, h) = (t.width as usize, t.height as usize);
+            // colour on the left, alpha as grey on the right
+            let mut img = vec![255u8; w * 2 * h * 4];
+            for y in 0..h {
+                for x in 0..w {
+                    let p = &rgba[(y * w + x) * 4..(y * w + x) * 4 + 4];
+                    let o = (y * w * 2 + x) * 4;
+                    img[o..o + 3].copy_from_slice(&p[..3]);
+                    let o = (y * w * 2 + w + x) * 4;
+                    img[o..o + 3].copy_from_slice(&[p[3]; 3]);
+                }
+            }
+            let mut enc = png::Encoder::new(std::io::BufWriter::new(std::fs::File::create(&out)?), (w * 2) as u32, h as u32);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header()?.write_image_data(&img)?;
+            println!("{}x{} {:?}, wrote {}", t.width, t.height, t.format, out.display());
+        }
+        Cmd::Ambiance { forge, schemas } => {
+            let schema = load_schema(&schemas)?;
+            let archive = open_map(&forge, &schema)?;
+            match archive.ambiance() {
+                Some(a) => println!("{a:#?}"),
+                None => println!("no ambiance"),
+            }
+        }
         Cmd::Collision { forge, schemas, obj } => collision(forge, schemas, obj)?,
         Cmd::Pick { forge, schemas, eye, target, width, height, px } => pick(forge, schemas, &eye, &target, width, height, &px)?,
         Cmd::Shot { forge, out, schemas, eye, target, width, height, placeholder } => {

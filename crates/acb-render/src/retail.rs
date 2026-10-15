@@ -56,6 +56,24 @@ pub struct Environment {
     pub fog_start: f32,
     pub fog_range: f32,
     pub fog_max: f32,
+    /// World lightmap constants, when one is bound.
+    pub lightmap: Option<Lightmap>,
+}
+
+/// `g_WorldLightmap*` values for a world lightmap (see the lighting PS:
+/// uv = (pos.xy + n.xy * normal_offset) * uv_scale + 0.5; the texel alpha
+/// is the baked ground height z_min + a * z_range, and the lightmap fades
+/// out at `fade` per metre above or below it; its rgb * intensity replaces
+/// the ambient by sat(dot(albedo * lm, weight))).
+#[derive(Debug, Clone, Copy)]
+pub struct Lightmap {
+    pub uv_scale: f32,
+    pub z_min: f32,
+    pub z_range: f32,
+    pub normal_offset: f32,
+    pub fade: f32,
+    pub intensity: f32,
+    pub weight: f32,
 }
 
 impl Default for Environment {
@@ -69,6 +87,7 @@ impl Default for Environment {
             fog_start: 60.0,
             fog_range: 900.0,
             fog_max: 0.7,
+            lightmap: None,
         }
     }
 }
@@ -203,10 +222,17 @@ fn fill_globals(block: &mut ConstBlock, globals: &[Global], env: &Environment, f
             "g_FogParams" => vec![[env.fog_start, 1.0 / env.fog_range, env.fog_max, 0.0]],
             "g_AmbientCube" => env.ambient.iter().map(|a| v(*a, 1.0)).collect(),
             "g_DirectLights" => vec![v(env.sun_dir, 0.0), v(env.sun_color, 1.0)],
-            // .y = 0 removes the world lightmap's contribution
-            "g_WorldLightmapParameters" => vec![[0.0; 4]],
-            "g_WorldLightmapUVParameters" => vec![[0.0, 0.0, 1.0, 1.0]],
-            "g_WorldLightmapZOffsetParameters" => vec![[0.0, 1.0, 0.0, 0.0]],
+            // without a lightmap .y = 0 removes its contribution
+            "g_WorldLightmapParameters" => match env.lightmap {
+                Some(l) => vec![[l.normal_offset, l.z_min, l.fade, l.z_range]],
+                None => vec![[0.0; 4]],
+            },
+            "g_WorldLightmapUVParameters" => match env.lightmap {
+                Some(l) => vec![[l.intensity, l.weight, l.uv_scale, l.uv_scale]],
+                None => vec![[0.0, 0.0, 1.0, 1.0]],
+            },
+            // mip by distance: start, range
+            "g_WorldLightmapZOffsetParameters" => vec![[0.0, 60.0, 0.0, 0.0]],
             "g_DeconstructionRanges" => vec![[1.0e6, 1.0e6 + 1.0, 0.0, 0.0]],
             "g_EyeDirection" => vec![v(fv.forward, 0.0)],
             // world -> view with z = distance ahead (the shaders compare it
@@ -322,6 +348,8 @@ pub(crate) struct Retail {
     consts_layout: wgpu::BindGroupLayout,
     defaults: Defaults,
     pub stats: RetailStats,
+    /// Bound to `g_WorldLightMapSampler`.
+    pub world_lightmap: Option<wgpu::TextureView>,
 }
 
 fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
@@ -355,6 +383,7 @@ impl Retail {
             consts_layout,
             defaults: Defaults::new(r),
             stats: RetailStats::default(),
+            world_lightmap: None,
         }
     }
 
@@ -670,6 +699,9 @@ impl Retail {
             let view = match ty {
                 SamplerType::Cube => self.defaults.cube.clone(),
                 SamplerType::Volume => self.defaults.volume.clone(),
+                _ if name == "g_WorldLightMapSampler" && self.world_lightmap.is_some() => {
+                    self.world_lightmap.clone().unwrap()
+                }
                 _ => match tex.and_then(&mut *textures) {
                     Some(v) => v,
                     None if name.contains("Normal") => self.defaults.flat_normal.clone(),

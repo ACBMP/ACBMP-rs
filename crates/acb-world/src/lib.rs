@@ -15,6 +15,7 @@ use anvil_fastload::{Codec, Obj, Root, Value};
 use anvil_forge::{DataFile, Forge};
 use anvil_schema::Schema;
 
+pub mod ambiance;
 pub mod collision;
 pub mod guidance;
 pub mod mesh;
@@ -23,6 +24,7 @@ pub mod shading;
 pub mod skin;
 pub mod texture;
 
+pub use ambiance::{Ambiance, WorldLightMap};
 pub use collision::{Collider, CollisionMesh};
 pub use guidance::GuidanceEdge;
 pub use mesh::StaticMesh;

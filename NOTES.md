@@ -97,6 +97,24 @@ as such; the rest is read from decompiled code and not yet exercised.
   `g_WorldToView` row 2 is negated (distance ahead). Venice water now
   shows; its reflection sampler (s1, `Operator109`) is still unbound
   (white) and the sky dome (`3D_TimeOfDay_SkyDome_Layer0`) not drawn.
+- Ambiance (`acbmp ambiance <map>`): `World.WorldGraphicData` ->
+  `Ambiance` (WorldAmbiance: `Fog` {Color, Intensity, Density, Near, Far},
+  `LayeredSky`, post effects) + `WorldLightMapSettings.WorldLightMaps[]`
+  {texture, `TexelWorldSize` = uv scale, ZMin, ZMax} (day, night) +
+  `AmbianceCurrentTime`. Every MP map's LayeredSky has the same dim bluish
+  sun (30/30 deg): night defaults overridden at runtime, so the sun stays
+  hand-set. `AmbientCube::GetEffectiveColors` (0x9cf880): face * Tint, HSV
+  S *= Saturation, then * Scale + (Bias, Bias, Bias, 0); faces Right,
+  Left, Front, Back, Top, Down.
+- World lightmap (lighting PS): uv = (pos.xy + n.xy * c87.x) * c88.zw +
+  0.5; mip = sat((dist - c89.x) / c89.y); texel.a * c87.w + c87.y = baked
+  ground height, fade sat(1 - |h - z| * c87.z); lm = rgb * c88.x;
+  colour = lerp(ambient-lit, albedo * lm, sat(dot(albedo * lm, c88.y))).
+  Used: c87 = (0.5, ZMin, 0.5, ZMax - ZMin), c88 = (2, 3, TexelWorldSize
+  x2), c89 = (0, 60): offset/fade/intensity/weight are guesses; alignment
+  checked top-down (lit areas follow San Donato's streets).
+  `ACBMP_NO_LIGHTMAP=1` disables. `acbmp texture <forge> <name> out.png`
+  decodes BC1/2/3 (rgb | alpha).
 - Saturation check (2026-10-14): five San Donato views have 0-52 pixels
   at >= 250 in every channel, nearly all `GEN_FabricW_01A` (white cloth,
   Layer0_Color 0.6 -> albedo ~1.2) and `GEN_Veg_Fougere_03A`; no blown-out

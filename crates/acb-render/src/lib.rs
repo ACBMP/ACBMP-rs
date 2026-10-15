@@ -729,6 +729,32 @@ impl Scene {
     pub fn load(r: &Renderer, archive: &Archive, shading: ShadingMode) -> anyhow::Result<(Self, LoadStats)> {
         let mut stats = LoadStats::default();
         let mut retail = (shading == ShadingMode::Retail).then(|| retail::Retail::new(r));
+        // the map's own fog and world lightmap (its first, daytime one)
+        let mut environment = Environment::default();
+        if let Some(a) = archive.ambiance() {
+            if a.fog_enabled && a.fog_far > a.fog_near {
+                environment.fog_color = Vec3::from(a.fog_color);
+                environment.fog_start = a.fog_near;
+                environment.fog_range = a.fog_far - a.fog_near;
+                environment.fog_max = (a.fog_density * a.fog_intensity).clamp(0.0, 1.0);
+            }
+            let lm = a.lightmaps.first().filter(|_| std::env::var_os("ACBMP_NO_LIGHTMAP").is_none());
+            if let (Some(lm), Some(retail)) = (lm, retail.as_mut()) {
+                let view = archive.texture(lm.texture).ok().flatten().and_then(|t| r.upload_texture(&t, false));
+                if let Some(tex) = view {
+                    retail.world_lightmap = Some(tex.create_view(&Default::default()));
+                    environment.lightmap = Some(retail::Lightmap {
+                        uv_scale: lm.uv_scale,
+                        z_min: lm.z_min,
+                        z_range: lm.z_max - lm.z_min,
+                        normal_offset: 0.5,
+                        fade: 0.5,
+                        intensity: 2.0,
+                        weight: 3.0,
+                    });
+                }
+            }
+        }
         let mut retail_materials = Vec::new();
         let mut retail_slots: HashMap<(u32, MaterialKey, u32), Option<usize>> = HashMap::new();
         let mut gamma_views: HashMap<u32, Option<wgpu::TextureView>> = HashMap::new();
@@ -875,7 +901,7 @@ impl Scene {
             retail_slots,
             gamma_views,
             skinned: Vec::new(),
-            environment: Environment::default(),
+            environment,
             bounds: (lo, hi),
         };
         Ok((scene, stats))
