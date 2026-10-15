@@ -47,9 +47,41 @@ pub(crate) struct Shadows {
     depth: wgpu::TextureView,
     pub noise: wgpu::TextureView,
     pipeline: wgpu::RenderPipeline,
+    skinned_pipeline: wgpu::RenderPipeline,
+    frame_layout: wgpu::BindGroupLayout,
     uniforms: Vec<wgpu::Buffer>,
     bind_groups: Vec<wgpu::BindGroup>,
 }
+
+/// Skinned casters: format-0 vertices posed by the draw's own VS constant
+/// block (bone rows at c120 + 3 * slot, as the retail skinned VS reads
+/// them) and the World rows of its instance buffer.
+const SKINNED_SHADER: &str = r#"
+@group(0) @binding(0) var<uniform> view_proj: mat4x4<f32>;
+struct Frame { c: array<vec4<f32>, 256> };
+@group(1) @binding(0) var<uniform> frame: Frame;
+struct VsIn {
+    @location(0) pos: vec4<f32>,
+    @location(1) idx: vec4<u32>,
+    @location(2) w: vec4<f32>,
+    @location(3) w0: vec4<f32>,
+    @location(4) w1: vec4<f32>,
+    @location(5) w2: vec4<f32>,
+};
+fn bone(i: u32, p: vec4<f32>) -> vec3<f32> {
+    let r = 120u + 3u * i;
+    return vec3<f32>(dot(frame.c[r], p), dot(frame.c[r + 1u], p), dot(frame.c[r + 2u], p));
+}
+@vertex fn vs(v: VsIn) -> @builtin(position) vec4<f32> {
+    let p = vec4<f32>(v.pos.xyz * 10.0, 1.0);
+    let m = vec4<f32>(bone(v.idx.x, p) * v.w.x + bone(v.idx.y, p) * v.w.y + bone(v.idx.z, p) * v.w.z + bone(v.idx.w, p) * v.w.w, 1.0);
+    let world = vec3<f32>(dot(v.w0, m), dot(v.w1, m), dot(v.w2, m));
+    return view_proj * vec4<f32>(world, 1.0);
+}
+@fragment fn fs(@builtin(position) p: vec4<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(p.z, 0.0, 0.0, 1.0);
+}
+"#;
 
 const SHADER: &str = r#"
 @group(0) @binding(0) var<uniform> view_proj: mat4x4<f32>;
@@ -212,7 +244,79 @@ impl Shadows {
             multiview_mask: None,
             cache: None,
         });
-        Shadows { atlas, atlas_tex, depth, noise, pipeline, uniforms, bind_groups }
+        let frame_layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow skinned frame"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let skinned_module = d.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("shadow skinned"),
+            source: wgpu::ShaderSource::Wgsl(SKINNED_SHADER.into()),
+        });
+        let skinned_pl = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow skinned"),
+            bind_group_layouts: &[Some(&layout), Some(&frame_layout)],
+            immediate_size: 0,
+        });
+        let skin_attrs = wgpu::vertex_attr_array![0 => Snorm16x4, 1 => Uint8x4, 2 => Unorm8x4];
+        let skin_attrs = [
+            wgpu::VertexAttribute { offset: 0, ..skin_attrs[0] },
+            wgpu::VertexAttribute { offset: 24, ..skin_attrs[1] },
+            wgpu::VertexAttribute { offset: 28, ..skin_attrs[2] },
+        ];
+        // World rows of the retail instance (after the 4 WVP rows)
+        let world_attrs = [3, 4, 5].map(|loc| wgpu::VertexAttribute {
+            format: wgpu::VertexFormat::Float32x4,
+            offset: 64 + 16 * (loc as u64 - 3),
+            shader_location: loc,
+        });
+        let skinned_pipeline = d.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow skinned"),
+            layout: Some(&skinned_pl),
+            vertex: wgpu::VertexState {
+                module: &skinned_module,
+                entry_point: Some("vs"),
+                buffers: &[
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: 32,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &skin_attrs,
+                    }),
+                    Some(wgpu::VertexBufferLayout {
+                        array_stride: crate::retail::INSTANCE_STRIDE,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &world_attrs,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &skinned_module,
+                entry_point: Some("fs"),
+                targets: &[Some(format.into())],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Shadows { atlas, atlas_tex, depth, noise, pipeline, skinned_pipeline, frame_layout, uniforms, bind_groups }
     }
 
     /// Cascades for `camera` with the sun towards `sun_dir`: constants for
@@ -284,8 +388,25 @@ impl Shadows {
             }),
             ..Default::default()
         });
-        pass.set_pipeline(&self.pipeline);
+        // each skinned draw's frame block, bound this frame
+        let frames: Vec<Vec<wgpu::BindGroup>> = scene
+            .skinned
+            .iter()
+            .map(|s| {
+                s.draws
+                    .iter()
+                    .map(|d| {
+                        r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("shadow skinned frame"),
+                            layout: &self.frame_layout,
+                            entries: &[wgpu::BindGroupEntry { binding: 0, resource: d.frame.as_entire_binding() }],
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
         for (slot, bg) in self.bind_groups.iter().enumerate() {
+            pass.set_pipeline(&self.pipeline);
             let s = CASCADE_SIZE as f32;
             pass.set_viewport(slot as f32 * s, 0.0, s, s, 0.0, 1.0);
             pass.set_bind_group(0, bg, &[]);
@@ -294,6 +415,21 @@ impl Shadows {
                     continue;
                 }
                 draw_casters(&mut pass, scene, m);
+            }
+            pass.set_pipeline(&self.skinned_pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            for (s, fr) in scene.skinned.iter().zip(&frames) {
+                pass.set_vertex_buffer(0, s.vertices.slice(..));
+                pass.set_vertex_buffer(1, s.instances.slice(..));
+                pass.set_index_buffer(s.indices.slice(..), wgpu::IndexFormat::Uint32);
+                for (d, f) in s.draws.iter().zip(fr) {
+                    let mat = &scene.retail_materials[d.material];
+                    if mat.blended || mat.alpha_test {
+                        continue;
+                    }
+                    pass.set_bind_group(1, f, &[]);
+                    pass.draw_indexed(d.range.clone(), 0, 0..1);
+                }
             }
         }
     }

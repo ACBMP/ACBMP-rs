@@ -144,7 +144,9 @@ as such; the rest is read from decompiled code and not yet exercised.
   70 / 200 m fitted as texel-snapped spheres in light space, casters 150 m
   towards the sun, depth range 400 m beyond (the shader selects by u, v
   only, so receivers behind a small cascade must still fit its depth).
-  Opaque static meshes cast (no alpha-tested/blended, no characters yet).
+  Opaque static meshes and skinned characters cast (no alpha-tested or
+  blended surfaces): the skinned caster reads each draw's own VS constant
+  block (bone rows at c120 + 3 slot) and its instance World rows.
   `ACBMP_NO_SHADOWS=1`, `ACBMP_SHADOW_DUMP=file.pgm`,
   `ACBMP_SHADOW_XONLY=1` (debug). Sun direction is still hand-set.
 - Saturation check (2026-10-14): five San Donato views have 0-52 pixels
