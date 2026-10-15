@@ -787,7 +787,7 @@ impl Scene {
                         z_range: lm.z_max - lm.z_min,
                         normal_offset: 0.5,
                         fade: 0.5,
-                        intensity: 2.0,
+                        intensity: std::env::var("ACBMP_LIGHTMAP_INTENSITY").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
                         weight: 3.0,
                     });
                 }

@@ -114,10 +114,11 @@ as such; the rest is read from decompiled code and not yet exercised.
   0.5; mip = sat((dist - c89.x) / c89.y); texel.a * c87.w + c87.y = baked
   ground height, fade sat(1 - |h - z| * c87.z); lm = rgb * c88.x;
   colour = lerp(ambient-lit, albedo * lm, sat(dot(albedo * lm, c88.y))).
-  Used: c87 = (0.5, ZMin, 0.5, ZMax - ZMin), c88 = (2, 3, TexelWorldSize
+  Used: c87 = (0.5, ZMin, 0.5, ZMax - ZMin), c88 = (1, 3, TexelWorldSize
   x2), c89 = (0, 60): offset/fade/intensity/weight are guesses; alignment
   checked top-down (lit areas follow San Donato's streets).
-  `ACBMP_NO_LIGHTMAP=1` disables. `acbmp texture <forge> <name> out.png`
+  `ACBMP_NO_LIGHTMAP=1` disables, `ACBMP_LIGHTMAP_INTENSITY` overrides c88.x
+  (2 looked over-orange indoors, Palazzio). `acbmp texture <forge> <name> out.png`
   decodes BC1/2/3 (rgb | alpha).
 - Sky: `LayeredSky.Layers[i]` = {`Mesh` (3D_TimeOfDay_SkyDome_Layer0),
   `MaterialOverride`} drawn as one instance centred on the eye, scaled to
