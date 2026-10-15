@@ -58,6 +58,8 @@ pub struct Environment {
     pub fog_max: f32,
     /// World lightmap constants, when one is bound.
     pub lightmap: Option<Lightmap>,
+    /// Hours (the ambiance's `AmbianceCurrentTime`).
+    pub time_of_day: f32,
 }
 
 /// `g_WorldLightmap*` values for a world lightmap (see the lighting PS:
@@ -88,6 +90,7 @@ impl Default for Environment {
             fog_range: 900.0,
             fog_max: 0.7,
             lightmap: None,
+            time_of_day: 12.0,
         }
     }
 }
@@ -235,6 +238,8 @@ fn fill_globals(block: &mut ConstBlock, globals: &[Global], env: &Environment, f
             "g_WorldLightmapZOffsetParameters" => vec![[0.0, 60.0, 0.0, 0.0]],
             "g_DeconstructionRanges" => vec![[1.0e6, 1.0e6 + 1.0, 0.0, 0.0]],
             "g_EyeDirection" => vec![v(fv.forward, 0.0)],
+            // sky ramps are sampled at u = 0.125 + .x: noon mid-ramp
+            "g_TimeOfDay" => vec![[env.time_of_day / 24.0 - 0.125, 0.0, 0.0, 0.0]],
             // world -> view with z = distance ahead (the shaders compare it
             // with the depth sampler's linearized value)
             "g_WorldToView" => {

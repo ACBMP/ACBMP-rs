@@ -115,6 +115,12 @@ as such; the rest is read from decompiled code and not yet exercised.
   checked top-down (lit areas follow San Donato's streets).
   `ACBMP_NO_LIGHTMAP=1` disables. `acbmp texture <forge> <name> out.png`
   decodes BC1/2/3 (rgb | alpha).
+- Sky: `LayeredSky.Layers[i]` = {`Mesh` (3D_TimeOfDay_SkyDome_Layer0),
+  `MaterialOverride`} drawn as one instance centred on the eye, scaled to
+  0.9 * far. The dome PS samples `SkyDomeColorRampTex` (e.g.
+  `AC2MP_SanDonato_NightDay_SkyColor_Map`, 32x16: u = time of day, dark
+  at both ends) at u = 0.125 + g_TimeOfDay.x, so g_TimeOfDay.x = hours /
+  24 - 0.125 (`AmbianceCurrentTime` 12 on every MP map). `ACBMP_NO_SKY=1`.
 - Saturation check (2026-10-14): five San Donato views have 0-52 pixels
   at >= 250 in every channel, nearly all `GEN_FabricW_01A` (white cloth,
   Layer0_Color 0.6 -> albedo ~1.2) and `GEN_Veg_Fougere_03A`; no blown-out

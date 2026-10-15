@@ -196,6 +196,9 @@ pub struct Scene {
     pub environment: Environment,
     /// World-space bounds of every instance origin.
     pub bounds: (Vec3, Vec3),
+    /// The sky dome mesh (LayeredSky layer), kept centred on the eye and
+    /// scaled out behind everything else.
+    sky: Option<(usize, f32)>,
 }
 
 impl Renderer {
@@ -575,8 +578,13 @@ impl Renderer {
         if let Some(retail) = &scene.retail {
             retail.update_frame(self, env, &fv);
             let view_proj = camera.view_proj();
-            for m in &scene.meshes {
+            for (i, m) in scene.meshes.iter().enumerate() {
                 if let Some((buf, worlds)) = &m.retail_instances {
+                    let sky = scene.sky.filter(|s| s.0 == i).map(|s| [Mat4::from_scale_rotation_translation(Vec3::splat(s.1), glam::Quat::IDENTITY, camera.eye)]);
+                    let worlds = match &sky {
+                        Some(w) => &w[..],
+                        None => &worlds[..],
+                    };
                     let rows = retail::instance_rows(view_proj, worlds);
                     self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&rows));
                 }
@@ -731,7 +739,12 @@ impl Scene {
         let mut retail = (shading == ShadingMode::Retail).then(|| retail::Retail::new(r));
         // the map's own fog and world lightmap (its first, daytime one)
         let mut environment = Environment::default();
+        let mut sky_layer: Option<(u32, u32)> = None;
         if let Some(a) = archive.ambiance() {
+            sky_layer = a.sky_layers.first().copied().filter(|_| std::env::var_os("ACBMP_NO_SKY").is_none());
+            if a.time > 0.0 {
+                environment.time_of_day = a.time;
+            }
             if a.fog_enabled && a.fog_far > a.fog_near {
                 environment.fog_color = Vec3::from(a.fog_color);
                 environment.fog_start = a.fog_near;
@@ -777,8 +790,15 @@ impl Scene {
             });
             by_mesh.get_mut(&inst.mesh).unwrap().push(inst.matrix);
         }
+        // the sky dome: one instance, placed per frame
+        if let Some((mesh, _)) = sky_layer.filter(|(m, _)| !by_mesh.contains_key(m)) {
+            order.push(mesh);
+            by_mesh.insert(mesh, vec![Mat4::IDENTITY.to_cols_array()]);
+        }
+        let sky_uid = sky_layer.map(|l| l.0);
 
         let mut meshes = Vec::new();
+        let mut sky = None;
         for uid in order {
             let Some(mesh) = archive.static_mesh(uid)? else {
                 stats.skipped_meshes += 1;
@@ -789,10 +809,20 @@ impl Scene {
                 continue;
             }
             let mut submeshes = Vec::new();
+            let is_sky = Some(uid) == sky_uid;
+            if is_sky {
+                let radius = mesh.positions.iter().map(|p| Vec3::from(*p).length()).fold(0.0f32, f32::max);
+                sky = Some((meshes.len(), if radius > 0.0 { 0.9 * FAR / radius } else { 1.0 }));
+            }
             for s in &mesh.submeshes {
                 if s.index_count == 0 {
                     continue;
                 }
+                // a sky layer draws with its MaterialOverride
+                let s = &acb_world::mesh::Submesh {
+                    material: sky_layer.filter(|l| is_sky && l.1 != 0).map_or(s.material, |l| l.1),
+                    ..s.clone()
+                };
                 if archive.material(s.material).is_some_and(|m| m.disabled) {
                     stats.disabled_submeshes += 1;
                     continue;
@@ -903,6 +933,7 @@ impl Scene {
             skinned: Vec::new(),
             environment,
             bounds: (lo, hi),
+            sky,
         };
         Ok((scene, stats))
     }
@@ -920,6 +951,7 @@ impl Scene {
             skinned: Vec::new(),
             environment: Environment::default(),
             bounds: (Vec3::ZERO, Vec3::ZERO),
+            sky: None,
         }
     }
 
