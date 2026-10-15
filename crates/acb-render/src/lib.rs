@@ -164,6 +164,8 @@ pub struct Renderer {
     depth_copy: std::cell::RefCell<Option<((u32, u32), wgpu::TextureView)>>,
     /// Shadow atlas format: R32Float when filterable, else R16Float.
     shadow_format: wgpu::TextureFormat,
+    /// Clock of animated materials.
+    start: std::time::Instant,
 }
 
 /// Camera clip planes (see [`Camera::view_proj`]).
@@ -419,6 +421,7 @@ impl Renderer {
             depth_blit,
             depth_blit_layout,
             depth_copy: Default::default(),
+            start: std::time::Instant::now(),
             shadow_format: if device_features.contains(wgpu::Features::FLOAT32_FILTERABLE) {
                 wgpu::TextureFormat::R32Float
             } else {
@@ -598,6 +601,7 @@ impl Renderer {
         }
         if let Some(retail) = &scene.retail {
             retail.update_frame(self, env, &fv);
+            retail.animate(self, &scene.retail_materials, self.start.elapsed().as_secs_f32());
             let view_proj = camera.view_proj();
             for (i, m) in scene.meshes.iter().enumerate() {
                 if let Some((buf, worlds)) = &m.retail_instances {

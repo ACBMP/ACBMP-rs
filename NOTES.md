@@ -151,6 +151,16 @@ as such; the rest is read from decompiled code and not yet exercised.
   readback): 3.7 ms with shadows, 3.0 ms without.
   `ACBMP_NO_SHADOWS=1`, `ACBMP_SHADOW_DUMP=file.pgm`,
   `ACBMP_SHADOW_XONLY=1` (debug). Sun direction is still hand-set.
+- Shader parameters of `Type` 4 are operator-driven:
+  `ShaderParameter.AssociatedOperator` -> an operator of the template's
+  `MaterialDefinition.Operators`. For `UVTransformOperator`
+  (`Parameters`: UVTransform {Scale, Translation, TranslationSpeed,
+  Rotation, RotationSpeed, Animate*}) the shader reads 3 rows and does
+  uv' = (dot((u, v, 1), row0), dot((u, v, 1), row1)). Rows built as
+  scale * rotation with translation + speed * t (order unconfirmed) and
+  rewritten every frame; the Venice water's normal maps scroll and the
+  water looks right. Other operator kinds of type 4 (e.g. the water VS
+  c100) are not fed.
 - Saturation check (2026-10-14): five San Donato views have 0-52 pixels
   at >= 250 in every channel, nearly all `GEN_FabricW_01A` (white cloth,
   Layer0_Color 0.6 -> albedo ~1.2) and `GEN_Veg_Fougere_03A`; no blown-out

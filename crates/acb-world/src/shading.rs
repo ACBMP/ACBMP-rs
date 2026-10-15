@@ -73,8 +73,38 @@ pub struct ShaderParam {
     pub property: u32,
     pub register: u32,
     pub count: u32,
-    /// 0/1 float constant, 2 sampler.
+    /// 0/1 float constant, 2 sampler, 4 operator-driven.
     pub kind: u32,
+    /// Kind 4 fed by a `UVTransformOperator`: animated UV rows.
+    pub uv_transform: Option<UvTransform>,
+}
+
+/// A template `UVTransformOperator`'s `Parameters` (`UVTransform`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UvTransform {
+    pub scale: [f32; 2],
+    pub translation: [f32; 2],
+    pub speed: [f32; 2],
+    pub rotation: f32,
+    pub rotation_speed: f32,
+    pub animate_translation: bool,
+    pub animate_rotation: bool,
+}
+
+impl UvTransform {
+    /// The shader rows at `t` seconds: uv' = (dot((u, v, 1), row0),
+    /// dot((u, v, 1), row1)); the third row is (0, 0, 1). Scale after
+    /// rotation, translation last (the order is not confirmed).
+    pub fn rows(&self, t: f32) -> [[f32; 4]; 3] {
+        let a = self.rotation + if self.animate_rotation { self.rotation_speed * t } else { 0.0 };
+        let tr = |i: usize| self.translation[i] + if self.animate_translation { self.speed[i] * t } else { 0.0 };
+        let (c, s) = (a.cos(), a.sin());
+        [
+            [self.scale[0] * c, -self.scale[0] * s, tr(0), 0.0],
+            [self.scale[1] * s, self.scale[1] * c, tr(1), 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ]
+    }
 }
 
 impl ShaderParam {
@@ -223,6 +253,34 @@ impl Archive<'_> {
     pub fn template_shaders(&self, uid: u32) -> Option<TemplateShaders> {
         let t = self.root(uid).ok()?;
         let ct = self.field(&t.obj, "CompiledTemplatePrimary")?.as_obj()?;
+        // UV transform operators by object id
+        let f = |o: &Obj, n: &str| self.field(o, n).and_then(Value::as_f32s).and_then(|v| v.first().copied()).unwrap_or(0.0);
+        let uv_ops: HashMap<u32, UvTransform> = self
+            .field(&t.obj, "MaterialDefinition")
+            .and_then(Value::as_obj)
+            .and_then(|d| self.field(d, "Operators"))
+            .map(Value::items)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Value::as_obj)
+            .filter(|o| self.is_type(o, "UVTransformOperator"))
+            .filter_map(|o| {
+                let p = self.field(o, "Parameters")?.as_obj()?;
+                let flag = |n: &str| self.field(p, n).and_then(Value::as_bool).unwrap_or(false);
+                Some((
+                    o.id,
+                    UvTransform {
+                        scale: [f(p, "ScaleU"), f(p, "ScaleV")],
+                        translation: [f(p, "TranslationU"), f(p, "TranslationV")],
+                        speed: [f(p, "TranslationSpeedU"), f(p, "TranslationSpeedV")],
+                        rotation: f(p, "Rotation"),
+                        rotation_speed: f(p, "RotationSpeed"),
+                        animate_translation: flag("AnimateTranslation"),
+                        animate_rotation: flag("AnimateRotation"),
+                    },
+                ))
+            })
+            .collect();
         let list = |name: &str, lighting: bool| -> Vec<Permutation> {
             let num = |o: &Obj, n: &str| self.field(o, n).and_then(Value::as_u32).unwrap_or(0);
             self.field(ct, name)
@@ -245,6 +303,10 @@ impl Archive<'_> {
                             register: num(q, "ConstantIndex"),
                             count: num(q, "NbVectors").max(1),
                             kind: num(q, "Type"),
+                            uv_transform: self
+                                .field(q, "AssociatedOperator")
+                                .and_then(Value::target_id)
+                                .and_then(|id| uv_ops.get(&id).copied()),
                         })
                         .collect(),
                 })

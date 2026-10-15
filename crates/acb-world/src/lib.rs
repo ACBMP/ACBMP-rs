@@ -30,7 +30,7 @@ pub use guidance::GuidanceEdge;
 pub use mesh::StaticMesh;
 pub use navmesh::{CrowdFlow, NavGraph, NavMesh};
 pub use skin::{MeshBone, SkinnedMesh, SkinnedSubmesh};
-pub use shading::{MaterialOverride, MaterialParams, ParamValue, Permutation, ShaderParam, TemplateShaders};
+pub use shading::{MaterialOverride, MaterialParams, ParamValue, Permutation, ShaderParam, TemplateShaders, UvTransform};
 pub use texture::{PixelFormat, Texture};
 
 #[derive(Debug, thiserror::Error)]

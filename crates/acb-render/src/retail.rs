@@ -319,6 +319,8 @@ pub(crate) struct Material {
     /// the program reads the scene depth.
     views: Vec<(u32, wgpu::TextureView)>,
     depth_binding: Option<u32>,
+    /// Operator-driven UV rows: (pixel stage, register, rows, transform).
+    animated: Vec<(bool, u32, u32, acb_world::UvTransform)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -698,9 +700,17 @@ impl Retail {
         textures: &mut dyn FnMut(u32) -> Option<wgpu::TextureView>,
     ) -> Material {
         let p = &self.programs[pi];
-        let block = |n: usize, list: &[acb_world::ShaderParam], extra: Option<(u32, f32)>| {
+        let mut animated = Vec::new();
+        let mut block = |n: usize, list: &[acb_world::ShaderParam], extra: Option<(u32, f32)>, ps: bool| {
             let mut b = ConstBlock::new(n);
             for sp in list.iter().filter(|sp| !sp.is_sampler()) {
+                if let Some(uv) = sp.uv_transform {
+                    for (k, row) in uv.rows(0.0).into_iter().enumerate().take(sp.count as usize) {
+                        b.set(sp.register + k as u32, row);
+                    }
+                    animated.push((ps, sp.register, sp.count, uv));
+                    continue;
+                }
                 if let Some(ParamValue::Vector(v)) = params.values.get(&sp.property) {
                     b.set(sp.register, *v);
                 }
@@ -711,11 +721,11 @@ impl Retail {
             r.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("retail material"),
                 contents: &b.bytes(),
-                usage: wgpu::BufferUsages::UNIFORM,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             })
         };
-        let vs_mat = block(wgsl::VS_CONSTS, &p.vs_params, None);
-        let ps_mat = block(wgsl::PS_CONSTS, &p.ps_params, Some((ALPHA_REF_REG, alpha_ref)));
+        let vs_mat = block(wgsl::VS_CONSTS, &p.vs_params, None, false);
+        let ps_mat = block(wgsl::PS_CONSTS, &p.ps_params, Some((ALPHA_REF_REG, alpha_ref)), true);
         let consts = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("retail consts"),
             layout: &self.consts_layout,
@@ -772,7 +782,7 @@ impl Retail {
             layout: &p.tex_layout,
             entries: &entries,
         });
-        Material { program: pi, consts, vs_mat, ps_mat, textures, two_sided, blended, alpha_test: false, views, depth_binding }
+        Material { program: pi, consts, vs_mat, ps_mat, textures, two_sided, blended, alpha_test: false, views, depth_binding, animated }
     }
 
     /// Uploads this frame's engine globals for every program.
@@ -784,6 +794,17 @@ impl Retail {
             fill_globals(&mut ps, &p.ps_globals, env, fv);
             r.queue.write_buffer(&p.vs_frame, 0, &vs.bytes());
             r.queue.write_buffer(&p.ps_frame, 0, &ps.bytes());
+        }
+    }
+
+    /// Rewrites the UV-animation rows of `materials` for time `t` (s).
+    pub fn animate(&self, r: &Renderer, materials: &[Material], t: f32) {
+        for m in materials {
+            for &(ps, reg, count, uv) in &m.animated {
+                let rows: Vec<[f32; 4]> = uv.rows(t).into_iter().take(count as usize).collect();
+                let buf = if ps { &m.ps_mat } else { &m.vs_mat };
+                r.queue.write_buffer(buf, reg as u64 * 16, bytemuck::cast_slice(&rows));
+            }
         }
     }
 
