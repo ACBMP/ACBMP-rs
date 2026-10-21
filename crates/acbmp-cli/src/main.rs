@@ -259,6 +259,9 @@ enum Cmd {
         schemas: PathBuf,
         #[arg(long, default_value_t = 8)]
         frames: usize,
+        /// Join a stride half (`*_footl`) with its other half (`*_footr`)
+        #[arg(long)]
+        stride: bool,
     },
     /// Root motion of animations: length, displacement, yaw, speed profile
     Rootmotion {
@@ -269,6 +272,9 @@ enum Cmd {
         schemas: PathBuf,
         #[arg(long, env = "ACBMP_EXE")]
         exe: PathBuf,
+        /// Join a stride half (`*_footl`) with its other half (`*_footr`)
+        #[arg(long)]
+        stride: bool,
     },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
@@ -291,8 +297,8 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
-        Cmd::Animplay { forge, name, out, schemas, frames } => animplay(forge, &name, out, schemas, frames)?,
-        Cmd::Rootmotion { forge, names, schemas, exe } => rootmotion(forge, &names, schemas, exe)?,
+        Cmd::Animplay { forge, name, out, schemas, frames, stride } => animplay(forge, &name, out, schemas, frames, stride)?,
+        Cmd::Rootmotion { forge, names, schemas, exe, stride } => rootmotion(forge, &names, schemas, exe, stride)?,
         Cmd::Animstats { forge, schemas, exe } => animstats(forge, schemas, exe)?,
         Cmd::Shaderlab { forge, schemas, sample_dir } => shaderlab(forge, schemas, sample_dir)?,
         Cmd::Shaders { forge, name, schemas, top, fields, disasm } => shaders(forge, &name, schemas, top, fields, disasm)?,
@@ -1101,7 +1107,7 @@ fn collision(forge: PathBuf, schemas: PathBuf, obj: Option<PathBuf>) -> anyhow::
     Ok(())
 }
 
-fn rootmotion(forge: PathBuf, names: &[String], schemas: PathBuf, exe: PathBuf) -> anyhow::Result<()> {
+fn rootmotion(forge: PathBuf, names: &[String], schemas: PathBuf, exe: PathBuf, stride: bool) -> anyhow::Result<()> {
     let schema = load_schema(&schemas)?;
     let archive = open_map(&forge, &schema)?;
     let builtins = acb_anim::BuiltinTracks::from_executable(&std::fs::read(&exe)?)
@@ -1113,6 +1119,15 @@ fn rootmotion(forge: PathBuf, names: &[String], schemas: PathBuf, exe: PathBuf) 
             continue;
         };
         let clip = acb_anim::pose::Clip::load_with(&archive, uid, Some(&builtins)).ok_or_else(|| anyhow::anyhow!("{name}: decode"))?;
+        let clip = match acb_anim::pose::stride_partner(name).filter(|_| stride) {
+            Some(other) => {
+                let u = uids.iter().copied().find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(&other)));
+                let other = u.and_then(|u| acb_anim::pose::Clip::load_with(&archive, u, Some(&builtins))).ok_or_else(|| anyhow::anyhow!("{other}: not found"))?;
+                print!("{name} + {} = ", archive.loc(other.uid).map(|l| l.name.as_str()).unwrap_or("?"));
+                clip.then(&other)
+            }
+            None => clip,
+        };
         let end = clip.root_motion(clip.length);
         let (_, r0, p0) = clip.root_motion(0.0).to_scale_rotation_translation();
         print!("start ({:.2}, {:.2}, {:.2}) yaw {:.0}; ", p0.x, p0.y, p0.z, r0.to_euler(glam::EulerRot::ZXY).0.to_degrees());
@@ -1543,7 +1558,7 @@ fn animstats(forge: PathBuf, schemas: PathBuf, exe: Option<PathBuf>) -> anyhow::
     Ok(())
 }
 
-fn animplay(forge: PathBuf, needle: &str, out: PathBuf, schemas: PathBuf, frames: usize) -> anyhow::Result<()> {
+fn animplay(forge: PathBuf, needle: &str, out: PathBuf, schemas: PathBuf, frames: usize, stride: bool) -> anyhow::Result<()> {
     use acb_anim::pose::{Clip, Skeleton};
     let schema = load_schema(&schemas)?;
     let archive = acb_world::Archive::open(&forge, &schema)?;
@@ -1555,6 +1570,16 @@ fn animplay(forge: PathBuf, needle: &str, out: PathBuf, schemas: PathBuf, frames
         .copied()
         .ok_or_else(|| anyhow::anyhow!("no animation matching {needle}"))?;
     let clip = Clip::load(&archive, uid).ok_or_else(|| anyhow::anyhow!("animation did not decode"))?;
+    let name = archive.loc(uid).map(|l| l.name.clone()).unwrap_or_default();
+    let clip = match acb_anim::pose::stride_partner(&name).filter(|_| stride) {
+        Some(other) => {
+            let u = anims.iter().copied().find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(&other)));
+            let other = u.and_then(|u| Clip::load(&archive, u)).ok_or_else(|| anyhow::anyhow!("{other}: not found"))?;
+            println!("joined with {}", archive.loc(other.uid).map(|l| l.name.as_str()).unwrap_or("?"));
+            clip.then(&other)
+        }
+        None => clip,
+    };
     let skeleton = archive
         .uids_of("Skeleton")
         .into_iter()
