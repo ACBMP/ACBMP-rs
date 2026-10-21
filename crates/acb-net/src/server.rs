@@ -224,7 +224,7 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
         // the tick: everyone's input for it (gone players stand still)
         let wire: Vec<WireInput> = peers.iter_mut().map(|p| if p.gone { WireInput::default() } else { p.inputs.take(tick) }).collect();
         let mut wire = wire;
-        let new = game::authoritative_step(&mut world, &mut wire, &prev_inputs, tick);
+        let new = game::authoritative_step(&mut world, &mut wire, &mut prev_inputs, tick);
         for e in &new {
             eprintln!("serve: {}", e.describe());
             if let Some(l) = &mut log {
@@ -232,7 +232,6 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
             }
         }
         events.extend(new);
-        prev_inputs.clone_from(&wire);
         used.push(wire);
         if let Some(l) = &mut log {
             for (i, q) in game::net_positions(&world).iter().enumerate() {

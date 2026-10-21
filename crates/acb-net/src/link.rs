@@ -139,9 +139,7 @@ impl Link {
             // wake for the next delayed packet or the deadline
             let next = self.queue.iter().map(|e| e.0).min().map_or(deadline, |t| t.min(deadline));
             let wait = next.saturating_duration_since(now);
-            if wait.is_zero() && now >= deadline {
-                return None;
-            }
+            // (a zero timeout still polls the socket once)
             let _ = self.sock.set_read_timeout(Some(wait.max(Duration::from_micros(100))));
             match self.sock.recv_from(&mut buf) {
                 Ok((n, peer)) => {

@@ -67,6 +67,8 @@ pub struct ClientStats {
     /// Confirmed ticks checked against the server's positions, and the
     /// ones that differed.
     pub checked: u64,
+    /// Checked ticks where every player's quantized state was identical.
+    pub exact: u64,
     pub desyncs: u64,
     /// Predictions the reconciliation changed (own position > 1 mm or
     /// action state), and kills it undid.
@@ -83,10 +85,15 @@ pub struct Client {
     epoch: Instant,
     /// Round-trip time, seconds (smoothed).
     pub rtt: f32,
+    rtt_measured: bool,
+    loaded_ms: u32,
     heard: Instant,
     /// Predicted ticks, fractional; `None` until the first snapshot.
     clock: Option<f64>,
     rate: f64,
+    /// After a clock jump: lead reports are stale until the server has
+    /// our inputs through this tick.
+    jumped: u32,
     last_frame: Instant,
     last_ready: Instant,
     confirmed: Option<Saved>,
@@ -138,6 +145,7 @@ impl Client {
             if last_send.elapsed() > Duration::from_millis(250) {
                 if slot.is_none() {
                     link.send(&hello, server);
+                    link.send(&Msg::Ping { client_ms: epoch.elapsed().as_millis() as u32 }.encode(), server);
                 } else {
                     link.send(&Msg::Ping { client_ms: epoch.elapsed().as_millis() as u32 }.encode(), server);
                 }
@@ -175,9 +183,12 @@ impl Client {
                         n,
                         epoch,
                         rtt: rtt.unwrap_or(0.05),
+                        rtt_measured: rtt.is_some(),
+                        loaded_ms: u32::MAX,
                         heard: now,
                         clock: None,
                         rate: 1.0,
+                        jumped: 0,
                         last_frame: now,
                         last_ready: now - Duration::from_secs(1),
                         confirmed: None,
@@ -223,10 +234,15 @@ impl Client {
         let dt = now.duration_since(self.last_frame).as_secs_f64().min(0.25);
         self.last_frame = now;
         if self.confirmed.is_none() && world.tick == 0 {
+            // first call: the world is loaded (that took a while)
             self.confirmed = Some(world.save());
+            self.heard = now;
+            self.loaded_ms = self.ms();
         }
         if !self.running() && self.last_ready.elapsed() > Duration::from_millis(250) {
             self.link.send(&Msg::Ready.encode(), self.server);
+            // the round trip, for where to start the clock
+            self.link.send(&Msg::Ping { client_ms: self.ms() }.encode(), self.server);
             self.last_ready = Instant::now();
         }
         while let Some((data, from)) = self.link.recv(Duration::ZERO) {
@@ -237,6 +253,14 @@ impl Client {
             match Msg::decode(&data) {
                 Some(Msg::Snapshot(s)) => self.snapshot(world, s),
                 Some(Msg::Over { reason }) => self.over = Some(reason),
+                // (only pings sent since the world loaded)
+                Some(Msg::Lobby { echo_ms, .. }) if echo_ms != 0 && echo_ms >= self.loaded_ms => {
+                    let r = self.ms().wrapping_sub(echo_ms) as f32 / 1000.0;
+                    if r < 5.0 {
+                        self.rtt = if self.rtt_measured { self.rtt * 0.7 + r * 0.3 } else { r };
+                        self.rtt_measured = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -253,13 +277,19 @@ impl Client {
         } else {
             self.interp += (target - self.interp) * (1.0 - (-dt * 4.0).exp());
         }
+        let mut stepped = false;
         while (world.tick as f64) + 1.0 <= clock {
             let t = world.tick as u32 + 1;
             let w = WireInput::from_input(&input(t));
             self.own.insert(t, w);
             let inputs = self.predicted_inputs(t);
             world.step(&inputs);
-            self.send_inputs(t);
+            stepped = true;
+        }
+        // one packet per frame with every unacknowledged input (a burst of
+        // ticks in one frame must not read as late inputs)
+        if stepped {
+            self.send_inputs(world.tick as u32);
         }
         ((clock - world.tick as f64) as f32 + 1.0).clamp(0.0, 1.0)
     }
@@ -327,11 +357,17 @@ impl Client {
                 self.interp = s.tick as f64 - INTERP_TICKS;
                 eprintln!("net: match running, rtt {:.0} ms, {ahead:.1} ticks ahead", self.rtt * 1000.0);
             }
-            Some(ref mut c) if s.input_ack > 0 => {
+            Some(ref mut c) if s.input_ack > 0 && s.input_ack >= self.jumped => {
                 let lead = s.lead as i32;
-                if lead < -LEAD_MAX {
-                    // far behind: jump ahead (the server repeated our input)
-                    *c += (LEAD_MIN - lead) as f64;
+                if lead < -LEAD_MAX || lead > 4 * LEAD_MAX {
+                    // far off: jump (ahead: the server repeated our input;
+                    // back: the predicted world waits for the clock)
+                    *c += ((LEAD_MIN + LEAD_MAX) / 2 - lead) as f64;
+                    // (the burst of inputs right after still reads as late)
+                    self.jumped = c.max(world.tick as f64).ceil() as u32 + 1;
+                    if trace() {
+                        eprintln!("net: clock jump by {} ticks (lead {lead})", (LEAD_MIN + LEAD_MAX) / 2 - lead);
+                    }
                 }
                 self.rate = if lead < LEAD_MIN {
                     1.03
@@ -440,6 +476,9 @@ impl Client {
         }
         if off {
             self.stats.desyncs += 1;
+        }
+        if ours.as_slice() == server {
+            self.stats.exact += 1;
         }
         if trace() && t % 30 == 0 {
             for (j, q) in server.iter().enumerate() {

@@ -145,10 +145,12 @@ impl InputBuffer {
 /// with [`World::validate_action`] (the rules hook); a refused one is
 /// dropped from `wire` (the inputs as applied, which the server relays, so
 /// clients replaying them undo their predicted kill) and reported on the
-/// press. Then the world steps and the decided kills, deaths and respawns
+/// press (`prev`: last tick's inputs as sent, updated). Then the world steps and the decided kills, deaths and respawns
 /// are returned with the rejections.
-pub fn authoritative_step(world: &mut World, wire: &mut [WireInput], prev: &[WireInput], tick: u32) -> Vec<Event> {
+pub fn authoritative_step(world: &mut World, wire: &mut [WireInput], prev: &mut Vec<WireInput>, tick: u32) -> Vec<Event> {
     let mut out = Vec::new();
+    // presses count against the inputs as sent, not as applied
+    let raw = wire.to_vec();
     let rules = acb_game::rules::Rules::default();
     // contracts are not hooked in yet: everyone counts as a free-play victim
     let relation = |_: usize, _: usize| acb_game::rules::Relation::Npc;
@@ -171,6 +173,7 @@ pub fn authoritative_step(world: &mut World, wire: &mut [WireInput], prev: &[Wir
             }
         }
     }
+    *prev = raw;
     let inputs: Vec<_> = wire.iter().map(|w| w.to_input()).collect();
     let before = Before::of(world);
     world.step(&inputs);
