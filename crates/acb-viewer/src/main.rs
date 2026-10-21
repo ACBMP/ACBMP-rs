@@ -9,6 +9,10 @@
 //! Gameplay is `acb_game::World`, stepped at a fixed 60 Hz: each frame runs
 //! the ticks that are due (keys sampled per tick, presses between ticks
 //! count once) and draws the characters interpolated between the last two.
+//!
+//! `--connect host:port` joins an `acbmp serve` match: the own player is
+//! predicted locally and reconciled with the server, the others are drawn
+//! ~100 ms behind the newest server tick (`acb_net::client`).
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -87,6 +91,16 @@ struct Args {
     /// 60 Hz tick; default 60), to check frame-rate independence
     #[arg(long)]
     fps: Option<f64>,
+    /// Join an `acbmp serve` match at host:port (plays the first
+    /// --character; --input times are match time)
+    #[arg(long)]
+    connect: Option<String>,
+    /// Player name sent to the server
+    #[arg(long, default_value = "player")]
+    name: String,
+    /// Simulated network on this client, e.g. loss=5%,delay=50ms,jitter=10ms
+    #[arg(long, default_value = "")]
+    netsim: String,
 }
 
 fn parse_keys(list: &str) -> anyhow::Result<HashSet<KeyCode>> {
@@ -242,9 +256,47 @@ struct App {
     capture_frames: u64,
     /// Where this frame is between the last two ticks.
     alpha: f32,
+    /// --connect: the match client.
+    net: Option<acb_net::client::Client>,
+    /// --capture with --connect: when the first frame ran (frames are
+    /// paced to real time).
+    net_t0: Option<Instant>,
+    /// --connect: the match start, until the world is built from it.
+    connect: Option<acb_net::client::Start>,
+}
+
+/// Controls from held and tapped keys and the camera yaw.
+fn input_from(keys: &HashSet<KeyCode>, tapped: &HashSet<KeyCode>, cam_yaw: f32) -> PlayerInput {
+    let k = |c| keys.contains(&c) || tapped.contains(&c);
+    PlayerInput {
+        forward: k(KeyCode::KeyW),
+        back: k(KeyCode::KeyS),
+        left: k(KeyCode::KeyA),
+        right: k(KeyCode::KeyD),
+        cam_yaw,
+        run: k(KeyCode::ShiftLeft) || k(KeyCode::ShiftRight),
+        sprint: k(KeyCode::Space),
+        jump: false,
+        kill: k(KeyCode::KeyE),
+        stun: k(KeyCode::KeyQ),
+    }
 }
 
 impl App {
+    /// --connect: joins the match first (the world is built from the
+    /// server's slots), then loads.
+    fn connect_and_init(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
+        if let Some(addr) = self.args.connect.clone() {
+            let map = self.args.map.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let character = self.args.characters.first().cloned().ok_or_else(|| anyhow::anyhow!("--connect needs --character"))?;
+            let cfg = acb_net::client::ClientConfig { server: addr, name: self.args.name.clone(), character, map, netsim: acb_net::link::NetSim::parse(&self.args.netsim)? };
+            let (client, start) = acb_net::client::Client::connect(&cfg, std::time::Duration::from_secs(300))?;
+            self.net = Some(client);
+            self.connect = Some(start);
+        }
+        self.init(event_loop)
+    }
+
     fn init(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<()> {
         let window = Arc::new(event_loop.create_window(
             Window::default_attributes()
@@ -285,7 +337,14 @@ impl App {
             "{} meshes, {} instances, {} triangles, {} textures, loaded in {:.1}s",
             s.meshes, s.instances, s.triangles, s.textures, t0.elapsed().as_secs_f64()
         );
-        let world = self.load_world(&archive)?;
+        let world = match self.connect.take() {
+            Some(start) => {
+                let world = acb_net::game::load_world(&archive, &start.slots, self.builtins().as_ref())?;
+                eprintln!("net: match world with {} players, playing slot {}", world.players.len(), start.slot);
+                world
+            }
+            None => self.load_world(&archive)?,
+        };
         let skins = world
             .bodies
             .iter()
@@ -294,10 +353,14 @@ impl App {
                 cloth: vec![ClothSim::default(); b.character.cloths.len()],
             })
             .collect();
-        // start behind the first one, looking along its facing (+Y)
-        if let Some(b) = world.bodies.first() {
-            let facing = b.spawn.y_axis.truncate().normalize_or_zero();
-            let at = b.spawn.w_axis.truncate();
+        // start behind the own one, looking along its facing (+Y)
+        if let Some(b) = world.players.get(self.me()).and_then(|p| world.bodies.get(p.body)).or(world.bodies.first()) {
+            let mut facing = b.spawn.y_axis.truncate().normalize_or_zero();
+            let mut at = b.spawn.w_axis.truncate();
+            if let Some(p) = world.players.get(self.me()) {
+                facing = Vec3::new(-p.yaw.sin(), p.yaw.cos(), 0.0);
+                at = p.pos;
+            }
             self.fly.pos = at - facing * 4.0 + Vec3::Z * 1.8;
             self.fly.yaw = facing.y.atan2(facing.x);
             self.fly.pitch = -0.15;
@@ -315,19 +378,7 @@ impl App {
         for name in &self.args.characters {
             characters.push((name.clone(), Arc::new(acb_game::load_character(archive, name)?)));
         }
-        let builtins = if characters.is_empty() {
-            None
-        } else {
-            let exe = self.args.exe.clone().or_else(|| {
-                let p = self.args.map.parent()?.parent()?.join("ACBMP.exe");
-                p.exists().then_some(p)
-            });
-            let b = exe.as_ref().and_then(|p| BuiltinTracks::from_executable(&std::fs::read(p).ok()?));
-            if b.is_none() {
-                eprintln!("no ACBMP.exe builtin tracks (--exe): no root motion");
-            }
-            b
-        };
+        let builtins = if characters.is_empty() { None } else { self.builtins() };
         let setup = Setup {
             characters,
             count: self.args.count,
@@ -342,27 +393,47 @@ impl App {
         World::load(archive, &setup)
     }
 
+    fn builtins(&self) -> Option<BuiltinTracks> {
+        let exe = self.args.exe.clone().or_else(|| {
+            let p = self.args.map.parent()?.parent()?.join("ACBMP.exe");
+            p.exists().then_some(p)
+        });
+        let b = exe.as_ref().and_then(|p| BuiltinTracks::from_executable(&std::fs::read(p).ok()?));
+        if b.is_none() {
+            eprintln!("no ACBMP.exe builtin tracks (--exe): no root motion");
+        }
+        b
+    }
+
     /// This tick's controls from the keys and the camera.
     fn input(&self) -> PlayerInput {
-        let k = |c| self.keys.contains(&c) || self.tapped.contains(&c);
-        PlayerInput {
-            forward: k(KeyCode::KeyW),
-            back: k(KeyCode::KeyS),
-            left: k(KeyCode::KeyA),
-            right: k(KeyCode::KeyD),
-            cam_yaw: self.orbit.yaw,
-            run: k(KeyCode::ShiftLeft) || k(KeyCode::ShiftRight),
-            sprint: k(KeyCode::Space),
-            jump: false,
-            kill: k(KeyCode::KeyE),
-            stun: k(KeyCode::KeyQ),
-        }
+        input_from(&self.keys, &self.tapped, self.orbit.yaw)
+    }
+
+    /// The player this viewer drives.
+    fn me(&self) -> usize {
+        self.net.as_ref().map_or(0, |n| n.slot)
     }
 
     /// Runs the ticks due by `render_time` and returns how far the frame
     /// is between the last two (1 = on the last tick).
     fn run_ticks(&mut self) -> f32 {
         let Some(mut world) = self.world.take() else { return 1.0 };
+        if let Some(mut net) = self.net.take() {
+            let (script, keys, tapped, yaw) = (&mut self.script, &mut self.keys, &mut self.tapped, self.orbit.yaw);
+            let alpha = net.advance(&mut world, |tick| {
+                let time = tick as f32 / TICK_HZ as f32;
+                while script.first().is_some_and(|e| e.0 <= time) {
+                    *keys = script.remove(0).1;
+                }
+                let i = input_from(keys, tapped, yaw);
+                tapped.clear();
+                i
+            });
+            self.net = Some(net);
+            self.world = Some(world);
+            return alpha;
+        }
         let hz = TICK_HZ as f64;
         let due = (self.render_time * hz - 1e-6).ceil().max(0.0) as u64;
         while world.tick < due {
@@ -389,8 +460,10 @@ impl App {
     fn animate(&mut self, dt: f32) {
         let alpha = self.run_ticks();
         let (Some(g), Some(w)) = (&mut self.gfx, &self.world) else { return };
-        for (b, skin) in w.bodies.iter().zip(&mut g.skins) {
-            let (world, pose) = b.interpolated(alpha);
+        for (i, (b, skin)) in w.bodies.iter().zip(&mut g.skins).enumerate() {
+            // remote players: their server ticks, ~100 ms behind
+            let remote = self.net.as_ref().and_then(|n| w.players.iter().position(|p| p.body == i).and_then(|j| n.remote_view(j)));
+            let (world, pose) = remote.unwrap_or_else(|| b.interpolated(alpha));
             let globals = b.character.skeleton.globals(&pose);
             pose_skin(&mut g.scene, &g.renderer, &b.character, skin, &globals, world, dt);
         }
@@ -417,7 +490,7 @@ impl App {
 
     /// The --play character's position as drawn this frame.
     fn player_pos(&self) -> Option<Vec3> {
-        self.world.as_ref()?.players.first().map(|p| p.pos_at(self.alpha))
+        self.world.as_ref()?.players.get(self.me()).map(|p| p.pos_at(self.alpha))
     }
 
     fn camera(&self, g: &Gfx) -> Camera {
@@ -435,10 +508,20 @@ impl App {
         let dt = (1.0 / fps) as f32;
         self.capture_frames += 1;
         self.render_time = self.capture_frames as f64 / fps;
+        if self.net.is_some() {
+            // the server runs in real time: frames at --fps real rate
+            let t0 = *self.net_t0.get_or_insert_with(Instant::now);
+            let due = t0 + std::time::Duration::from_secs_f64(self.capture_frames as f64 / fps);
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+        }
         self.update(dt);
         self.animate(dt);
-        if self.world.as_ref().is_some_and(|w| w.time < self.args.capture_after) {
+        let over = self.net.as_ref().and_then(|n| n.over.clone());
+        if over.is_none() && self.world.as_ref().is_some_and(|w| w.time < self.args.capture_after) {
             return;
+        }
+        if let Some(reason) = over {
+            eprintln!("net: match over: {reason}");
         }
         let Some(g) = &self.gfx else { return };
         let camera = self.camera(g);
@@ -448,8 +531,21 @@ impl App {
             Err(e) => eprintln!("capture failed: {e:#}"),
         }
         eprintln!("camera eye {:.2?} target {:.2?}", camera.eye.to_array(), camera.target.to_array());
-        if let Some(p) = self.world.as_ref().and_then(|w| w.players.first()) {
+        if let Some(p) = self.world.as_ref().and_then(|w| w.players.get(self.me())) {
             eprintln!("player at {:.2} {:.2} {:.2} yaw {:.0} speed {:.2}", p.pos.x, p.pos.y, p.pos.z, p.yaw.to_degrees(), p.loco.speed);
+        }
+        if let (Some(n), Some(w)) = (&mut self.net, &self.world) {
+            for (j, p) in w.players.iter().enumerate().filter(|(j, _)| *j != n.slot) {
+                let drawn = n.remote_view(j).map(|v| v.0.w_axis.truncate()).unwrap_or(p.pos);
+                eprintln!("net: remote player {j} drawn at {:.2} {:.2} {:.2} (tick {:.1}), predicted {:.2} {:.2} {:.2}", drawn.x, drawn.y, drawn.z, n.remote_tick(), p.pos.x, p.pos.y, p.pos.z);
+            }
+            let s = n.stats;
+            let l = n.link_stats();
+            eprintln!(
+                "net: tick {} confirmed {} rtt {:.0} ms; {} snapshots, {} checked ({} exact, {} desync), {} corrections, {} rollbacks, {} rejected; sent {} recv {} dropped {}",
+                w.tick, n.confirmed_tick, n.rtt * 1000.0, s.snapshots, s.checked, s.exact, s.desyncs, s.corrections, s.rollbacks, s.rejected, l.sent, l.recv, l.dropped
+            );
+            n.leave();
         }
         std::process::exit(0);
     }
@@ -499,7 +595,7 @@ impl App {
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_none() {
-            if let Err(e) = self.init(event_loop) {
+            if let Err(e) = self.connect_and_init(event_loop) {
                 eprintln!("init failed: {e:#}");
                 event_loop.exit();
             }
@@ -621,6 +717,9 @@ fn main() -> anyhow::Result<()> {
         render_time: 0.0,
         capture_frames: 0,
         alpha: 1.0,
+        net: None,
+        net_t0: None,
+        connect: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

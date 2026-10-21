@@ -9,6 +9,7 @@ use crate::locomotion::{Gait, Locomotion};
 use crate::{jump, kill, rules, Body, Clipset, PlayerInput, Scripted};
 
 /// A character under player control and its movement state.
+#[derive(Clone)]
 pub struct Player {
     /// The body it drives (`World::bodies`).
     pub body: usize,
@@ -75,6 +76,7 @@ pub fn body_actor(b: &Body) -> rules::Actor {
 }
 
 /// A walk-in towards a kill's start point.
+#[derive(Clone)]
 pub struct PlayerApproach {
     /// Victim body.
     pub victim: usize,
@@ -108,6 +110,7 @@ fn start_paired(p: &mut Player, bodies: &mut [Body], kills: &kill::KillClips, vi
 }
 
 /// The player's kill in progress.
+#[derive(Clone)]
 pub struct PlayerKill {
     side: usize,
     frame: Mat4,

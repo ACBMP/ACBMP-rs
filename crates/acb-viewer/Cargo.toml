@@ -11,6 +11,7 @@ name = "acb-viewer"
 path = "src/main.rs"
 
 [dependencies]
+acb-net.workspace = true
 acb-world.workspace = true
 acb-render.workspace = true
 acb-anim.workspace = true
