@@ -20,6 +20,8 @@ pub struct Player {
     pub vel: Vec3,
     /// Height the current fall started at.
     pub fall_from: f32,
+    /// A targeted freerun jump in flight (`jump.rs`).
+    pub flight: Option<jump::Flight>,
     pub kill: Option<PlayerKill>,
     pub climb: Option<Climb>,
     /// `pos` before the last tick, for render interpolation.
@@ -28,7 +30,7 @@ pub struct Player {
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, kill: None, climb: None, prev_pos: pos }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, prev_pos: pos }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -206,7 +208,18 @@ pub(crate) fn drive(
     let step = p.loco.update(clips, sk, dir.normalize_or_zero(), gait, &mut p.yaw, dt);
     let delta = step.delta;
     if let Some(ground) = ground {
-        if p.loco.airborne() {
+        if let Some(f) = &mut p.flight {
+            // a targeted jump: on its path, down on the target
+            let (at, done) = f.step(dt);
+            p.pos = at;
+            if done {
+                if crate::trace() {
+                    eprintln!("landed at {:.2?} after {:.3} s", at.to_array(), f.t);
+                }
+                p.flight = None;
+                p.loco.land(0.0, dir != Vec2::ZERO);
+            }
+        } else if p.loco.airborne() {
             p.vel.z -= jump::GRAVITY * dt;
             // falling past a hold: grab it (not right after letting go)
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
@@ -233,7 +246,7 @@ pub(crate) fn drive(
             let running = p.loco.speed >= 1.5 && dir != Vec2::ZERO;
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
             // freerun: up onto a ledge ahead
-            let up = running.then(|| jump::ledge_up(ground, p.pos, fwd)).flatten();
+            let up = running.then(|| jump::target(ground, clips, p.pos, fwd, false)).flatten();
             let (to, ledge) = ground.move_on(p.pos, delta);
             // pressing into a wall: ease out of the cycle instead of
             // running on the spot (the run lean would put the head through)
@@ -251,9 +264,10 @@ pub(crate) fn drive(
                 }
             }
             // freerun: over a gap instead of dropping into it
-            let across = (ledge && running).then(|| jump::across(ground, p.pos, fwd)).flatten();
-            if let Some(target) = up.or(across) {
-                jump::take_off(p, clips, sk, target, if up.is_some() { "ledge" } else { "gap" });
+            let why = if up.is_some() { "up" } else { "gap" };
+            let across = (ledge && running && up.is_none()).then(|| jump::target(ground, clips, p.pos, fwd, true)).flatten();
+            if let Some((target, flight, narrow)) = up.or(across) {
+                jump::take_off(p, clips, sk, target, flight, if narrow { "narrow top" } else { why });
             } else {
                 if ledge {
                     p.loco.start_fall();

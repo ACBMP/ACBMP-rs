@@ -149,6 +149,14 @@ impl Ground {
         self.tris.len()
     }
 
+    /// The walkable (floor) triangles.
+    pub fn floor_triangles(&self) -> impl Iterator<Item = [Vec3; 3]> + '_ {
+        let mut ids: Vec<u32> = self.floor.values().flatten().copied().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter().map(|i| self.tris[i as usize])
+    }
+
     /// Highest floor at `p.xy` no higher than `p.z`.
     pub fn floor_below(&self, p: Vec3) -> Option<f32> {
         let ids = self.floor.get(&cell(p.truncate()))?;
