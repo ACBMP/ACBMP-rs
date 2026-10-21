@@ -302,7 +302,9 @@ pub fn target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2, off_edge: bo
         for (d, z) in picks {
             let edge = line(d).extend(z);
             // land a little past the edge, or centred on a narrow top
-            let (at, narrow) = ground.settle_top(edge + (fwd * 0.05).extend(0.0), fwd);
+            // (from the profile sample itself: a 5 cm railing is missed a
+            // step further on)
+            let (at, narrow) = ground.settle_top(edge, fwd);
             let at = if narrow { at } else { ground.settle_top(edge + (fwd * 0.4).extend(0.0), fwd).0 };
             let rel = at - pos;
             let ahead = rel.truncate().dot(fwd);
@@ -369,8 +371,8 @@ impl Ground {
         let mut narrow = false;
         for axis in [fwd, Vec2::new(fwd.y, -fwd.x)] {
             let extent = |s: f32| {
-                (1..=(NARROW / 0.05) as usize)
-                    .map(|i| i as f32 * 0.05)
+                (1..=(NARROW / SETTLE_STEP) as usize)
+                    .map(|i| i as f32 * SETTLE_STEP)
                     .find(|&e| {
                         let q = at + (axis * s * e).extend(0.0);
                         self.floor_below(q + Vec3::Z * 0.15).is_none_or(|f| (f - z).abs() > 0.12)
@@ -389,6 +391,8 @@ impl Ground {
 
 /// Tops narrower than this are balanced on (centred), metres.
 pub const NARROW: f32 = 0.6;
+/// Resolution of [`Ground::settle_top`]'s width probes (railings are 5-9 cm).
+const SETTLE_STEP: f32 = 0.01;
 
 #[cfg(test)]
 mod tests {
