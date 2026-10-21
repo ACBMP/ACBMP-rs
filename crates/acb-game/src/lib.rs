@@ -82,8 +82,8 @@ pub struct Scripted {
 pub struct Body {
     pub character: Arc<Character>,
     pub spawn: Mat4,
-    /// Entity transform (crowd, looping clip, victims; a player's own
-    /// placement is [`Player::entity`]).
+    /// Entity transform (a player's body follows [`Player::entity`] after
+    /// each tick).
     pub entity: Mat4,
     /// Skeleton model space -> entity space.
     pub model: Mat4,
@@ -374,13 +374,17 @@ impl World {
                 let jump: f32 = before.iter().zip(p.loco.last_pose()).map(|((_, a), (_, b))| a.angle_between(*b)).sum();
                 eprintln!("pose t {t:.3} speed {:.2} change {jump:.2}", p.loco.speed);
             }
+            // where others see it (crowd separation, targeting)
+            if let Some(b) = self.bodies.get_mut(p.body) {
+                b.entity = p.entity();
+            }
         }
         let wander = self.wander;
         let skip = self.players.len();
         // everyone's position, for the crowd's separation (2 m buckets)
         let mut near: std::collections::HashMap<(i32, i32), Vec<Vec3>> = Default::default();
         let bucket = |p: Vec3| ((p.x / 2.0).floor() as i32, (p.y / 2.0).floor() as i32);
-        for p in self.bodies.iter().map(|a| a.entity.w_axis.truncate()).chain(self.players.iter().map(|p| p.pos)) {
+        for p in self.bodies.iter().map(|a| a.entity.w_axis.truncate()) {
             near.entry(bucket(p)).or_default().push(p);
         }
         for a in self.bodies.iter_mut().skip(skip) {
