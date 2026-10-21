@@ -14,6 +14,7 @@ pub mod jump;
 pub mod kill;
 pub mod locomotion;
 pub mod player;
+pub mod rules;
 
 use std::sync::{Arc, OnceLock};
 
@@ -262,6 +263,12 @@ impl World {
             w.bodies.push(Body::new(character, spawn, spawn, model, phase, None));
         }
         eprintln!("{} characters on {} standard spawns", w.bodies.len(), spawns.len());
+        if trace() {
+            for (i, b) in w.bodies.iter().enumerate() {
+                let (p, f) = (b.spawn.w_axis, b.spawn.y_axis);
+                eprintln!("body {i} spawn {:.2} {:.2} {:.2} facing {:.2} {:.2}", p.x, p.y, p.z, f.x, f.y);
+            }
+        }
         if trace() {
             for (i, a) in w.bodies.iter().enumerate() {
                 let p = a.spawn.w_axis;
