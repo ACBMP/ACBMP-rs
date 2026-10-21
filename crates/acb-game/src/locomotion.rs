@@ -190,6 +190,7 @@ enum Cancel {
 }
 
 /// A one-shot sequence of clips played back to back.
+#[derive(Clone)]
 struct Action {
     queue: Vec<Id>,
     t: f32,
@@ -207,6 +208,7 @@ impl Action {
     }
 }
 
+#[derive(Clone)]
 pub struct Locomotion {
     /// 0 idle, 1 walk, 2 run, 3 sprint; eases toward the input.
     pub speed: f32,

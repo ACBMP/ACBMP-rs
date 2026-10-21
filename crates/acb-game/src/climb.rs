@@ -73,6 +73,7 @@ pub enum Dir {
     Right,
 }
 
+#[derive(Clone)]
 enum Phase {
     /// Getting onto the wall: clip time.
     Mount(f32),
@@ -84,6 +85,7 @@ enum Phase {
     Move { dir: usize, class: usize, stage: usize, t: f32, from: Vec3, to: Vec3, hold: Hold },
 }
 
+#[derive(Clone)]
 pub struct Climb {
     pub hold: Hold,
     /// Entity position and facing (yaw, entity +Y = (-sin, cos)).

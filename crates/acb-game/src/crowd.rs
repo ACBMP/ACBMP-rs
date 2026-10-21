@@ -233,6 +233,7 @@ impl Nav {
 }
 
 /// xorshift64*, enough for wandering.
+#[derive(Clone)]
 pub struct Rng(u64);
 
 impl Rng {
@@ -266,6 +267,7 @@ struct FlowState {
     from: usize,
 }
 
+#[derive(Clone)]
 pub struct Agent {
     flow: Option<FlowState>,
     pub pos: Vec3,

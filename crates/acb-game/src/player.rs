@@ -9,6 +9,7 @@ use crate::locomotion::{Gait, Locomotion};
 use crate::{jump, kill, Body, Clipset, PlayerInput, Scripted};
 
 /// A character under player control and its movement state.
+#[derive(Clone)]
 pub struct Player {
     /// The body it drives (`World::bodies`).
     pub body: usize,
@@ -46,6 +47,7 @@ impl Player {
 }
 
 /// The player's kill in progress.
+#[derive(Clone)]
 pub struct PlayerKill {
     side: usize,
     frame: Mat4,
