@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use acb_anim::BuiltinTracks;
 use acb_game::World;
-use glam::Vec3;
 
 use crate::game::{self, InputBuffer};
 use crate::link::{Link, NetSim};
@@ -224,10 +223,8 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
 
         // the tick: everyone's input for it (gone players stand still)
         let wire: Vec<WireInput> = peers.iter_mut().map(|p| if p.gone { WireInput::default() } else { p.inputs.take(tick) }).collect();
-        let inputs: Vec<_> = wire.iter().map(|w| w.to_input()).collect();
-        let before = Before::of(&world);
-        world.step(&inputs);
-        let new = detect_events(&world, &before, &wire, &prev_inputs, tick);
+        let mut wire = wire;
+        let new = game::authoritative_step(&mut world, &mut wire, &prev_inputs, tick);
         for e in &new {
             eprintln!("serve: {}", e.describe());
             if let Some(l) = &mut log {
@@ -341,62 +338,4 @@ fn send_snapshots(link: &mut Link, peers: &mut [Peer], world: &World, used: &[Ve
         p.snapshot_bytes += bytes.len() as u64;
         link.send(&bytes, p.addr);
     }
-}
-
-/// Player state before a tick, to tell what the tick decided.
-struct Before {
-    attacking: Vec<bool>,
-    airborne: Vec<bool>,
-    climbing: Vec<bool>,
-    pos: Vec<Vec3>,
-    scripted: Vec<bool>,
-}
-
-impl Before {
-    fn of(w: &World) -> Before {
-        Before {
-            attacking: w.players.iter().map(|p| p.kill.is_some()).collect(),
-            airborne: w.players.iter().map(|p| p.loco.airborne()).collect(),
-            climbing: w.players.iter().map(|p| p.climb.is_some()).collect(),
-            pos: w.players.iter().map(|p| p.pos).collect(),
-            scripted: w.bodies.iter().map(|b| b.scripted.is_some()).collect(),
-        }
-    }
-}
-
-/// Kills and stuns started, attempts refused (on the press), victims, and
-/// players put back in control or moved away (respawns), from the
-/// world's state around one tick. The decisions are the sim's (and its
-/// rules'); this only reports them.
-pub fn detect_events(w: &World, b: &Before, wire: &[WireInput], prev: &[WireInput], tick: u32) -> Vec<Event> {
-    let mut out = Vec::new();
-    for (i, p) in w.players.iter().enumerate() {
-        let attacking = p.kill.is_some();
-        let pressed = wire[i].attacks() && !prev[i].attacks();
-        if attacking && !b.attacking[i] {
-            let victim = w.bodies.iter().enumerate().position(|(j, body)| j != p.body && !b.scripted[j] && body.scripted.is_some());
-            let stun = wire[i].stuns();
-            let v = victim.map_or(u8::MAX, |v| v as u8);
-            out.push(Event { tick, kind: if stun { EventKind::StunStarted } else { EventKind::KillStarted }, a: i as u8, b: v });
-            if victim.is_some() {
-                out.push(Event { tick, kind: if stun { EventKind::Stunned } else { EventKind::Death }, a: v, b: i as u8 });
-            }
-        } else if pressed && !attacking {
-            let reason = if b.climbing[i] {
-                Reject::Climbing
-            } else if b.airborne[i] {
-                Reject::Airborne
-            } else {
-                Reject::NoTarget
-            };
-            out.push(Event { tick, kind: EventKind::KillRejected, a: i as u8, b: reason as u8 });
-        } else if pressed && b.attacking[i] {
-            out.push(Event { tick, kind: EventKind::KillRejected, a: i as u8, b: Reject::Busy as u8 });
-        }
-        let freed = b.scripted.get(p.body).copied().unwrap_or(false) && w.bodies.get(p.body).is_some_and(|body| body.scripted.is_none());
-        if freed || p.pos.distance(b.pos[i]) > 3.0 {
-            out.push(Event { tick, kind: EventKind::Respawn, a: i as u8, b: 0 });
-        }
-    }
-    out
 }

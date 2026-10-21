@@ -11,6 +11,7 @@ name = "acbmp"
 path = "src/main.rs"
 
 [dependencies]
+acb-net.workspace = true
 anvil-forge.workspace = true
 anyhow.workspace = true
 clap.workspace = true

@@ -77,6 +77,11 @@ impl WireInput {
         self.buttons & (B_KILL | B_STUN) != 0
     }
 
+    /// Drops the kill and stun buttons (a refused request).
+    pub fn clear_attacks(&mut self) {
+        self.buttons &= !(B_KILL | B_STUN);
+    }
+
     pub fn stuns(self) -> bool {
         self.buttons & B_STUN != 0
     }
@@ -224,25 +229,43 @@ impl EventKind {
     }
 }
 
-/// Why the server did not start a kill or stun a player pressed for.
+/// Why the server did not start a kill or stun a player pressed for
+/// ([`acb_game::rules::Reject`] on the wire, plus `Busy`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Reject {
-    /// Nobody in reach ahead (or the rules refused).
-    NoTarget = 1,
-    Airborne = 2,
-    Climbing = 3,
+    /// Not a valid victim (not my target / not my pursuer).
+    Relation = 1,
+    /// The player's or the victim's state does not allow it.
+    Stance = 2,
+    /// Nobody in reach.
+    Range = 3,
+    Height = 4,
+    Angle = 5,
     /// Already in a kill.
-    Busy = 4,
+    Busy = 6,
 }
 
 impl Reject {
+    pub fn from_rules(r: acb_game::rules::Reject) -> Reject {
+        use acb_game::rules::Reject as R;
+        match r {
+            R::Relation => Reject::Relation,
+            R::Stance => Reject::Stance,
+            R::Range => Reject::Range,
+            R::Height => Reject::Height,
+            R::Angle => Reject::Angle,
+        }
+    }
+
     pub fn name(b: u8) -> &'static str {
         match b {
-            1 => "no target in reach",
-            2 => "airborne",
-            3 => "climbing",
-            4 => "busy",
+            1 => "not a valid victim",
+            2 => "stance",
+            3 => "out of range",
+            4 => "height",
+            5 => "angle",
+            6 => "busy",
             _ => "?",
         }
     }
@@ -716,7 +739,7 @@ mod tests {
             players: 3,
             pos,
             inputs: vec![InputRuns::encode(119, &[a, a, b]), InputRuns::encode(119, &[]), InputRuns::encode(110, &[b; 11])],
-            events: vec![Event { tick: 119, kind: EventKind::KillRejected, a: 1, b: Reject::NoTarget as u8 }],
+            events: vec![Event { tick: 119, kind: EventKind::KillRejected, a: 1, b: Reject::Range as u8 }],
         }
     }
 

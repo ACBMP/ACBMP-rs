@@ -10,7 +10,7 @@ use acb_game::{Setup, World};
 use acb_world::Archive;
 use glam::Vec3;
 
-use crate::proto::{NetPos, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_CLIMBING, F_VICTIM};
+use crate::proto::{Event, EventKind, NetPos, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_CLIMBING, F_VICTIM};
 
 /// Builds a match world: slot `i` is player `i` on the map's player spawn
 /// `i` (or its `at`), no crowd. Server and clients call this with the same
@@ -141,6 +141,85 @@ impl InputBuffer {
     }
 }
 
+/// One authoritative tick: every player's kill/stun request is checked
+/// with [`World::validate_action`] (the rules hook); a refused one is
+/// dropped from `wire` (the inputs as applied, which the server relays, so
+/// clients replaying them undo their predicted kill) and reported on the
+/// press. Then the world steps and the decided kills, deaths and respawns
+/// are returned with the rejections.
+pub fn authoritative_step(world: &mut World, wire: &mut [WireInput], prev: &[WireInput], tick: u32) -> Vec<Event> {
+    let mut out = Vec::new();
+    let rules = acb_game::rules::Rules::default();
+    // contracts are not hooked in yet: everyone counts as a free-play victim
+    let relation = |_: usize, _: usize| acb_game::rules::Relation::Npc;
+    for (i, w) in wire.iter_mut().enumerate() {
+        if !w.attacks() {
+            continue;
+        }
+        let pressed = !prev.get(i).is_some_and(|p| p.attacks());
+        let busy = world.players.get(i).is_some_and(|p| p.kill.is_some() || p.approach.is_some());
+        if busy {
+            if pressed {
+                out.push(Event { tick, kind: EventKind::KillRejected, a: i as u8, b: Reject::Busy as u8 });
+            }
+            continue;
+        }
+        if let Err(r) = world.validate_action(i, &w.to_input(), &rules, &relation) {
+            w.clear_attacks();
+            if pressed {
+                out.push(Event { tick, kind: EventKind::KillRejected, a: i as u8, b: Reject::from_rules(r) as u8 });
+            }
+        }
+    }
+    let inputs: Vec<_> = wire.iter().map(|w| w.to_input()).collect();
+    let before = Before::of(world);
+    world.step(&inputs);
+    out.extend(detect_events(world, &before, wire, tick));
+    out
+}
+
+/// Player state before a tick, to tell what the tick decided.
+pub struct Before {
+    attacking: Vec<bool>,
+    pos: Vec<Vec3>,
+    scripted: Vec<bool>,
+}
+
+impl Before {
+    pub fn of(w: &World) -> Before {
+        Before {
+            attacking: w.players.iter().map(|p| p.kill.is_some()).collect(),
+            pos: w.players.iter().map(|p| p.pos).collect(),
+            scripted: w.bodies.iter().map(|b| b.scripted.is_some()).collect(),
+        }
+    }
+}
+
+/// Kills and stuns started, victims, and
+/// players put back in control or moved away (respawns), from the
+/// world's state around one tick. The decisions are the sim's (and its
+/// rules'); this only reports them.
+pub fn detect_events(w: &World, b: &Before, wire: &[WireInput], tick: u32) -> Vec<Event> {
+    let mut out = Vec::new();
+    for (i, p) in w.players.iter().enumerate() {
+        let attacking = p.kill.is_some();
+        if attacking && !b.attacking[i] {
+            let victim = w.bodies.iter().enumerate().position(|(j, body)| j != p.body && !b.scripted[j] && body.scripted.is_some());
+            let stun = wire[i].stuns();
+            let v = victim.map_or(u8::MAX, |v| v as u8);
+            out.push(Event { tick, kind: if stun { EventKind::StunStarted } else { EventKind::KillStarted }, a: i as u8, b: v });
+            if victim.is_some() {
+                out.push(Event { tick, kind: if stun { EventKind::Stunned } else { EventKind::Death }, a: v, b: i as u8 });
+            }
+        }
+        let freed = b.scripted.get(p.body).copied().unwrap_or(false) && w.bodies.get(p.body).is_some_and(|body| body.scripted.is_none());
+        if freed || p.pos.distance(b.pos[i]) > 3.0 {
+            out.push(Event { tick, kind: EventKind::Respawn, a: i as u8, b: 0 });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,7 +248,7 @@ mod tests {
             rng ^= rng << 5;
             let server_tick = client_tick.saturating_sub(lead);
             if rng % 2 == 0 {
-                buf.receive(client_tick, &inputs, server_tick);
+                buf.receive(client_tick, &inputs, server_tick.saturating_sub(1));
             } else {
                 lost += 1;
             }
@@ -196,7 +275,7 @@ mod tests {
             // the last 3 every packet
             let first = t.saturating_sub(2).max(1);
             let inputs: Vec<_> = (first..=t).map(input).collect();
-            buf.receive(t, &inputs, t.saturating_sub(2));
+            buf.receive(t, &inputs, t.saturating_sub(3));
             if t > 2 {
                 assert_eq!(buf.take(t - 2), input(t - 2));
             }
