@@ -27,6 +27,7 @@ pub struct Saved {
     pub time: f32,
     players: Vec<Player>,
     bodies: Vec<BodyState>,
+    mode: Option<crate::mode::Match>,
 }
 
 #[derive(Clone)]
@@ -51,6 +52,7 @@ impl World {
             tick: self.tick,
             time: self.time,
             players: self.players.clone(),
+            mode: self.mode.clone(),
             bodies: self
                 .bodies
                 .iter()
@@ -78,6 +80,7 @@ impl World {
         self.tick = saved.tick;
         self.time = saved.time;
         self.players.clone_from(&saved.players);
+        self.mode.clone_from(&saved.mode);
         for (b, s) in self.bodies.iter_mut().zip(&saved.bodies) {
             b.entity = s.entity;
             b.model = s.model;

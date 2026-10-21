@@ -1,0 +1,243 @@
+//! A Wanted-style match inside the deterministic sim (a duel with two
+//! players; nothing here assumes two): [`Contracts`] decide who may kill
+//! or stun whom, kills and stuns score, killed players respawn on a player
+//! spawn after a delay, the match ends on a time or score limit.
+//!
+//! It lives in [`crate::World`] (and its [`crate::state::Saved`]) so the
+//! server and every client's prediction/replay step the same match; no
+//! clock, no RNG, ties by index.
+
+use glam::Vec3;
+
+use crate::rules::{Contracts, ContractEvent, Relation, Rules};
+
+/// `GBrick_ScoreKill` XML default `TargetKilled` (Mac 0x0103832c).
+pub const KILL_POINTS: u32 = 100;
+/// Placeholder: the stun bonus of the Wanted XML is not shipped; retail
+/// shows it in the same range as a plain kill.
+pub const STUN_POINTS: u32 = 100;
+/// Placeholder: seconds from the kill to the victim's respawn (the kill
+/// clips run ~3 s; retail fades out and picks a spawn after it).
+pub const RESPAWN_DELAY: f32 = 5.0;
+/// Placeholder: no contracts during the first seconds (retail's intro).
+pub const START_DELAY: f32 = 3.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MatchConfig {
+    /// Seconds of play.
+    pub time_limit: f32,
+    /// First to reach it wins (0: none).
+    pub score_limit: u32,
+    pub respawn_delay: f32,
+    pub start_delay: f32,
+}
+
+impl Default for MatchConfig {
+    fn default() -> Self {
+        MatchConfig { time_limit: 300.0, score_limit: 1000, respawn_delay: RESPAWN_DELAY, start_delay: START_DELAY }
+    }
+}
+
+/// Why points were scored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScoreReason {
+    Kill,
+    Stun,
+}
+
+/// What the match decided during the last tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchEvent {
+    Contract(ContractEvent),
+    Score { player: usize, points: u32, reason: ScoreReason },
+    /// Back in the game at spawn `spawn`.
+    Respawn { player: usize, spawn: usize },
+    /// The match ended; `winner` is `None` on a draw.
+    Over { winner: Option<usize> },
+}
+
+#[derive(Clone, Debug)]
+pub struct Match {
+    pub config: MatchConfig,
+    pub contracts: Contracts,
+    pub score: Vec<u32>,
+    /// Per player: ticks until the respawn while dead.
+    pub respawn: Vec<Option<u32>>,
+    /// Player spawn points (position, yaw).
+    pub spawns: Vec<(Vec3, f32)>,
+    /// Ticks played.
+    pub ticks: u32,
+    pub over: bool,
+    /// This tick's decisions (cleared at every step).
+    pub events: Vec<MatchEvent>,
+}
+
+/// Seconds to whole ticks.
+pub fn ticks(secs: f32) -> u32 {
+    (secs * crate::TICK_HZ as f32).round() as u32
+}
+
+impl Match {
+    pub fn new(players: usize, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
+        Match {
+            config,
+            contracts: Contracts::new(players),
+            score: vec![0; players],
+            respawn: vec![None; players],
+            spawns,
+            ticks: 0,
+            over: false,
+            events: Vec::new(),
+        }
+    }
+
+    /// Kill/stun rules while the match runs: other players only through
+    /// contracts, crowd NPCs may be killed (no points), not stunned.
+    pub fn rules(&self) -> Rules {
+        Rules { free_play: false, allow_killing_npcs: true }
+    }
+
+    /// How body `body` stands to player `of` (bodies `0..players` are the
+    /// players).
+    pub fn relation(&self, of: usize, body: usize) -> Relation {
+        if body < self.contracts.hunters.len() {
+            self.contracts.relation(of, body)
+        } else {
+            Relation::Npc
+        }
+    }
+
+    pub fn alive(&self, p: usize) -> bool {
+        self.respawn.get(p).is_some_and(|r| r.is_none())
+    }
+
+    pub fn ticks_left(&self) -> u32 {
+        ticks(self.config.time_limit).saturating_sub(self.ticks)
+    }
+
+    /// Player `killer` started a kill (or stun) of player `victim`.
+    pub(crate) fn on_action(&mut self, killer: usize, victim: usize, stun: bool) {
+        let rel = self.contracts.relation(killer, victim);
+        if stun {
+            // a stunned hunter loses its contract on the stunner
+            if matches!(rel, Relation::Pursuer | Relation::Mutual) {
+                self.score[killer] += STUN_POINTS;
+                self.events.push(MatchEvent::Score { player: killer, points: STUN_POINTS, reason: ScoreReason::Stun });
+                for e in self.contracts.on_stunned(victim) {
+                    self.events.push(MatchEvent::Contract(e));
+                }
+            }
+            return;
+        }
+        if matches!(rel, Relation::Target | Relation::Mutual) {
+            self.score[killer] += KILL_POINTS;
+            self.events.push(MatchEvent::Score { player: killer, points: KILL_POINTS, reason: ScoreReason::Kill });
+        }
+        for e in self.contracts.on_death(victim, Some(killer)) {
+            self.events.push(MatchEvent::Contract(e));
+        }
+        self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1));
+    }
+
+    /// The spawn for `p`: the one furthest from the nearest other living
+    /// player (ties: lowest index).
+    pub fn pick_spawn(&self, p: usize, pos: &[Vec3]) -> usize {
+        let others: Vec<Vec3> = pos.iter().enumerate().filter(|&(j, _)| j != p && self.alive(j)).map(|(_, q)| *q).collect();
+        let score = |s: &(Vec3, f32)| others.iter().map(|q| q.distance(s.0)).fold(f32::INFINITY, f32::min);
+        (0..self.spawns.len()).max_by(|&a, &b| score(&self.spawns[a]).total_cmp(&score(&self.spawns[b])).then(b.cmp(&a))).unwrap_or(0)
+    }
+
+    /// The clock part of a tick (after the players moved): respawn
+    /// countdowns (returns who respawns where), contracts, limits.
+    pub(crate) fn tick(&mut self, pos: &[Vec3]) -> Vec<(usize, usize)> {
+        let mut back = Vec::new();
+        if self.over {
+            return back;
+        }
+        self.ticks += 1;
+        for p in 0..self.respawn.len() {
+            if let Some(r) = &mut self.respawn[p] {
+                *r -= 1;
+                if *r == 0 {
+                    self.respawn[p] = None;
+                    let s = self.pick_spawn(p, pos);
+                    self.contracts.respawn(p);
+                    self.events.push(MatchEvent::Respawn { player: p, spawn: s });
+                    back.push((p, s));
+                }
+            }
+        }
+        if self.ticks >= ticks(self.config.start_delay) {
+            for e in self.contracts.update(crate::DT, pos) {
+                self.events.push(MatchEvent::Contract(e));
+            }
+        }
+        let best = self.score.iter().copied().max().unwrap_or(0);
+        let by_score = self.config.score_limit > 0 && best >= self.config.score_limit;
+        if by_score || self.ticks >= ticks(self.config.time_limit) {
+            self.over = true;
+            let leaders: Vec<usize> = (0..self.score.len()).filter(|&i| self.score[i] == best).collect();
+            let winner = (leaders.len() == 1).then(|| leaders[0]);
+            self.events.push(MatchEvent::Over { winner });
+        }
+        back
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m(n: usize) -> Match {
+        let spawns = vec![(Vec3::ZERO, 0.0), (Vec3::new(50.0, 0.0, 0.0), 0.0), (Vec3::new(0.0, 40.0, 0.0), 0.0)];
+        Match::new(n, MatchConfig { time_limit: 10.0, score_limit: 200, respawn_delay: 1.0, start_delay: 0.5 }, spawns)
+    }
+
+    fn run(m: &mut Match, n: u32, pos: &[Vec3]) -> Vec<(usize, usize)> {
+        (0..n).flat_map(|_| m.tick(pos)).collect()
+    }
+
+    #[test]
+    fn duel_kill_scores_respawns_and_reassigns() {
+        let mut m = m(2);
+        let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0)];
+        run(&mut m, 29, &pos);
+        assert_eq!(m.contracts.hunters[0].target, None, "no contracts before the start delay");
+        run(&mut m, 1, &pos);
+        assert_eq!(m.contracts.relation(0, 1), Relation::Mutual);
+        m.on_action(0, 1, false);
+        assert_eq!(m.score, vec![100, 0]);
+        assert!(!m.alive(1));
+        assert_eq!(m.contracts.hunters[0].target, None);
+        // victim at the old place: the spawn furthest from player 0 (index 1)
+        let back = run(&mut m, 60, &pos);
+        assert_eq!(back, vec![(1, 1)]);
+        assert!(m.alive(1));
+        // both cool down MinWaitTime, then hunt each other again
+        run(&mut m, ticks(crate::rules::MIN_WAIT_TIME) + 1, &pos);
+        assert_eq!(m.contracts.relation(0, 1), Relation::Mutual);
+        m.on_action(1, 0, false);
+        m.on_action(0, 1, true); // no contract any more: no points
+        assert_eq!(m.score, vec![100, 100]);
+    }
+
+    #[test]
+    fn three_players_and_limits() {
+        let mut m = m(3);
+        let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0), Vec3::new(0.0, 30.0, 0.0)];
+        run(&mut m, 30, &pos);
+        let targets: Vec<_> = m.contracts.hunters.iter().map(|h| h.target).collect();
+        assert!(targets.iter().all(|t| t.is_some()), "{targets:?}");
+        // one pursuer per target with 3 players
+        for t in 0..3 {
+            assert!(m.contracts.pursuers(t) <= 1);
+        }
+        let h = 0;
+        let t = targets[0].unwrap();
+        m.on_action(h, t, false);
+        m.score[h] = 200;
+        let _ = m.tick(&pos);
+        assert!(m.over);
+        assert_eq!(m.events.last(), Some(&MatchEvent::Over { winner: Some(h) }));
+    }
+}

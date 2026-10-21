@@ -86,7 +86,7 @@ pub struct PlayerApproach {
 
 /// Start the paired kill (or stun) of body `vi`: the victim plays its
 /// clip in the shared frame, the player blends into the assassin's.
-fn start_paired(p: &mut Player, bodies: &mut [Body], kills: &kill::KillClips, vi: usize, stun: bool, time: f32) {
+fn start_paired(p: &mut Player, bodies: &mut [Body], kills: &kill::KillClips, vi: usize, stun: bool, dies: bool, time: f32) {
     let victim = body_actor(&bodies[vi]);
     // a kill plays in the victim's frame; a stun in the player's, with the
     // victim's frame ahead of it
@@ -103,8 +103,7 @@ fn start_paired(p: &mut Player, bodies: &mut [Body], kills: &kill::KillClips, vi
     }
     let v = &mut bodies[vi];
     v.agent = None;
-    v.model = Mat4::IDENTITY;
-    v.scripted = Some(Scripted { clip: kills.sets[side].1.clone(), frame: victim_frame, start: time });
+    v.scripted = Some(Scripted { clip: kills.sets[side].1.clone(), frame: victim_frame, start: time, dies });
     let from_pose = p.loco.last_pose().clone();
     p.kill = Some(PlayerKill { side, frame, t: 0.0, from_pose, from_world: p.entity() });
 }
@@ -135,6 +134,8 @@ pub(crate) fn drive(
     clipset: &Clipset,
     ground: Option<&Ground>,
     input: &PlayerInput,
+    rules: &rules::Rules,
+    relation: &dyn Fn(usize) -> rules::Relation,
     time: f32,
     dt: f32,
 ) {
@@ -145,6 +146,33 @@ pub(crate) fn drive(
     let me = p.body;
     let c = bodies[me].character.clone();
     let sk = &c.skeleton;
+    // being killed or stunned: the victim clip, no control; a stun (or a
+    // free-play kill) gets up at its end
+    if let Some(sc) = &bodies[me].scripted {
+        let ct = (time - sc.start).clamp(0.0, sc.clip.length);
+        let pose = sc.clip.sample(sk, ct);
+        let world = sc.frame * sc.clip.root_motion(ct);
+        let ended = time - sc.start >= sc.clip.length;
+        let free = ended && !sc.dies;
+        let neutral = clips.idle();
+        let neutral = kill::reference(neutral, 0.0).unwrap_or((Vec3::Z * 0.96, 66f32.to_radians()));
+        if let Some((rp, ry)) = kill::reference(&sc.clip, ct) {
+            let (pos, yaw) = kill::reroot(sc.frame, rp, ry, neutral);
+            p.pos = pos.with_z(sc.frame.w_axis.z);
+            p.yaw = yaw;
+        }
+        p.kill = None;
+        p.approach = None;
+        p.climb = None;
+        p.flight = None;
+        p.vel = Vec3::ZERO;
+        if free {
+            bodies[me].scripted = None;
+            p.loco.resume(pose.clone());
+        }
+        bodies[me].show(world, pose);
+        return;
+    }
     // E: kill, Q: stun the nearest valid victim (rules.rs decides who and
     // from where); a walking kill walks in to the kill's start point first
     let mut input = *input;
@@ -156,8 +184,8 @@ pub(crate) fn drive(
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != me)
-                .map(|(i, b)| (i, body_actor(b), rules::Relation::Npc));
-            match rules::best_victim(act, &me_actor, candidates, &rules::Rules::default(), kills.spacing()) {
+                .map(|(i, b)| (i, body_actor(b), relation(i)));
+            match rules::best_victim(act, &me_actor, candidates, rules, kills.spacing()) {
                 Some((vi, grant)) => {
                     if crate::trace() {
                         eprintln!("kill: {act:?} body {vi} granted {grant:?}");
@@ -167,7 +195,7 @@ pub(crate) fn drive(
                     } else if grant.approach {
                         p.approach = Some(PlayerApproach { victim: vi, t: 0.0 });
                     } else {
-                        start_paired(p, bodies, kills, vi, act == rules::Act::Stun, time);
+                        start_paired(p, bodies, kills, vi, act == rules::Act::Stun, act == rules::Act::Kill && !rules.free_play, time);
                     }
                 }
                 None if crate::trace() => {
@@ -178,7 +206,7 @@ pub(crate) fn drive(
                         .filter(|(i, _)| *i != me)
                         .map(|(i, b)| (i, body_actor(b)))
                         .min_by(|a, b| a.1.pos.distance(p.pos).total_cmp(&b.1.pos.distance(p.pos)))
-                        .map(|(i, v)| (i, rules::check(act, &me_actor, &v, rules::Relation::Npc, &rules::Rules::default(), kills.spacing())));
+                        .map(|(i, v)| (i, rules::check(act, &me_actor, &v, relation(i), rules, kills.spacing())));
                     eprintln!("kill: {act:?} refused, nearest {why:?}");
                 }
                 None => {}
@@ -193,6 +221,8 @@ pub(crate) fn drive(
         let goal = kills.plan(p.pos, victim.pos, victim.yaw).map(|(side, frame)| kills.start_point(side, frame, clips.idle()));
         let step = match goal {
             Some(_) if bodies[vi].scripted.is_some() || victim.stance != rules::Stance::Ground => rules::Approach::Abort,
+            // the contract went away during the walk-in
+            Some(_) if !matches!(relation(vi), rules::Relation::Target | rules::Relation::Mutual) && !(relation(vi) == rules::Relation::Npc && (rules.allow_killing_npcs || rules.free_play)) => rules::Approach::Abort,
             Some((goal, _)) => rules::approach(p.pos, goal, victim.pos, ap.t, kills.spacing() + rules::DIST_GAP),
             None => rules::Approach::Abort,
         };
@@ -214,7 +244,7 @@ pub(crate) fn drive(
             }
             rules::Approach::Arrived => {
                 p.approach = None;
-                start_paired(p, bodies, kills, vi, false, time);
+                start_paired(p, bodies, kills, vi, false, !rules.free_play, time);
             }
             rules::Approach::Abort => p.approach = None,
         }
