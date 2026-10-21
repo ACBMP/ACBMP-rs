@@ -344,7 +344,7 @@ pub(crate) fn drive(
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
             // freerun: up onto a ledge ahead
             let up = running.then(|| jump::target(ground, clips, p.pos, fwd, false)).flatten();
-            let (to, ledge) = ground.move_on(p.pos, delta);
+            let (to, ledge) = ground.move_on(p.pos, ground.balance(p.pos, delta));
             // pressing into a wall: ease out of the cycle instead of
             // running on the spot (the run lean would put the head through)
             let len = delta.length();

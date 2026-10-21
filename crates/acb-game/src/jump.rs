@@ -165,20 +165,36 @@ pub struct Flight {
     pub dur: f32,
     pub t: f32,
     pub target: Vec3,
+    /// Horizontal progress `u^lag` (held back over an edge close ahead).
     pub lag: f32,
+    /// See [`Flight::new`].
+    pub edge: Option<f32>,
 }
+
+/// How far the feet rise over a top they jump up onto, metres.
+pub const APEX: f32 = 0.1;
+/// Toes ahead of the feet (root), metres: kept off the face of a top.
+const TOE: f32 = 0.1;
+/// How far the feet may cut into the top they jump onto, metres.
+const SINK: f32 = 0.05;
 
 impl Flight {
     /// The flight from `start` to `target`, facing along the jump, on the
     /// blend of `kinds` (`(kind, weight)`) off `foot`: the blended clip
     /// path rotated onto the jump, its end error spread over the flight
     /// (horizontally linear; vertically early when the target is higher,
-    /// late when lower, so edges are cleared). Retail lets a jump that
-    /// ends lower than its clips drop under gravity: the extra drop adds
-    /// its fall time. `lag` > 1 holds the horizontal progress back (`u^lag`
-    /// of it at time fraction `u`), going up before going over an edge
-    /// close ahead.
-    pub fn new(clips: &Clips, kinds: &[(usize, f32)], foot: usize, start: Vec3, target: Vec3, lag: f32) -> Flight {
+    /// late when lower). Retail lets a jump that ends lower than its clips
+    /// drop under gravity: the extra drop adds its fall time.
+    ///
+    /// `edge` is the horizontal distance along the jump to the near face
+    /// of a top the jump goes up onto. The feet must be over the top's
+    /// height before they pass it (the up clips' root rises in a straight
+    /// line and only reaches the top at the end, cutting through the
+    /// edge): the vertical then follows a ballistic arc (time-to-apex and
+    /// fall split by g) to [`APEX`] over the top, and the horizontal
+    /// progress is held back as `u^lag` with the smallest `lag` that keeps
+    /// the toes off the face until the feet are over it.
+    pub fn new(clips: &Clips, kinds: &[(usize, f32)], foot: usize, start: Vec3, target: Vec3, edge: Option<f32>) -> Flight {
         let d = target - start;
         let yaw = (-d.x).atan2(d.y);
         let rot = Mat3::from_rotation_z(yaw);
@@ -205,16 +221,41 @@ impl Flight {
             let q = local[i].lerp(local[i + 1], x - i as f32);
             (rot * q).truncate() + err.truncate() * u
         };
-        let path = local
-            .iter()
-            .enumerate()
-            .map(|(i, &q)| {
+        let clip_z = |i: usize| {
+            let u = i as f32 / SAMPLES as f32;
+            let s = if err.z > 0.0 { 1.0 - (1.0 - u) * (1.0 - u) } else { u * u };
+            (rot * local[i]).z + err.z * s
+        };
+        // onto a top: a ballistic arc over it, horizontal held back
+        let up = edge.filter(|_| d.z > STEP);
+        let (vert, lag): (Vec<f32>, f32) = match up {
+            None => ((0..=SAMPLES).map(clip_z).collect(), 1.0),
+            Some(e) => {
+                let apex = (d.z + APEX).max(local[SAMPLES].z);
+                let (rise, fall) = ((2.0 * apex / GRAVITY).sqrt(), (2.0 * (apex - d.z) / GRAVITY).sqrt());
+                let ua = rise / (rise + fall);
+                let arc = |u: f32| {
+                    if u <= ua {
+                        apex * (1.0 - (1.0 - u / ua).powi(2))
+                    } else {
+                        apex - (apex - d.z) * ((u - ua) / (1.0 - ua)).powi(2)
+                    }
+                };
+                // first time the feet are over the top (plus a margin)
+                let over = ua * (1.0 - (1.0 - (d.z + 0.02) / apex).max(0.0).sqrt());
+                let len = d.truncate().length().max(1e-3);
+                let frac = ((e - TOE) / len).clamp(0.05, 1.0);
+                let lag = if over > 0.0 && over < 1.0 && frac < 1.0 { (frac.ln() / over.ln()).max(1.0) } else { 1.0 };
+                ((0..=SAMPLES).map(|i| arc(i as f32 / SAMPLES as f32)).collect(), lag)
+            }
+        };
+        let path = (0..=SAMPLES)
+            .map(|i| {
                 let u = i as f32 / SAMPLES as f32;
-                let s = if err.z > 0.0 { 1.0 - (1.0 - u) * (1.0 - u) } else { u * u };
-                start + horiz(u.powf(lag)).extend((rot * q).z + err.z * s)
+                start + horiz(u.powf(lag)).extend(vert[i])
             })
             .collect();
-        Flight { path, dur: dur.max(1.0 / 60.0), t: 0.0, target, lag }
+        Flight { path, dur: dur.max(1.0 / 60.0), t: 0.0, target, lag, edge }
     }
 
     /// Feet position `t` seconds into the flight.
@@ -230,12 +271,36 @@ impl Flight {
         (self.at(self.t), self.t >= self.dur)
     }
 
-    /// Nothing in the way of the body (feet, waist and head height); the
+    /// How deep the feet go into the obstacle they jump onto: the most a
+    /// floor higher than a step over the start (the top and anything at
+    /// its height) is above the feet while they are over it, metres, and
+    /// at which sample. The feet are taken 0.1 m ahead of the root along
+    /// the jump (toes).
+    pub fn sink(&self, ground: &Ground) -> (f32, usize) {
+        let start = self.path[0];
+        let dir = (self.target - start).truncate().normalize_or_zero();
+        let mut worst = (0.0f32, 0);
+        // (not the landing itself: toes past a narrow top)
+        for (i, &p) in self.path.iter().enumerate().take(SAMPLES) {
+            for toe in [0.0, TOE] {
+                let q = p + (dir * toe).extend(0.0);
+                if let Some(f) = ground.floor_below(q.with_z(self.target.z.max(p.z) + 0.3)) {
+                    if f > start.z + STEP && f - p.z > worst.0 {
+                        worst = (f - p.z, i);
+                    }
+                }
+            }
+        }
+        worst
+    }
+
+    /// Nothing in the way of the body (feet, waist and head height) and
+    /// the feet not through the top ([`Flight::sink`] within 5 cm); the
     /// feet are not checked over the last half metre, where they come
     /// onto the top (up jumps arrive rising, at their clips' apex, over
     /// the edge in front of the target).
     pub fn clear(&self, ground: &Ground) -> bool {
-        self.path.windows(2).all(|w| {
+        self.sink(ground).0 <= SINK && self.path.windows(2).all(|w| {
             let near = (w[1] - self.target).truncate().length() < 0.5;
             [0.2, 0.9, 1.6].iter().filter(|&&h| !(near && h < 0.5)).all(|&h| ground.ray(w[0] + Vec3::Z * h, w[1] - w[0]).is_none())
         })
@@ -318,11 +383,18 @@ pub fn target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2, off_edge: bo
                 continue;
             }
             let kinds = weights(clips, rel);
-            let flight = [1.0, 1.5, 2.0, 3.0].into_iter().map(|lag| Flight::new(clips, &kinds, 0, pos, at, lag)).find(|f| f.clear(ground));
-            if let Some(flight) = flight {
+            // near face of the top along the jump (the sample before it)
+            let dir = rel.truncate().normalize_or_zero();
+            let edge = (!off_edge || rel.z > STEP).then(|| (line(d - PROFILE_STEP) - pos.truncate()).dot(dir).max(0.0));
+            let flight = Flight::new(clips, &kinds, 0, pos, at, edge);
+            if flight.clear(ground) {
+                if std::env::var_os("ACBMP_JUMPDBG").is_some() {
+                    eprintln!("dbg chose lag {:.2} edge {edge:?} sink {:?}", flight.lag, flight.sink(ground));
+                    let row: Vec<String> = flight.path.iter().step_by(2).map(|q| format!("{:.2}/{:.2}", (*q - pos).truncate().dot(fwd), q.z - pos.z)).collect();
+                    eprintln!("dbg path {}", row.join(" "));
+                }
                 return Some((at, flight, narrow));
             }
-            let flight = Flight::new(clips, &kinds, 0, pos, at, 1.0);
             if std::env::var_os("ACBMP_JUMPDBG").is_some() {
                 let hit = flight.path.windows(2).enumerate().find_map(|(i, w)| [0.9f32, 1.6].iter().find(|&&h| ground.ray(w[0] + Vec3::Z * h, w[1] - w[0]).is_some()).map(|h| (i, *h, w[0])));
                 eprintln!("dbg blocked path to {:.2?} narrow {narrow} dur {:.3} at {hit:?} end {:?}", at.to_array(), flight.dur, flight.path.last());
@@ -335,13 +407,13 @@ pub fn target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2, off_edge: bo
 /// Launches the player on `flight` to `target`; `why` names the trigger
 /// for `ACBMP_TRACE`.
 pub(crate) fn take_off(p: &mut Player, clips: &Clips, sk: &Skeleton, target: Vec3, flight: Flight, why: &str) {
-    let lag = flight.lag;
+    let edge = flight.edge;
     let d = target - p.pos;
     let kinds = weights(clips, d);
     let main = main_kind(&kinds);
     let foot = p.loco.start_jump(clips, sk, main);
     // the flight on the clips of the foot it takes off from
-    let flight = if foot == 0 { flight } else { Flight::new(clips, &kinds, foot, p.pos, target, lag) };
+    let flight = if foot == 0 { flight } else { Flight::new(clips, &kinds, foot, p.pos, target, edge) };
     p.yaw = (-d.x).atan2(d.y);
     p.vel = Vec3::ZERO;
     p.fall_from = p.pos.z.max(target.z);
@@ -386,6 +458,64 @@ impl Ground {
             }
         }
         (at, narrow)
+    }
+}
+
+/// A narrow top under feet at `p`: its long axis (unit; zero on a post,
+/// narrow both ways) and the offset from `p` to its centre line.
+#[derive(Clone, Copy, Debug)]
+pub struct Beam {
+    pub axis: Vec2,
+    pub centre: Vec2,
+}
+
+impl Ground {
+    /// The beam (railing, narrow wall top, post) the feet at `p` stand
+    /// on, if the top under them is narrower than [`NARROW`] across.
+    pub fn beam(&self, p: Vec3) -> Option<Beam> {
+        let z = self.floor_below(p + Vec3::Z * 0.15)?;
+        if (z - p.z).abs() > 0.05 {
+            return None;
+        }
+        let on = |q: Vec2| self.floor_below(q.extend(z + 0.15)).is_some_and(|f| (f - z).abs() <= 0.12);
+        let half = NARROW * 0.5;
+        if [Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y].iter().all(|&d| on(p.truncate() + d * half)) {
+            return None;
+        }
+        // width across each of 8 directions, 2 cm probes
+        let ext = |d: Vec2| (1..=50).map(|i| i as f32 * 0.02).find(|&e| !on(p.truncate() + d * e)).unwrap_or(1.0);
+        let widths: Vec<(Vec2, f32, f32)> = (0..8)
+            .map(|i| {
+                let a = i as f32 * std::f32::consts::PI / 8.0;
+                let d = Vec2::new(a.cos(), a.sin());
+                (d, ext(d), ext(-d))
+            })
+            .collect();
+        let &(across, a, b) = widths.iter().min_by(|x, y| (x.1 + x.2).total_cmp(&(y.1 + y.2)))?;
+        if a + b >= NARROW {
+            return None;
+        }
+        let centre = across * (a - b) * 0.5;
+        let axis = Vec2::new(-across.y, across.x);
+        let long = ext(axis) + ext(-axis);
+        Some(Beam { axis: if long < NARROW { Vec2::ZERO } else { axis }, centre })
+    }
+
+    /// Walking on a beam: a move mostly along it stays on its centre
+    /// line (retail's walk-on-beam); a move across it (or any move on a
+    /// post) is left alone, stepping or jumping off.
+    pub fn balance(&self, p: Vec3, delta: Vec2) -> Vec2 {
+        let len = delta.length();
+        if len < 1e-6 {
+            return delta;
+        }
+        match self.beam(p) {
+            Some(b) if b.axis != Vec2::ZERO && delta.dot(b.axis).abs() >= 0.5 * len => {
+                // centre line, closing the offset at most at the move's pace
+                b.axis * delta.dot(b.axis) + b.centre.clamp_length_max(len)
+            }
+            _ => delta,
+        }
     }
 }
 
