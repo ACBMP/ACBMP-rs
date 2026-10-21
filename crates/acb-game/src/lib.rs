@@ -264,6 +264,12 @@ impl World {
         }
         eprintln!("{} characters on {} standard spawns", w.bodies.len(), spawns.len());
         if trace() {
+            for (i, b) in w.bodies.iter().enumerate() {
+                let (p, f) = (b.spawn.w_axis, b.spawn.y_axis);
+                eprintln!("body {i} spawn {:.2} {:.2} {:.2} facing {:.2} {:.2}", p.x, p.y, p.z, f.x, f.y);
+            }
+        }
+        if trace() {
             for (i, a) in w.bodies.iter().enumerate() {
                 let p = a.spawn.w_axis;
                 let f = a.spawn.y_axis;

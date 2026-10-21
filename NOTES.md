@@ -590,3 +590,29 @@ moves advance by `dt` of simulated time; same end states at `--fps 60` and
   hang to climb -> climb down to hang -> shimmy -> drop; `--at
   -11.31,46.8,6.5,0 --input "0=a 2.5= 4=s 4.2="` walk-in mount -> climb ->
   down to hang. In-climb keys are W/S/A/D (not camera relative).
+
+## MP rules (`acb-game/src/rules.rs`)
+Pure, deterministic functions the server and client prediction share (no clock, no RNG; ties by index).
+- Tuning in data: `DataPC.forge` uid 0xbc9 `GameParameters.GlobalParameters` (`acbmp dump DataPC.forge 0x00000bc9`;
+  floats print as raw ints): Dist_visibility 9, Dist_gap 3.5, Dist_height_gap 1.8, PlayerNearTarget 10 /
+  FarFromTarget 15, NearAssassin 15 / FarFromAssassin 70, NbAss_Max 2. `Wanted2 GamemodeParameters` (0x3723493d):
+  Dist_kill_run 2.5, Dist_kill_droptech 8, threat meter speeds/angles. Game-mode XMLs are not shipped; brick defaults
+  come from their `ReadFromXML` (LessFrustratingTarget 0x011c778e, PlayerDetector 0x012d140e, ScoreKill 0x0103832c).
+- Kill/stun validity (`check`): kill needs Target (or Npc), stun needs Pursuer (`AssassinTask::IsTargetValidForAssassination`
+  0x00b4a69e -> `GameInfo::IsAssassinFor`); free play treats NPCs as both. Cone cos >= 0.5 (0x00b4f648); |dz| <= 1.8.
+  Walking ground kill: reach = clip pelvis spacing (~1 m) + Dist_gap, then a walk-in (`approach`) to the kill's start
+  point (`KillClips::start_point`), arrive at 0.3 m, give up after 2.5 s. Running kill / stun: 2.5 m, immediate.
+  Air -> ground within 8 m from above; hidden victim -> Ground2Haystack; climb/air victims refused. Distance bands
+  47/48/49 split at 0.7 / 2.0 m, front/back at a right angle (`Ground2Ground::GetAnimationGeneric` 0x00e7a5d4).
+  The use of Dist_gap in code was not found: "reach = spacing + gap" is our reading.
+- Contracts (`Contracts`): pursuers per target = min(players-2, level cap) with level cap
+  trunc(2(level-0.4)/(levels-1)+1) = 1/2/3 (`GetMaxTargeted` 0x011c099e). Candidates (`IsValidCandidateFor`
+  0x012138d0): hard = active, not self, no mutual hunt unless 2 players, < players-2 pursuers; soft (dropped when
+  nothing passes) = level cap, >= 15 m away and not the previous target while waited < 20 s. Hunters served longest
+  wait first, then lower level; draw = most free slots, then furthest. Death: killer fulfilled, other pursuers lost,
+  5 s cooldown (MinWaitTime, our reading); stunned hunter loses its contract.
+- Compass (`locate`): fill 0 beyond 30 m (DetectionRange) to 1 at 10 m; near-target hysteresis 10/15; in view within
+  9 m, |dz| <= 2 and line of sight. `threatened`: 15/70 m hysteresis.
+- Gate: `--count 2 --wander 0 --at 38.6,23.96,0.5,171.4 --input "0= 0.5=e 0.6="` on San Donato (body 1 at 38,20):
+  granted Far/Back at 4.0 m, walk-in 1.23 s (run, then walk under 2 m) to 1.06 m, then the back kill; identical
+  trace at --fps 144.

@@ -67,6 +67,27 @@ impl KillClips {
         Some(KillClips { sets: vec![set("Front")?, set("Back")?, stun("Front")?, stun("Back")?] })
     }
 
+    /// Pelvis spacing of the ground kills at their start (assassin
+    /// Reference at t = 0, horizontal): what the walk-in leaves to close.
+    pub fn spacing(&self) -> f32 {
+        let d = |set: usize| reference(&self.sets[set].0, 0.0).map(|(p, _)| p.truncate().length());
+        match (d(0), d(1)) {
+            (Some(a), Some(b)) => a.max(b),
+            _ => crate::rules::PAIR_SPACING,
+        }
+    }
+
+    /// Where the assassin's entity stands (position, yaw) at the start of
+    /// set `side` played in `frame`, for a neutral stance taken from
+    /// `idle`: the walk-in's goal.
+    pub fn start_point(&self, side: usize, frame: Mat4, idle: &Clip) -> (Vec3, f32) {
+        let neutral = reference(idle, 0.0).unwrap_or((Vec3::Z * 0.96, 66f32.to_radians()));
+        match reference(&self.sets[side].0, 0.0) {
+            Some((rp, ry)) => reroot(frame, rp, ry, neutral),
+            None => (frame.w_axis.truncate(), 0.0),
+        }
+    }
+
     /// The set for an assassin at `from` attacking a victim at `victim`
     /// facing `victim_yaw` (front when the assassin is ahead of the victim),
     /// and the shared frame to play it in.
@@ -83,11 +104,9 @@ impl KillClips {
 }
 
 /// 0 when the assassin at `from` is in front of a victim at `victim`
-/// facing `victim_yaw`, 1 when behind.
+/// facing `victim_yaw`, 1 when behind ([`crate::rules::side`]).
 pub fn side(from: Vec3, victim: Vec3, victim_yaw: f32) -> usize {
-    let to_ass = (from - victim).truncate();
-    let facing = glam::Vec2::new(-victim_yaw.sin(), victim_yaw.cos());
-    usize::from(to_ass.dot(facing) < 0.0)
+    usize::from(crate::rules::side(from, victim, victim_yaw) == crate::rules::Side::Back)
 }
 
 /// Where to put an entity so that a pose whose Reference is at `pos`/`yaw`
