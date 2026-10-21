@@ -14,6 +14,7 @@ pub mod jump;
 pub mod kill;
 pub mod locomotion;
 pub mod player;
+pub mod rules;
 
 use std::sync::{Arc, OnceLock};
 
