@@ -14,6 +14,7 @@ path = "src/main.rs"
 acb-world.workspace = true
 acb-render.workspace = true
 acb-anim.workspace = true
+acb-game.workspace = true
 anvil-schema.workspace = true
 anyhow.workspace = true
 clap.workspace = true

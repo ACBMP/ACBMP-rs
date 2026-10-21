@@ -1,0 +1,13 @@
+[package]
+name = "acb-game"
+version = "0.1.0"
+description = "ACB MP gameplay simulation (no renderer): collision, locomotion, freerun, climbing, kills, crowd, on a fixed 60 Hz tick"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+acb-world.workspace = true
+acb-anim.workspace = true
+anyhow.workspace = true
+glam.workspace = true

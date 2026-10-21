@@ -14,6 +14,9 @@ use acb_anim::BuiltinTracks;
 use acb_world::Archive;
 use glam::{Vec2, Vec3};
 
+use crate::ground::{cell, Ground};
+use crate::Pose;
+
 /// Hands relative to the entity in the wall pose (forward, up).
 pub const HAND_FORWARD: f32 = 0.5;
 pub const HAND_UP: f32 = 1.6;
@@ -155,7 +158,7 @@ impl Climb {
         want: Option<Dir>,
         find: &dyn Fn(Vec3, Vec2, Dir) -> Option<(Hold, Vec3)>,
         dt: f32,
-    ) -> (Vec<(Vec3, glam::Quat)>, Outcome) {
+    ) -> (Pose, Outcome) {
         let n = self.hold.wall;
         let hand = self.pos - (n * HAND_FORWARD).extend(0.0) + Vec3::Z * HAND_UP;
         match &mut self.phase {
@@ -227,6 +230,100 @@ impl Climb {
             }
         }
     }
+}
+
+/// Hold queries on the map's guidance edges.
+impl Ground {
+    fn holds_near(&self, p: Vec3, r: f32) -> impl Iterator<Item = &Hold> + '_ {
+        let (c0, c1) = (cell(p.truncate() - Vec2::splat(r)), cell(p.truncate() + Vec2::splat(r)));
+        let mut ids: Vec<u32> =
+            (c0.0..=c1.0).flat_map(|x| (c0.1..=c1.1).map(move |y| (x, y))).filter_map(|k| self.hold_grid.get(&k)).flatten().copied().collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids.into_iter().map(|i| &self.holds[i as usize])
+    }
+
+    /// A hold to start climbing from feet at `pos` facing `fwd`: a wall
+    /// edge facing us within 0.9 m, 1.3-2.6 m up.
+    pub fn mount_hold(&self, pos: Vec3, fwd: Vec2) -> Option<Hold> {
+        self.holds_near(pos, 1.5)
+            .filter(|h| h.wall.dot(fwd) < -0.7)
+            .filter_map(|h| {
+                let q = h.nearest(pos);
+                let d = (q - pos).truncate();
+                let dz = q.z - pos.z;
+                (d.length() < 0.9 && d.dot(fwd) > 0.0 && (1.3..=2.6).contains(&dz)).then_some((dz, *h))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| x.1)
+    }
+
+    /// A hold to grab while falling at `pos` facing `fwd`: a wall edge
+    /// facing us within 0.7 m ahead, 1.3-2.2 m above the feet.
+    pub fn catch_hold(&self, pos: Vec3, fwd: Vec2) -> Option<Hold> {
+        self.holds_near(pos, 1.5)
+            .filter(|h| h.wall.dot(fwd) < -0.5)
+            .filter_map(|h| {
+                let q = h.nearest(pos);
+                let d = (q - pos).truncate();
+                let dz = q.z - pos.z;
+                (d.length() < 0.7 && d.dot(fwd) > -0.1 && (1.3..=2.2).contains(&dz)).then_some((d.length(), *h))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| x.1)
+    }
+
+    /// The next hold from hands at `hand` on a wall facing `n`, moving
+    /// `dir`: an edge on the same wall plane, 0.5-2 m away that way.
+    pub fn next_hold(&self, hand: Vec3, n: Vec2, dir: Dir) -> Option<(Hold, Vec3)> {
+        // facing f = -n, the character's right is (f.y, -f.x)
+        let right = Vec2::new(-n.y, n.x);
+        let probe = match dir {
+            Dir::Up => hand + Vec3::Z * 1.2,
+            Dir::Down => hand - Vec3::Z * 1.2,
+            Dir::Left => hand - (right * 1.2).extend(0.0),
+            Dir::Right => hand + (right * 1.2).extend(0.0),
+        };
+        self.holds_near(probe, 2.0)
+            .filter(|h| h.wall.dot(n) > 0.8)
+            .filter_map(|h| {
+                let q = h.nearest(probe);
+                let d = q - hand;
+                let (lat, up, out) = (d.truncate().dot(right), d.z, d.truncate().dot(n));
+                let ok = out.abs() < 0.35
+                    && match dir {
+                        Dir::Up => (0.5..=2.0).contains(&up) && lat.abs() < 0.5,
+                        Dir::Down => (-2.0..=-0.5).contains(&up) && lat.abs() < 0.5,
+                        Dir::Left => (-2.0..=-0.5).contains(&lat) && up.abs() < 0.5,
+                        Dir::Right => (0.5..=2.0).contains(&lat) && up.abs() < 0.5,
+                    };
+                ok.then_some((q.distance(probe), *h, q))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| (x.1, x.2))
+    }
+
+    /// Debug: standing spots from which a hold can be mounted, nearest
+    /// `near` first (spot, facing).
+    pub fn mount_spots(&self, near: Vec3, count: usize) -> Vec<(Vec3, Vec2)> {
+        let mut out: Vec<(f32, Vec3, Vec2)> = self
+            .holds
+            .iter()
+            .filter_map(|h| {
+                let q = (h.a + h.b) / 2.0;
+                let stand = q + (h.wall * 0.6).extend(0.0);
+                let z = self.floor_below(stand.with_z(q.z - 1.2))?;
+                let dz = q.z - z;
+                // and another hold above to climb to
+                let hand = q;
+                let stacked = self.next_hold(hand, h.wall, Dir::Up).is_some();
+                ((1.4..=2.5).contains(&dz) && stacked).then(|| (stand.with_z(z).distance(near), stand.with_z(z), -h.wall))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.into_iter().take(count).map(|x| (x.1, x.2)).collect()
+    }
+
 }
 
 #[cfg(test)]

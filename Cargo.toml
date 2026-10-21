@@ -15,6 +15,7 @@ acb-world = { path = "crates/acb-world" }
 acb-render = { path = "crates/acb-render" }
 d3d9-shader = { path = "crates/d3d9-shader" }
 acb-anim = { path = "crates/acb-anim" }
+acb-game = { path = "crates/acb-game" }
 thiserror = "2"
 glam = "0.34"
 anyhow = "1"

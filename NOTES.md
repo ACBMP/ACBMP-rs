@@ -437,10 +437,14 @@ its exact byte length and by key continuity (`acbmp animstats`).
 
 ## Player control (viewer `--play`)
 
+- Code: `crates/acb-game` (`World`, `player.rs`, `locomotion.rs`,
+  `jump.rs`, `climb.rs`, `kill.rs`, `crowd.rs`, `ground.rs`); the viewer
+  only maps keys to a `PlayerInput` per tick and draws.
+
 - `--play` drives the first `--character`: WASD relative to the orbit
   camera, Shift runs, right mouse orbits, wheel zooms. `--hold w,shift`
   presses keys from the start for `--capture` runs.
-- Locomotion (`acb-viewer/src/locomotion.rs`): cycles
+- Locomotion (`acb-game/src/locomotion.rs`): cycles
   `xx_l_wait_hipm_footl` / `xx_l_walk_hipm_footl` / `xx_h_run_hipm_footl` /
   `xx_h_sprint_hipm_footl`, each joined with its `_footr` half into a full
   stride (see Animation), blended by a 0..3 speed (tent weights), sharing
@@ -487,7 +491,7 @@ its exact byte length and by key continuity (`acbmp animstats`).
   `--at x,y,z` starts the player elsewhere; `ACBMP_TRACE=1` prints its
   state four times a simulated second. Roof at (-31.3, 42.0, 7.5) next to
   the San Donato spawn plaza drops 4.5 m.
-- Freerun jumps: `xx_h_run_{up,front,down}_{050,300,550}cm_foot{l,r}_to_air`
+- Freerun jumps (`acb-game/src/jump.rs`): `xx_h_run_{up,front,down}_{050,300,550}cm_foot{l,r}_to_air`
   (takeoff, 0.13-0.2 s) and `xx_h_air_..._to_surface` (landing). Their
   root tracks are not trajectories (run_up_050cm rises 0.87 m in place):
   the engine flies the character. Viewer: while running, a guidance ledge
@@ -497,7 +501,7 @@ its exact byte length and by key continuity (`acbmp animstats`).
   its last frame, landing clip at touchdown, then the run at the matching
   phase. Kind by height/distance (up > 0.3 m, down < -1 m; 050/300/550 by
   < 2.5 / < 4 m). Chains naturally (post -> stairs on San Donato).
-- Climbing (`acb-viewer/src/climb.rs`): guidance edges with a horizontal
+- Climbing (`acb-game/src/climb.rs`): guidance edges with a horizontal
   face normal are holds (wall = that normal; `top` if the other face is
   up). On-wall pose `xx_climb_wait_1m`: hands 0.5 m ahead and 1.6 m above
   the entity (`acbmp posebounds`). Walking into a wall with a hold 1.3-2.6
@@ -517,9 +521,17 @@ its exact byte length and by key continuity (`acbmp animstats`).
   more than 1.5 m above the floor starts falling (test: --at=-31.67,49.0,
   7,0 catches the stone post by the San Donato spawn).
 - Open: hanging, the real HumanGround state machine.
-- `--capture` runs step a fixed 60 Hz simulation from `about_to_wait` and
-  never present, so they work with the window hidden and are repeatable.
-  `--input "0=w,shift 1.5= 2=d"` scripts held keys over simulated time.
+- The sim runs a fixed 60 Hz tick (`acb_game::DT`, never the frame
+  time). The viewer runs the ticks due by the frame's time (sim up to one
+  tick ahead; a frame on a tick shows it exactly), samples keys per tick
+  (a press between ticks counts for one) and draws bodies interpolated
+  between the last two ticks; cloth (visual only) steps per frame.
+- `--capture` runs feed frames of 1/60 s (`--fps N`: 1/N s) from
+  `about_to_wait` and never present, so they work with the window hidden
+  and are repeatable. `--input "0=w,shift 1.5= 2=d"` scripts held keys
+  over simulated time. `ACBMP_TRACE=1` output is identical at --fps 60 and
+  144; the capture is the first frame at or past `--capture-after`, so
+  with fewer frames than ticks it can land a tick later.
 
 ## Netcode (survey)
 
