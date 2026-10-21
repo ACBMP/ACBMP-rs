@@ -502,25 +502,55 @@ its exact byte length and by key continuity (`acbmp animstats`).
     `xx_h_air_{dir}_{dist}_*_to_freestep[_down]` (not `_to_surface`, that
     is onto a wall), progress = t / (len1 + len2) (InAirData +0x1e4/+0x1e8),
     clip displacement warped onto the target (IgnoreGravity). Clip pairs
-    end: up +1.31 m (0 / 2.5 m ahead, 0.2 / 0.4 s), front -0.5 m
-    (0.5 / 2.5 / 5.2 m, 0.27 / 0.4 / 0.73 s), down -3.0 m (0.5 / 2.5 /
-    5.2 m). `Flight` blends the two nearest direction classes by height and
-    the distance classes by distance, warps the end error (horizontal
-    linear, vertical early up / late down), adds sqrt(2h/g) for extra drop;
-    closed form in elapsed time, so 60 Hz tick and --fps 144 agree exactly.
+    end (foot l, asserted by tests/jump_map.rs `clip_timings`): up +1.31 m
+    (0 / 2.5 m ahead, 0.2 / 0.4 s), front -0.51 m (0.5 / 2.5 / 5.22 m,
+    0.267 / 0.4 / 0.733 s), down 050 -3.40 m 0.5 m 0.667 s, down 300 -3.0 m
+    2.5 m 0.533 s, down 550 -3.01 m 5.22 m 0.867 s. `Flight` blends the two
+    nearest direction classes by height and the distance classes by
+    distance, warps the end error (horizontal linear, vertical early up /
+    late down), adds sqrt(2h/g) for extra drop; closed form in elapsed
+    time, so 60 Hz tick and --fps 144 agree exactly.
+  - Up onto a top (rise > STEP): the clips' root rises in a straight line
+    and reaches the top only at the end, so the feet cut the edge (0.52 m
+    deep on the parapet). Instead the vertical is a ballistic arc to 0.1 m
+    over the top (apex time split by g between rise and drop) and the
+    horizontal is `u^lag` with lag = ln(frac)/ln(u_over), frac = (near face
+    - 0.1 m toe) / distance, u_over = when the feet are 2 cm over the top
+    (no retries). `Flight::sink` = deepest feet/toe point under a floor
+    above the start step; > 5 cm rejects the flight. Not retail-exact
+    (warp shape unknown), physically clean.
   - Free fall: g = 9.81 (HumanInAir GetDropTime).
   - Targets from collision floors (not guidance edges): a floor profile
     every 5 cm on three lanes (0, +-0.25 m); up = a rise > STEP within 2 m,
     gap = first floor past the drop (else down onto the first floor below,
     not deeper than 3.2 m). Tops narrower than 0.6 m are centred
-    (`Ground::settle_top`). Path checked at 0.2 / 0.9 / 1.6 m above the
-    feet (feet not in the last 0.5 m), retried with the horizontal held
-    back (u^1.5..3) to go up before over a close edge; headroom 1.8 m.
-  - Gate (San Donato): bollard post at (22.9,-22.44) +1.02 m from 2.0 m:
-    up 300cm in 0.363 s, lands and stays; balcony parapet (-10.15,-0.34)
-    +1.20 m from 1.0 m: up 050cm in 0.287 s. Identical at --fps 144.
-    Thin collision railings exist (5-9 cm tops, e.g. 38.6,-53.5; gallery
-    y=-16.73 under a roof) but those tested had geometry over them.
+    (`Ground::settle_top`, 1 cm probes from the profile sample itself).
+    Bug fixed: it probed from 5 cm past the sample, so a 5-6 cm railing
+    was stepped over and the target fell to the floor behind it (then
+    "blocked path"/headroom against whatever was there): the cause of the
+    earlier railing rejections. Path checked at 0.2 / 0.9 / 1.6 m above
+    the feet (feet not in the last 0.5 m). Headroom 1.8 m from 0.3 m over
+    the top on the axis and 0.12 m around it (`Ground::headroom`).
+  - Beams: `Ground::beam` (top < 0.6 m across, 8 directions, 2 cm probes)
+    and `Ground::balance` (player.rs hook before move_on): a move within
+    60 deg of the beam axis is projected on it and pulled to the centre
+    line; across it, or on a post, the move is untouched (step/jump off).
+    No balance clips yet (locomotion.rs; retail has narrow/balance sets).
+  - Gate (San Donato, viewer camera now follows --at yaw): 5 cm stairwell
+    balustrade (38.60,-54.4, top 1.01, 2.36 m clear) via
+    `--at=34.5,-54.38,0.1,-90 --input "0=w,shift 1.1="`: up 300cm 2.03 m
+    ahead +1.04 m in 0.363 s, lands centred and stays; parapet via
+    `--at=-13,0,6,-97 --input "0=w,shift 0.9="`: up 050cm +1.20 m in 0.277 s
+    to (-10.29,-0.33,6.59) (true centre; was -10.15 with the 5 cm probe),
+    lag 1.22, sink 0. Identical at --fps 144. The old "bollard" (22.9,
+    -22.44) is a 10 cm corner of a larger object with a 1.75 m face 0.15 m
+    away: now rejected by the body headroom (the body would be inside it).
+    The fenced square rail at x=-34.19 has a 1.9 m canopy 2 cm beside it:
+    rejected too. tests/jump_map.rs: `thin_railing_landing` (World, 60 Hz:
+    landing tick count = ceil(dur/DT), stays, then walks 7 deg off the rail
+    axis and stays on its centre line), `thin_railings_sweep` (all < 10 cm
+    tops with body room, approached over level floor: 11 of 15 land; the
+    rest have an arch lintel or clutter over the path).
   - Debug: ACBMP_TRACE=1 prints jump/landed lines, ACBMP_JUMPDBG=1 the
     profile and rejected candidates. Examples: `jumpclips` (clip lengths,
     root displacement), `narrow` (narrow tops / thin triangles / profile).
