@@ -42,6 +42,14 @@ offscreen (the map is mounted over the core `DataPC.forge` next to it).
 - `acb-viewer`: interactive fly-through (WASD, Space/C, right mouse to look,
   Shift faster, wheel sets speed). `acb-viewer <map.forge> --schemas <dir>`.
   San Donato: 1.2M triangles at a vsynced 60 fps on an RX 580.
+  With `--character`/`--play` it is a client of `acb-game`: it runs the
+  due 60 Hz ticks each frame and draws characters interpolated between
+  the last two (`--fps N` simulates a render rate in `--capture` runs).
+- `acb-game`: the gameplay simulation, no renderer: map collision and
+  freerun guidance (`ground.rs`), player control (`player.rs`), locomotion,
+  freerun jumps (`jump.rs`), climbing, kills, crowd. `World::step(&[PlayerInput])`
+  advances one fixed 60 Hz tick; bodies expose placement and pose for the
+  last two ticks.
 - `d3d9-shader`: SM3 bytecode parser (incl. CTAB constant tables),
   disassembler and WGSL translator. `acbmp shaderlab <forge>` translates every
   MaterialTemplate permutation and validates it with naga: 100% of the unique
