@@ -39,6 +39,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "acb-net"
+version = "0.1.0"
+dependencies = [
+ "acb-anim",
+ "acb-game",
+ "acb-world",
+ "anvil-schema",
+ "anyhow",
+ "glam",
+]
+
+[[package]]
 name = "acb-render"
 version = "0.1.0"
 dependencies = [

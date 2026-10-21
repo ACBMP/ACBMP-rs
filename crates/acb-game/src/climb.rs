@@ -178,6 +178,7 @@ enum Then {
 
 /// A sequence of clips played back to back while the entity is carried
 /// from `from` to `to` (and turned from `yaw0` to `yaw1`).
+#[derive(Clone)]
 struct Seq {
     clips: Vec<&'static str>,
     names: Vec<String>,

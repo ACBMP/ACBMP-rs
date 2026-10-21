@@ -1219,7 +1219,13 @@ fn dump(forge: PathBuf, needle: &str, schemas: PathBuf, depth: usize) -> anyhow:
         .types
         .keys()
         .flat_map(|h| archive.uids_of(&schema.name_or_hash(*h)))
-        .filter(|u| archive.loc(*u).is_some_and(|l| l.name.contains(needle)))
+        .filter(|u| {
+            // `0x...` selects one root by uid (nameless globals)
+            needle.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok()).map_or_else(
+                || archive.loc(*u).is_some_and(|l| l.name.contains(needle)),
+                |want| *u == want,
+            )
+        })
         .collect();
     uids.sort();
     uids.dedup();
