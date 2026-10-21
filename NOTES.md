@@ -583,6 +583,63 @@ its exact byte length and by key continuity (`acbmp animstats`).
   data (+0x34). `operator<<` writes whole values; `WriteType<T>(v, bits)`
   packs bits.
 
+## Netcode (ours)
+
+Retail PRUDP/Net-Z is not kept; `crates/acb-net` is our own UDP protocol
+with a server-authoritative sim.
+
+- Wire: every datagram `"AB"`, version byte (1), type byte, little-endian
+  hand-packed fields (`proto.rs`, <= 1400 bytes). Client -> server:
+  `Hello{name,character,map}`, `Ping`, `Ready`, `Input{snapshot_ack,
+  client_ms, last, inputs[]}` (every input the server has not acked, up
+  to 32: redundancy against loss), `Bye`. Server -> client: `Welcome`,
+  `Reject`, `Lobby`, `Start{map, snapshot_every, slots}`, `Snapshot`,
+  `Over`. An input is 4 bytes (9 button bits, camera yaw in 1/65536 turns);
+  both sides simulate the quantized input.
+- Snapshot (every 2 ticks = 30 Hz): tick, delta baseline (the snapshot the
+  client acked), input ack, the client's lead, echo/hold ms for the RTT,
+  a changed-mask + `NetPos` per changed player (retail PlayerNetPos-style:
+  int16 cm x/y, 15-bit z + moving bit, yaw byte, flags = airborne /
+  attacking / climbing / victim, int16 cm/s velocity when moving; 8 or 12
+  bytes), the inputs the server applied for every player since the ack
+  (run-length coded) and the decided events (kill/stun started, death,
+  rejection with reason, respawn). ~55 bytes for 2 players.
+- Server (`acbmp serve <map> [--port --players --at x,y,z,yaw --netsim
+  --log --duration]`): lobby until N joined, everyone builds the same
+  world (`game::load_world`, slot i on player spawn i), then
+  `acb_game::World` at 60 Hz. Per-client `InputBuffer`: inputs by tick, a
+  missing one repeats the last (counted). Before each tick
+  `game::authoritative_step` asks the rules hook
+  `World::validate_action(player, input, rules, relation)`
+  (`acb-game/src/action.rs`, calls `rules::best_victim`/`rules::check`);
+  a refused kill/stun is cleared from the applied (and relayed) input and
+  reported as `KillRejected`. Contracts are not hooked in yet: relation is
+  `Npc` (free play) for everyone.
+- Client (`acb_net::client`, viewer `--connect host:port [--netsim]`):
+  the sim is deterministic, so the client rebuilds the server's state
+  from the relayed applied inputs: a confirmed `Saved` (`World::save`/
+  `restore`, `acb-game/src/state.rs`) is stepped through every tick it has
+  all inputs for and checked against the snapshot's `NetPos` (counted
+  exact/desync; on a desync the server's position wins). Then rewind to
+  it and replay the own unacked inputs (remote players hold their last
+  applied input) up to the predicted tick. A kill the server refused, or
+  one predicted against a remote that did something else, disappears in
+  that replay (logged `rollback: predicted kill undone`). Remote bodies
+  are drawn from the confirmed ticks 6 ticks (100 ms) behind the newest,
+  placement and pose interpolated. The clock runs `lead` 2..5 ticks ahead
+  of the server: +-3 % rate from the server's lead report, a jump when
+  far off (ignored until the server has inputs past the jump).
+- Tests: `proto`/`game`/`link` unit tests (round trips, quantization,
+  delta, redundancy under 50 % loss), `tests/match_map.rs`: in-process
+  server + 2 clients over localhost with loss 5 %, delay 150 ms, jitter
+  10 ms each: all confirmed ticks exact, each sees the other where it is,
+  the predicted out-of-range kill is rejected (`out of range`) and rolled
+  back. Viewer gate (fps 60 with delay 120 ms + fps 144): 201/207 checked
+  ticks exact, the two clients' confirmed positions identical on all 26
+  traced ticks and equal to the server log.
+- Open: hooking `Contracts` (relations) into the validation hook; no lag
+  compensation (the server checks the present, not what the killer saw).
+
 ## Climbing
 
 `acb-game/src/climb.rs`, driven from `player.rs` inside the 60 Hz tick (all

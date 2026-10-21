@@ -285,10 +285,52 @@ enum Cmd {
         #[arg(long, default_value_t = 40)]
         top: usize,
     },
+    /// Authoritative headless match server: waits for --players clients,
+    /// then runs the game sim at 60 Hz (our own UDP protocol, see NOTES.md
+    /// "Netcode (ours)")
+    Serve {
+        map: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// ACBMP.exe for the builtin animation tracks (clients need the same)
+        #[arg(long, env = "ACBMP_EXE")]
+        exe: Option<PathBuf>,
+        #[arg(long, default_value_t = 7777)]
+        port: u16,
+        #[arg(long, default_value_t = 2)]
+        players: usize,
+        /// A snapshot every N ticks (2 = 30 Hz)
+        #[arg(long, default_value_t = 2)]
+        snapshot_every: u32,
+        /// Simulated network on the server side, e.g. loss=5%,delay=40ms,jitter=10ms
+        #[arg(long, default_value = "")]
+        netsim: String,
+        /// Start of slot i (repeatable, in slot order): x,y,z,yaw_degrees
+        #[arg(long, allow_hyphen_values = true)]
+        at: Vec<String>,
+        /// Write every tick's quantized player state and the events here
+        #[arg(long)]
+        log: Option<PathBuf>,
+        /// Stop after this many seconds of play
+        #[arg(long)]
+        duration: Option<f32>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
+        Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration } => {
+            let at = at
+                .iter()
+                .map(|a| {
+                    let v: Vec<f32> = a.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>()?;
+                    anyhow::ensure!(v.len() == 4, "--at x,y,z,yaw");
+                    Ok(Some([v[0], v[1], v[2], v[3]]))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let netsim = acb_net::link::NetSim::parse(&netsim)?;
+            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration })?;
+        }
         Cmd::Ls { forge } => {
             let forge = Forge::open(forge)?;
             for e in forge.entries() {

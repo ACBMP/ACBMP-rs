@@ -1,0 +1,15 @@
+[package]
+name = "acb-net"
+version = "0.1.0"
+description = "ACB MP netcode: our own UDP protocol, an authoritative headless server running acb-game, client prediction and reconciliation"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+acb-game.workspace = true
+acb-world.workspace = true
+acb-anim.workspace = true
+anvil-schema.workspace = true
+anyhow.workspace = true
+glam.workspace = true

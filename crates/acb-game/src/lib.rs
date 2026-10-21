@@ -13,8 +13,10 @@ pub mod ground;
 pub mod jump;
 pub mod kill;
 pub mod locomotion;
+pub mod action;
 pub mod player;
 pub mod rules;
+pub mod state;
 
 use std::sync::{Arc, OnceLock};
 
@@ -72,6 +74,7 @@ pub struct PlayerInput {
 
 /// A clip played once in a given frame and held at its end (--pair, kill
 /// victims) instead of everything else.
+#[derive(Clone)]
 pub struct Scripted {
     pub clip: Clip,
     pub frame: Mat4,
