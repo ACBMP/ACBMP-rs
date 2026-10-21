@@ -18,7 +18,7 @@ fn ground() -> Option<Ground> {
 #[test]
 fn explore() {
     let Some(g) = ground() else { return };
-    let p = Vec3::new(-13.3, 44.6, 2.22);
+    let p = std::env::var("PROBE").ok().map(|s| { let v: Vec<f32> = s.split(',').map(|x| x.parse().unwrap()).collect(); Vec3::new(v[0], v[1], v[2]) }).unwrap_or(Vec3::new(-13.3, 44.6, 2.22));
     for h in g.holds_around(p, 4.0) {
         let q = h.nearest(p);
         println!("{:?} -> {:?} wall {:?} top {} dz {:.2} d {:.2}", h.a, h.b, h.wall, h.top, q.z - p.z, (q - p).truncate().length());
@@ -35,6 +35,26 @@ fn explore() {
         }
     }
     println!("hold height above the floor in front, 0.5 m bins: {hist:?}, no floor {none}");
+    // wall-run spots under two stacked holds (lower one in wall-run reach)
+    let mut found = Vec::new();
+    for l in g.holds_around(p, 40.0) {
+        let q = (l.a + l.b) / 2.0;
+        let stand = q + (l.wall * 2.5).extend(0.0);
+        let Some(z) = g.floor_below(stand.with_z(q.z - 1.0)) else { continue };
+        if !(1.8..=4.2).contains(&(q.z - z)) || l.length() < 3.0 {
+            continue;
+        }
+        if let Some((u, uq)) = g.next_hold(q, l.wall, acb_game::climb::Dir::Up) {
+            found.push((stand.with_z(z).distance(p), stand.with_z(z), l.wall, q, uq, u.top));
+        }
+    }
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for f in found.iter().take(8) {
+        println!("stack: stand {:.2?} wall {:.2?} low {:.2?} up {:.2?} top {}", f.1, f.2, f.3, f.4, f.5);
+    }
+    for (spot, f) in g.mount_spots(p, 8) {
+        println!("mount spot {spot:.2?} facing {f:.2?} yaw {:.0}", f.y.atan2(f.x).to_degrees());
+    }
 }
 
 #[test]
@@ -103,4 +123,20 @@ fn schema_explore() {
             println!("    {} {:?}", schema.name_or_hash(p.name_hash), p.kind());
         }
     }
+}
+
+/// The entry checks find San Donato's walls: a wall run at the spawn-side
+/// wall grabs its 3.8 m roof edge, and walking into the low roof wall
+/// north of it climbs straight on.
+#[test]
+fn entries_on_san_donato() {
+    let Some(g) = ground() else { return };
+    let (feet, fwd) = (Vec3::new(-14.47, 44.18, 2.22), glam::Vec2::X);
+    let (hit, n) = g.wall_ahead(feet, fwd, fwd * 4.0).expect("wall ahead");
+    assert!(n.dot(-fwd) > 0.9, "wall normal {n:?}");
+    let (hold, point) = g.wall_run_hold(hit, n, feet.z).expect("wall-run hold");
+    assert!((point.z - 6.02).abs() < 0.1 && hold.top, "{point:?}");
+    // running parallel to the wall is no wall run
+    assert!(g.wall_ahead(feet, fwd, glam::Vec2::Y * 4.0).is_none());
+    assert!(g.climb_entry(Vec3::new(-11.19, 47.82, 6.61), glam::Vec2::Y).is_some());
 }

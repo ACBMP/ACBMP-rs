@@ -161,28 +161,26 @@ pub(crate) fn drive(
         } else {
             None
         };
-        let find = |hand: Vec3, n: Vec2, d: Dir| ground.next_hold(hand, n, d);
-        let (pose, outcome) = cl.update(cc, sk, want, &find, dt);
+        let (pose, outcome) = cl.update(cc, sk, ground, want, dt);
         p.pos = cl.pos;
         p.yaw = cl.yaw;
-        let wall = cl.hold.wall;
+        if crate::trace() && (time * 4.0).floor() != ((time - dt) * 4.0).floor() {
+            eprintln!("t {:.2} pos {:.2} {:.2} {:.2} yaw {:.0} {}", time, p.pos.x, p.pos.y, p.pos.z, p.yaw.to_degrees(), cl.describe());
+        }
         match outcome {
             Outcome::Climbing => {}
-            Outcome::TopOut(spot) => {
+            Outcome::Stand(pos, yaw) => {
                 p.climb = None;
+                p.pos = pos;
+                p.yaw = yaw;
+                p.vel = Vec3::ZERO;
                 p.loco.resume(pose.clone());
-                if let Some(z) = ground.floor_below(spot + Vec3::Z * 1.0) {
-                    let target = spot.with_z(z);
-                    p.vel = jump::launch(target - p.pos, 0.45);
-                    p.fall_from = target.z;
-                    p.loco.start_jump(clips, sk, 0);
-                }
             }
-            Outcome::Drop => {
+            Outcome::Drop(v) => {
                 p.climb = None;
                 p.loco.resume(pose.clone());
                 p.loco.start_fall();
-                p.vel = (wall * 1.0).extend(0.0);
+                p.vel = v;
                 p.fall_from = p.pos.z;
             }
         }
@@ -212,7 +210,8 @@ pub(crate) fn drive(
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
             if p.vel.z < -1.0 && clipset.climbs.is_some() && p.fall_from - p.pos.z > 0.3 {
                 if let Some(hold) = ground.catch_hold(p.pos, fwd) {
-                    p.climb = Some(Climb::catch(hold, p.pos));
+                    let stance = ground.hang_stance(hold.nearest(p.pos), hold.wall);
+                    p.climb = Some(Climb::catch(hold, stance, p.pos, p.loco.last_pose().clone()));
                     p.loco.resume(p.loco.last_pose().clone());
                     p.vel = Vec3::ZERO;
                     return;
@@ -242,10 +241,33 @@ pub(crate) fn drive(
             if up.is_none() && blocked {
                 p.loco.blocked(dt);
             }
-            // walked into a wall with a hold above: climb it
-            if blocked && dir != Vec2::ZERO && clipset.climbs.is_some() {
-                if let Some(hold) = ground.mount_hold(p.pos, fwd) {
-                    p.climb = Some(Climb::mount(hold, p.pos));
+            // onto the wall (retail entry order): a wall run when running at
+            // a wall in high profile, else climbing straight on from a foot
+            // hold when pushing into it. Neither needs the move to be
+            // blocked this tick: the easing out of a blocked cycle stops the
+            // feet, so a blocked test never fires again after first contact.
+            if clipset.climbs.is_some() && up.is_none() && dir != Vec2::ZERO {
+                let pushing = dir.normalize_or_zero().dot(fwd) > 0.7;
+                let vel = delta / dt.max(1e-4);
+                let start = if input.run && p.loco.speed >= 1.5 && pushing {
+                    ground.wall_ahead(p.pos, fwd, vel).map(|(hit, n)| {
+                        let target = ground.wall_run_hold(hit, n, p.pos.z);
+                        Climb::wall_run(target, hit, n, p.pos, p.yaw, p.loco.last_pose().clone())
+                    })
+                } else {
+                    None
+                };
+                let start = start.or_else(|| {
+                    pushing
+                        .then(|| ground.climb_entry(p.pos, fwd))
+                        .flatten()
+                        .map(|(hold, point)| Climb::mount(hold, point, p.pos, p.yaw, p.loco.last_pose().clone()))
+                });
+                if let Some(c) = start {
+                    if crate::trace() {
+                        eprintln!("climb: {} from {:.2} {:.2} {:.2}", c.describe(), p.pos.x, p.pos.y, p.pos.z);
+                    }
+                    p.climb = Some(c);
                     p.vel = Vec3::ZERO;
                     return;
                 }

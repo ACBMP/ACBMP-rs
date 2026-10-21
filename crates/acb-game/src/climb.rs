@@ -110,6 +110,9 @@ const CLIPS: &[&str] = &[
     "xx_h_hangwall_tr_fall_a",
     "xx_h_hangfree_tr_fall_a",
     "xx_h_hangwall_d_climb_1m",
+    "xx_h_climbing_climb1m_tr_hangwall_down_2_a",
+    "xx_h_climbing_climb1m_tr_hangwall_down_2_b",
+    "xx_h_climbing_climb1m_tr_hangwall_down_2_c",
     "xx_l_climb_1m_u_hangwall",
     // back to the ground
     "xx_l_climb_1m_tr_h_wait_hipm_footl_a",
@@ -491,6 +494,17 @@ impl Climb {
                     if dir == Dir::Up && hold.top {
                         let (to, y1, then) = hold_at(Stance::HangWall, hold, point);
                         return Some((seq(&["xx_l_climb_1m_u_hangwall"], to, y1, then), "climb to hang"));
+                    }
+                    // down onto a hold with nothing below it for the feet:
+                    // hang from it against the wall
+                    if dir == Dir::Down && ground.next_hold(point, hold.wall, Dir::Down).is_none() {
+                        let (to, y1, then) = hold_at(Stance::HangWall, hold, point);
+                        let clips = [
+                            "xx_h_climbing_climb1m_tr_hangwall_down_2_a",
+                            "xx_h_climbing_climb1m_tr_hangwall_down_2_b",
+                            "xx_h_climbing_climb1m_tr_hangwall_down_2_c",
+                        ];
+                        return Some((seq(&clips, to, y1, then), "climb down to hang"));
                     }
                     let (to, y1, then) = hold_at(Stance::Climb, hold, point);
                     return Some((seq(&triple(to.distance(self.pos)), to, y1, then), "climb"));
