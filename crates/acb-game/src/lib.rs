@@ -43,6 +43,12 @@ pub fn trace() -> bool {
     *TRACE.get_or_init(|| std::env::var_os("ACBMP_TRACE").is_some())
 }
 
+/// `ACBMP_TRACE=pose`: print the player's pose change every tick.
+pub fn trace_pose() -> bool {
+    static TRACE: OnceLock<bool> = OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var("ACBMP_TRACE").as_deref() == Ok("pose"))
+}
+
 /// One player's controls for one tick. Plain data, so it can be recorded
 /// or sent over the network as is.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -225,7 +231,12 @@ impl World {
             return Ok(w);
         }
         let builtins = setup.builtins;
-        let clip = by_name(archive, "Animation", &setup.anim).and_then(|a| Clip::load_with(archive, a, builtins));
+        let load_clip = |name: &str| by_name(archive, "Animation", name).and_then(|a| Clip::load_with(archive, a, builtins));
+        // a stride half (`*_footl`) loops together with its other half
+        let clip = load_clip(&setup.anim).map(|c| match acb_anim::pose::stride_partner(&setup.anim).and_then(|n| load_clip(&n)) {
+            Some(other) => c.looped_with(&other),
+            None => c,
+        });
         if clip.is_none() {
             eprintln!("{}: animation not found, bind pose", setup.anim);
         }
@@ -277,7 +288,9 @@ impl World {
                     .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))
             };
             let nav = Nav::load(archive).ok_or_else(|| anyhow::anyhow!("--crowd: the map has no navmesh"))?;
-            let crowd = Crowd { nav, idle: load("xx_l_wait_hipm_footl")?, walk: load("xx_l_walk_hipm_footl")? };
+            // the walk cycle is two half strides (left foot, right foot)
+            let walk = load("xx_l_walk_hipm_footl")?.then(&load("xx_l_walk_hipm_footr")?);
+            let crowd = Crowd { nav, idle: load("xx_l_wait_hipm_footl")?, walk };
             for i in 0..setup.crowd {
                 let character = characters[(count + i) % characters.len()].1.clone();
                 let root_bone = character.skeleton.bones.first().map(|b| b.id);
@@ -353,7 +366,14 @@ impl World {
         let t = self.time;
         for (i, p) in self.players.iter_mut().enumerate() {
             let input = inputs.get(i).copied().unwrap_or_default();
+            // ACBMP_TRACE=pose: per-tick pose change of the player (summed
+            // bone rotation, radians), to spot clips that snap or reset
+            let before = trace_pose().then(|| p.loco.last_pose().clone());
             player::drive(p, &mut self.bodies, &self.clips, self.ground.as_ref(), &input, t, DT);
+            if let Some(before) = before {
+                let jump: f32 = before.iter().zip(p.loco.last_pose()).map(|((_, a), (_, b))| a.angle_between(*b)).sum();
+                eprintln!("pose t {t:.3} speed {:.2} change {jump:.2}", p.loco.speed);
+            }
         }
         let wander = self.wander;
         let skip = self.players.len();

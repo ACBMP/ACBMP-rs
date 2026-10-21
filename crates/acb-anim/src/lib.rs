@@ -392,6 +392,18 @@ pub fn vec3_348(b: &[u8]) -> Vec3 {
 }
 
 impl RawTrack {
+    /// An uncompressed (`QuatNone`, Var16 times) rotation track.
+    pub fn quat_none(times: Vec<u32>, keys: &[Quat]) -> RawTrack {
+        let values = keys.iter().flat_map(|q| q.to_array()).flat_map(f32::to_le_bytes).collect();
+        RawTrack { descriptor: Compression::QuatNone as u8 * 3 + 1, compression: Compression::QuatNone, format: TimeFormat::Var16, times, values }
+    }
+
+    /// An uncompressed (`Vector3None`, Var16 times) translation track.
+    pub fn vec3_none(times: Vec<u32>, keys: &[Vec3]) -> RawTrack {
+        let values = keys.iter().flat_map(|v| v.to_array()).flat_map(f32::to_le_bytes).collect();
+        RawTrack { descriptor: Compression::Vector3None as u8 * 3 + 1, compression: Compression::Vector3None, format: TimeFormat::Var16, times, values }
+    }
+
     /// Decoded quaternion keys (None for non-rotation tracks).
     pub fn quats(&self) -> Option<Vec<Quat>> {
         use Compression::*;

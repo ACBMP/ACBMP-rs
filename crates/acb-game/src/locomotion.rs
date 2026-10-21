@@ -113,11 +113,13 @@ impl Clips {
             let end = if turns[i].0 == "left" { "l" } else { "r" };
             load(&format!("xx_l_waitturn_{}_{}_footl_tr_l_wait_hipm_foot{end}", turns[i].0, turns[i].1))
         };
+        // a cycle is two half strides: `_footl` ends where `_footr` starts
+        let stride = |stem: &str| -> anyhow::Result<Clip> { Ok(load(&format!("{stem}_footl"))?.then(&load(&format!("{stem}_footr"))?)) };
         Ok(Clips {
             idle: load("xx_l_wait_hipm_footl")?,
-            walk: load("xx_l_walk_hipm_footl")?,
-            run: load("xx_h_run_hipm_footl")?,
-            sprint: load("xx_h_sprint_hipm_footl")?,
+            walk: stride("xx_l_walk_hipm")?,
+            run: stride("xx_h_run_hipm")?,
+            sprint: stride("xx_h_sprint_hipm")?,
             run_stop: pair(&|f| format!("xx_h_runstop_foot{f}"))?,
             run_stop_settle: [
                 load("xx_h_runstop_footl_tr_h_wait_hipm_footr")?,
@@ -208,7 +210,8 @@ impl Action {
 pub struct Locomotion {
     /// 0 idle, 1 walk, 2 run, 3 sprint; eases toward the input.
     pub speed: f32,
-    /// Shared normalized phase of the (left-foot-first) cycles.
+    /// Shared normalized phase of the cycles (full strides: left foot, then
+    /// right).
     phase: f32,
     idle_time: f32,
     action: Option<Action>,
@@ -522,10 +525,11 @@ fn cycle_pose(clips: &Clips, sk: &Skeleton, speed: f32, phase: f32, idle_time: f
     pose
 }
 
-/// Cycle phase whose pose at `speed` is nearest `pose` (32 samples).
+/// Cycle phase whose pose at `speed` is nearest `pose` (64 samples over the
+/// full two-foot stride).
 fn matching_phase(clips: &Clips, sk: &Skeleton, speed: f32, pose: &[(Vec3, Quat)]) -> f32 {
-    (0..32)
-        .map(|i| i as f32 / 32.0)
+    (0..64)
+        .map(|i| i as f32 / 64.0)
         .min_by(|&a, &b| {
             let d = |ph| pose_distance(pose, &cycle_pose(clips, sk, speed, ph, 0.0));
             d(a).total_cmp(&d(b))
