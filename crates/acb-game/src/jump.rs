@@ -379,7 +379,10 @@ pub fn target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2, off_edge: bo
             if !reachable(ahead.max(DETECTION[0].0), rel.z) || (off_edge && rel.z < -3.2) {
                 continue;
             }
-            if ground.ray(at + Vec3::Z * 0.3, Vec3::Z * 1.5).is_some() {
+            if let Some(t) = ground.headroom(at) {
+                if std::env::var_os("ACBMP_JUMPDBG").is_some() {
+                    eprintln!("dbg no headroom: {:.2} m", 0.3 + 1.5 * t);
+                }
                 continue;
             }
             let kinds = weights(clips, rel);
@@ -387,6 +390,7 @@ pub fn target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2, off_edge: bo
             let dir = rel.truncate().normalize_or_zero();
             let edge = (!off_edge || rel.z > STEP).then(|| (line(d - PROFILE_STEP) - pos.truncate()).dot(dir).max(0.0));
             let flight = Flight::new(clips, &kinds, 0, pos, at, edge);
+            let sink = flight.sink(ground);
             if flight.clear(ground) {
                 if std::env::var_os("ACBMP_JUMPDBG").is_some() {
                     eprintln!("dbg chose lag {:.2} edge {edge:?} sink {:?}", flight.lag, flight.sink(ground));
@@ -397,7 +401,7 @@ pub fn target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2, off_edge: bo
             }
             if std::env::var_os("ACBMP_JUMPDBG").is_some() {
                 let hit = flight.path.windows(2).enumerate().find_map(|(i, w)| [0.9f32, 1.6].iter().find(|&&h| ground.ray(w[0] + Vec3::Z * h, w[1] - w[0]).is_some()).map(|h| (i, *h, w[0])));
-                eprintln!("dbg blocked path to {:.2?} narrow {narrow} dur {:.3} at {hit:?} end {:?}", at.to_array(), flight.dur, flight.path.last());
+                eprintln!("dbg blocked path to {:.2?} narrow {narrow} dur {:.3} lag {:.2} sink {sink:?} at {hit:?}", at.to_array(), flight.dur, flight.lag);
             }
         }
     }
@@ -432,7 +436,18 @@ pub(crate) fn take_off(p: &mut Player, clips: &Clips, sk: &Skeleton, target: Vec
     p.flight = Some(flight);
 }
 
+/// Body radius for the headroom over a landing, metres.
+const BODY: f32 = 0.12;
+
 impl Ground {
+    /// Something over a landing at `p` within the body (1.5 m up from
+    /// 0.3 m over the feet, on the axis and [`BODY`] around it): the
+    /// fraction of the ray at the first hit.
+    pub fn headroom(&self, p: Vec3) -> Option<f32> {
+        let rings = [Vec2::ZERO, Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y];
+        rings.iter().filter_map(|d| self.ray(p + (*d * BODY).extend(0.3), Vec3::Z * 1.5)).min_by(f32::total_cmp)
+    }
+
     /// Where to stand on the top under `p` (its floor height in `p.z`):
     /// a top narrower than [`NARROW`] across or along `fwd` (railing,
     /// beam, post) is centred on that axis. Returns the spot and whether
