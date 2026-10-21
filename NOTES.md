@@ -559,3 +559,34 @@ its exact byte length and by key continuity (`acbmp animstats`).
   type, 10-bit byte length, float +0x30, length bytes of the type's add
   data (+0x34). `operator<<` writes whole values; `WriteType<T>(v, bits)`
   packs bits.
+
+## Climbing
+
+`acb-game/src/climb.rs`, driven from `player.rs` inside the 60 Hz tick (all
+moves advance by `dt` of simulated time; same end states at `--fps 60` and
+`--fps 144`).
+
+- Entry (retail order): running (Shift) at a wall starts a wall run
+  (`HumanJumpDetector::DoWallingRaycastTest`: 1.5 m ray at 1.3 m, speed
+  dependent facing tolerance, knee clearance) that grabs the lowest guidance
+  edge 1.6-4.4 m above the feet (251/430 cm grab clips) or slides back down;
+  otherwise pushing into a wall with a foot hold ~0.95 m ahead and a hand
+  hold 1.2 m above it climbs straight on (vertical-stance entry).
+- Bug fixed: the old mount only ran when the move was `blocked` this tick,
+  and `Locomotion::blocked` eases the gait to a stop, so after the first
+  contact tick the test never ran again (and its 1.3-2.6 m hold window
+  missed most walls). Entry now runs every grounded tick with the stick
+  pushing forward, independent of blocking.
+- Stances: Climb (feet on a hold), HangWall, HangFree. Moves: climb
+  u/d/l/r between holds, hang <-> climb (`hangwall_tr_climb1m_up`,
+  `climb1m_tr_hangwall_down` when the lower hold has nothing under it),
+  shimmy (strafe open/close pairs), inner/outer 90 degree corners,
+  passover onto the top (`hangwall_tr_passover_handr`), step down / step off
+  sideways to the ground, drop (`tr_fall`), catching a hold while falling.
+- Gate (San Donato, ACBMP_TRACE): `--at -18,44.6,2.22,-90 --input
+  "0=w,shift 1.5= 2.5=d 8= 8.5=s 8.8="` wall run -> hang -> 4 shimmies ->
+  outer corner -> drop, ends at -10.60 39.67 2.15; `--at 5.24,16.5,0.04,180
+  --input "0=d,shift 1.2= 3.5=w 3.7= 6=s 6.2= 9=a 12= 13=s 13.2="` wall run ->
+  hang to climb -> climb down to hang -> shimmy -> drop; `--at
+  -11.31,46.8,6.5,0 --input "0=a 2.5= 4=s 4.2="` walk-in mount -> climb ->
+  down to hang. In-climb keys are W/S/A/D (not camera relative).
