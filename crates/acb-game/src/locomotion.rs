@@ -83,7 +83,9 @@ pub struct Clips {
 }
 
 /// Jump kinds: direction and distance class of `xx_h_run_{dir}_{dist}_foot*_to_air`
-/// / `xx_h_air_{dir}_{dist}_foot*_to_surface`.
+/// (takeoff) / `xx_h_air_{dir}_{dist}_foot*_to_freestep[_down]` (second half
+/// of the flight, onto the feet). Retail times a targeted jump as the two
+/// clips back to back (`jump.rs`).
 pub const JUMPS: [(&str, &str); 8] = [
     ("up", "050cm"),
     ("up", "300cm"),
@@ -138,7 +140,8 @@ impl Clips {
             jump_land: JUMPS
                 .iter()
                 .map(|(d, n)| {
-                    Ok([load(&format!("xx_h_air_{d}_{n}_footl_to_surface"))?, load(&format!("xx_h_air_{d}_{n}_footr_to_surface"))?])
+                    let to = if *d == "down" { "freestep_down" } else { "freestep" };
+                    Ok([load(&format!("xx_h_air_{d}_{n}_footl_to_{to}"))?, load(&format!("xx_h_air_{d}_{n}_footr_to_{to}"))?])
                 })
                 .collect::<anyhow::Result<_>>()?,
             fall: [load("xx_l_walklowfall_footl_tr_fall")?, load("xx_h_runlowfall_footl_tr_fall")?],
@@ -155,6 +158,11 @@ impl Clips {
 
     pub fn idle(&self) -> &Clip {
         &self.idle
+    }
+
+    /// Takeoff and air clip of jump `kind` ([`JUMPS`]) off `foot` (0 left).
+    pub fn jump(&self, kind: usize, foot: usize) -> (&Clip, &Clip) {
+        (&self.takeoff[kind][foot], &self.jump_land[kind][foot])
     }
 
     fn get(&self, id: Id) -> &Clip {
@@ -286,8 +294,9 @@ impl Locomotion {
     }
 
     /// Took off on a freerun jump of kind `kind` ([`JUMPS`]); the caller
-    /// flies the character until [`Locomotion::land`].
-    pub fn start_jump(&mut self, clips: &Clips, sk: &Skeleton, kind: usize) {
+    /// flies the character until [`Locomotion::land`]. Returns the foot
+    /// it takes off from (0 left).
+    pub fn start_jump(&mut self, clips: &Clips, sk: &Skeleton, kind: usize) -> usize {
         let f = (0..2)
             .min_by(|&a, &b| {
                 let d = |f| pose_distance(&self.last, &clips.get(Id::Takeoff(kind, f)).sample(sk, 0.0));
@@ -298,6 +307,7 @@ impl Locomotion {
         self.jump_land = Some(Id::JumpLand(kind, f));
         self.action = None;
         self.fade = Some((self.last.clone(), FADE * 0.5));
+        f
     }
 
     /// Touched down after falling `height` metres; `moving`: input held.
@@ -305,11 +315,11 @@ impl Locomotion {
         if self.air.take().is_none() {
             return;
         }
-        if let Some(id) = self.jump_land.take() {
-            // a planned jump lands running
-            let mut a = Action::new(vec![id], Cancel::Never);
-            a.end = (if moving { 2.0 } else { 0.0 }, 0.0);
-            self.start(a);
+        if self.jump_land.take().is_some() {
+            // a planned jump played its air clip in flight: on into the
+            // cycle (no landing displacement: narrow tops stay under foot)
+            self.speed = if moving { self.speed.max(2.0) } else { 0.0 };
+            self.fade = Some((self.last.clone(), FADE));
             return;
         }
         let severity = if height < 3.0 {
@@ -338,6 +348,14 @@ impl Locomotion {
         let want = (dir != Vec2::ZERO).then(|| (-dir.x).atan2(dir.y));
         if let Some((id, t)) = &mut self.air {
             *t += dt;
+            // takeoff, then the air clip of the same jump
+            if let (Id::Takeoff(..), Some(land)) = (*id, self.jump_land) {
+                let len = clips.get(*id).length;
+                if *t > len {
+                    *id = land;
+                    *t -= len;
+                }
+            }
             let c = clips.get(*id);
             let pose = c.sample(sk, t.min(c.length));
             let pose = self.faded(pose, dt);
