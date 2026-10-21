@@ -273,6 +273,23 @@ its exact byte length and by key continuity (`acbmp animstats`).
   Quat track, builtin): walk 1.012 m / 32 frames, run 1.707 m / 20 frames,
   along +Y. The Reference bone (0x2c52cbb0) is the pelvis in entity space
   (z ~0.93, yaw ~90 degrees). TrackID 2 is a Byte track (unknown).
+- Locomotion cycles are stored as half strides, one clip per leading foot:
+  `*_hipm_footl` ends in exactly the first frame of `*_hipm_footr` and
+  `_footr` ends in `_footl`'s first frame (summed bone-angle seam 0.000 for
+  walk and run, ~1.8 rad = one frame of motion for sprint), while
+  `_footl`'s own last frame is far from its first (9.4 rad run, 3.8 walk,
+  18.6 sprint). The Reference bone shows it too: run `_footl` turns the
+  pelvis 101 -> 78 degrees, `_footl` + `_footr` 101 -> 101. Full strides:
+  walk 0.533 + 0.467 s = 1.0 s / 1.897 m, run 0.333 + 0.333 s / 3.414 m,
+  sprint 0.267 + 0.267 s / 3.348 m. Looping `_footl` alone was the "plays
+  half the animation, then resets" bug (a 9.2 rad snap every 0.333 s at a
+  run in the viewer); key times, `Length` and the 60 fps rate were fine
+  (one-shots such as `ID07_Air2G_Front_Kill_ass`, 140 frames, play to
+  their last key). `Clip::then` joins two halves into one loopable clip
+  (keys shifted by the first half's length, root motion carried on);
+  `Clip::seam` measures how well one clip continues into another and
+  `Clip::looped_with` joins only true halves. `acbmp rootmotion --stride`
+  / `animplay --stride` show the joined cycle.
 
 ## Skinned meshes and characters
 
@@ -425,8 +442,11 @@ its exact byte length and by key continuity (`acbmp animstats`).
   presses keys from the start for `--capture` runs.
 - Locomotion (`acb-viewer/src/locomotion.rs`): cycles
   `xx_l_wait_hipm_footl` / `xx_l_walk_hipm_footl` / `xx_h_run_hipm_footl` /
-  `xx_h_sprint_hipm_footl` blended by a 0..3 speed (tent weights), sharing
-  one normalized phase (all start on the left foot). Space sprints.
+  `xx_h_sprint_hipm_footl`, each joined with its `_footr` half into a full
+  stride (see Animation), blended by a 0..3 speed (tent weights), sharing
+  one normalized phase (all start on the left foot; the walk's foot switch
+  is at 0.53, the others' at 0.5). Space sprints. `ACBMP_TRACE=pose`
+  prints the player's per-frame pose change (snaps and resets stand out).
   Measured root speeds: walk 1.90, run 5.12, sprint 6.28 m/s.
 - One-shots (`acbmp rootmotion <forge> <clips>` prints length, displacement,
   yaw curve and Reference bone start/end):

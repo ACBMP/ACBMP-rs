@@ -354,7 +354,14 @@ impl App {
         if builtins.is_none() {
             eprintln!("no ACBMP.exe builtin tracks (--exe): no root motion");
         }
-        let clip = by_name("Animation", &self.args.anim).and_then(|a| Clip::load_with(archive, a, builtins.as_ref()));
+        let load_clip = |name: &str| by_name("Animation", name).and_then(|a| Clip::load_with(archive, a, builtins.as_ref()));
+        // a stride half (`*_footl`) loops together with its other half
+        let clip = load_clip(&self.args.anim).map(|c| {
+            match acb_anim::pose::stride_partner(&self.args.anim).and_then(|n| load_clip(&n)) {
+                Some(other) => c.looped_with(&other),
+                None => c,
+            }
+        });
         if clip.is_none() {
             eprintln!("{}: animation not found, bind pose", self.args.anim);
         }
@@ -413,7 +420,9 @@ impl App {
                     .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))
             };
             let nav = Nav::load(archive).ok_or_else(|| anyhow::anyhow!("--crowd: the map has no navmesh"))?;
-            let crowd = Crowd { nav, idle: load("xx_l_wait_hipm_footl")?, walk: load("xx_l_walk_hipm_footl")? };
+            // the walk cycle is two half strides (left foot, right foot)
+            let walk = load("xx_l_walk_hipm_footl")?.then(&load("xx_l_walk_hipm_footr")?);
+            let crowd = Crowd { nav, idle: load("xx_l_wait_hipm_footl")?, walk };
             for i in 0..self.args.crowd {
                 let character = characters[(count + i) % characters.len()].clone();
                 let handles = character.parts.iter().map(|p| scene.add_skinned(r, archive, &p.mesh, &p.materials)).collect();
@@ -477,7 +486,14 @@ impl App {
             self.keys = self.script.remove(0).1;
         }
         if let (Some(p), Some(g)) = (&mut self.player, &mut self.gfx) {
+            // ACBMP_TRACE=pose: per-frame pose change of the player (summed
+            // bone rotation, radians), to spot clips that snap or reset
+            let before = (std::env::var("ACBMP_TRACE").as_deref() == Ok("pose")).then(|| p.loco.last_pose().clone());
             player::drive(p, g, &self.keys, self.sim_time, dt);
+            if let Some(before) = before {
+                let jump: f32 = before.iter().zip(p.loco.last_pose()).map(|((_, a), (_, b))| a.angle_between(*b)).sum();
+                eprintln!("pose t {:.3} speed {:.2} change {jump:.2}", self.sim_time, p.loco.speed);
+            }
         }
         let Some(g) = &mut self.gfx else { return };
         let t = self.sim_time;
