@@ -29,6 +29,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "acb-game"
+version = "0.1.0"
+dependencies = [
+ "acb-anim",
+ "acb-world",
+ "anyhow",
+ "glam",
+]
+
+[[package]]
 name = "acb-render"
 version = "0.1.0"
 dependencies = [
@@ -46,6 +56,7 @@ name = "acb-viewer"
 version = "0.1.0"
 dependencies = [
  "acb-anim",
+ "acb-game",
  "acb-render",
  "acb-world",
  "anvil-schema",

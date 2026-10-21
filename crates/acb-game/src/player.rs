@@ -1,0 +1,295 @@
+//! A player-driven character: per-tick input -> kills, climbing,
+//! locomotion, falls and freerun jumps (`jump.rs`).
+
+use glam::{Mat4, Quat, Vec2, Vec3};
+
+use crate::climb::{Climb, Dir, Outcome};
+use crate::ground::Ground;
+use crate::locomotion::{Gait, Locomotion};
+use crate::{jump, kill, Body, Clipset, PlayerInput, Scripted};
+
+/// A character under player control and its movement state.
+pub struct Player {
+    /// The body it drives (`World::bodies`).
+    pub body: usize,
+    pub pos: Vec3,
+    /// Facing: entity +Y is (-sin yaw, cos yaw).
+    pub yaw: f32,
+    pub loco: Locomotion,
+    /// Velocity while airborne, m/s.
+    pub vel: Vec3,
+    /// Height the current fall started at.
+    pub fall_from: f32,
+    pub kill: Option<PlayerKill>,
+    pub climb: Option<Climb>,
+    /// `pos` before the last tick, for render interpolation.
+    pub prev_pos: Vec3,
+}
+
+impl Player {
+    pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, kill: None, climb: None, prev_pos: pos }
+    }
+
+    pub fn entity(&self) -> Mat4 {
+        Mat4::from_rotation_translation(Quat::from_rotation_z(self.yaw), self.pos)
+    }
+
+    /// Position between the last two ticks (`alpha` 0 = previous, 1 = last).
+    pub fn pos_at(&self, alpha: f32) -> Vec3 {
+        if alpha >= 1.0 {
+            self.pos
+        } else {
+            self.prev_pos.lerp(self.pos, alpha)
+        }
+    }
+}
+
+/// The player's kill in progress.
+pub struct PlayerKill {
+    side: usize,
+    frame: Mat4,
+    t: f32,
+    /// Pose and placement it blends in from.
+    from_pose: Vec<(Vec3, Quat)>,
+    from_world: Mat4,
+}
+
+/// Blend-in time of a kill from wherever the player was.
+const KILL_BLEND: f32 = 0.25;
+
+/// How close the player gets to other people, metres.
+const PERSONAL: f32 = 0.6;
+
+/// One tick of player control: kills, climbing, locomotion (input -> gait
+/// and facing, clip-driven pose and root motion with wall sliding, floor
+/// snapping, falls and jumps), then the body's pose and placement.
+pub(crate) fn drive(
+    p: &mut Player,
+    bodies: &mut [Body],
+    clipset: &Clipset,
+    ground: Option<&Ground>,
+    input: &PlayerInput,
+    time: f32,
+    dt: f32,
+) {
+    let Some(clips) = &clipset.loco else { return };
+    if bodies.is_empty() {
+        return;
+    }
+    let me = p.body;
+    let c = bodies[me].character.clone();
+    let sk = &c.skeleton;
+    // E: kill, Q: stun the nearest person in reach ahead
+    let stun = input.stun;
+    if (input.kill || stun) && p.kill.is_none() && !p.loco.airborne() {
+        if let Some(kills) = &clipset.kills {
+            let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            let victim = bodies
+                .iter()
+                .enumerate()
+                .filter(|(i, a)| *i != me && a.scripted.is_none())
+                .map(|(i, a)| (i, a.entity.w_axis.truncate()))
+                .filter(|(_, v)| {
+                    let d = (*v - p.pos).truncate();
+                    d.length() < 2.5 && (v.z - p.pos.z).abs() < 1.0 && d.normalize_or_zero().dot(fwd) > 0.5
+                })
+                .min_by(|a, b| a.1.distance(p.pos).total_cmp(&b.1.distance(p.pos)));
+            if let Some((vi, vpos)) = victim {
+                let (_, rot, _) = bodies[vi].entity.to_scale_rotation_translation();
+                let vyaw = rot.to_euler(glam::EulerRot::ZXY).0;
+                // a kill plays in the victim's frame; a stun in the player's,
+                // with the victim's frame ahead of it
+                let plan = if stun {
+                    let side = 2 + kill::side(p.pos, vpos, vyaw);
+                    Some((side, p.entity(), p.entity() * Mat4::from_translation(Vec3::Y * kill::STUN_SPACING)))
+                } else {
+                    kills.plan(p.pos, vpos, vyaw).map(|(side, frame)| (side, frame, frame))
+                };
+                if let Some((side, frame, victim_frame)) = plan {
+                    let v = &mut bodies[vi];
+                    v.agent = None;
+                    v.model = Mat4::IDENTITY;
+                    v.scripted = Some(Scripted { clip: kills.sets[side].1.clone(), frame: victim_frame, start: time });
+                    let from_pose = p.loco.last_pose().clone();
+                    p.kill = Some(PlayerKill { side, frame, t: 0.0, from_pose, from_world: p.entity() });
+                }
+            }
+        }
+    }
+    if let (Some(kill), Some(kills)) = (&mut p.kill, &clipset.kills) {
+        let clip = &kills.sets[kill.side].0;
+        kill.t += dt;
+        let t = kill.t.min(clip.length);
+        let mut pose = clip.sample(sk, t);
+        let w = (kill.t / KILL_BLEND).min(1.0);
+        if w < 1.0 {
+            let mut from = kill.from_pose.clone();
+            acb_anim::pose::blend(&mut from, &pose, w);
+            pose = from;
+        }
+        // the camera follows the pelvis; the hand-off re-roots there
+        let neutral = kill::reference(clips.idle(), 0.0).unwrap_or((Vec3::Z * 0.96, 66f32.to_radians()));
+        if let Some((rp, ry)) = kill::reference(clip, t) {
+            let (pos, yaw) = kill::reroot(kill.frame, rp, ry, neutral);
+            p.pos = pos.with_z(kill.frame.w_axis.z);
+            p.yaw = yaw;
+        }
+        let mut world = kill.frame * clip.root_motion(t);
+        if w < 1.0 {
+            let (_, r0, t0) = kill.from_world.to_scale_rotation_translation();
+            let (_, r1, t1) = world.to_scale_rotation_translation();
+            world = Mat4::from_rotation_translation(r0.slerp(r1, w), t0.lerp(t1, w));
+        }
+        if kill.t >= clip.length {
+            p.kill = None;
+            p.loco.resume(pose.clone());
+        }
+        bodies[me].show(world, pose);
+        return;
+    }
+    // on a wall: climb
+    if let (Some(cl), Some(cc), Some(ground)) = (&mut p.climb, &clipset.climbs, ground) {
+        let want = if input.forward {
+            Some(Dir::Up)
+        } else if input.back {
+            Some(Dir::Down)
+        } else if input.left {
+            Some(Dir::Left)
+        } else if input.right {
+            Some(Dir::Right)
+        } else {
+            None
+        };
+        let find = |hand: Vec3, n: Vec2, d: Dir| ground.next_hold(hand, n, d);
+        let (pose, outcome) = cl.update(cc, sk, want, &find, dt);
+        p.pos = cl.pos;
+        p.yaw = cl.yaw;
+        let wall = cl.hold.wall;
+        match outcome {
+            Outcome::Climbing => {}
+            Outcome::TopOut(spot) => {
+                p.climb = None;
+                p.loco.resume(pose.clone());
+                if let Some(z) = ground.floor_below(spot + Vec3::Z * 1.0) {
+                    let target = spot.with_z(z);
+                    p.vel = jump::launch(target - p.pos, 0.45);
+                    p.fall_from = target.z;
+                    p.loco.start_jump(clips, sk, 0);
+                }
+            }
+            Outcome::Drop => {
+                p.climb = None;
+                p.loco.resume(pose.clone());
+                p.loco.start_fall();
+                p.vel = (wall * 1.0).extend(0.0);
+                p.fall_from = p.pos.z;
+            }
+        }
+        bodies[me].show(p.entity(), pose);
+        return;
+    }
+    let fwd = Vec2::new(input.cam_yaw.cos(), input.cam_yaw.sin());
+    let right = Vec2::new(fwd.y, -fwd.x);
+    let mut dir = Vec2::ZERO;
+    if input.forward { dir += fwd; }
+    if input.back { dir -= fwd; }
+    if input.right { dir += right; }
+    if input.left { dir -= right; }
+    let gait = if input.sprint {
+        Gait::Sprint
+    } else if input.run {
+        Gait::Run
+    } else {
+        Gait::Walk
+    };
+    let step = p.loco.update(clips, sk, dir.normalize_or_zero(), gait, &mut p.yaw, dt);
+    let delta = step.delta;
+    if let Some(ground) = ground {
+        if p.loco.airborne() {
+            p.vel.z -= jump::GRAVITY * dt;
+            // falling past a hold: grab it (not right after letting go)
+            let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            if p.vel.z < -1.0 && clipset.climbs.is_some() && p.fall_from - p.pos.z > 0.3 {
+                if let Some(hold) = ground.catch_hold(p.pos, fwd) {
+                    p.climb = Some(Climb::catch(hold, p.pos));
+                    p.loco.resume(p.loco.last_pose().clone());
+                    p.vel = Vec3::ZERO;
+                    return;
+                }
+            }
+            let mut at = ground.slide(p.pos, p.vel.truncate() * dt);
+            let z = p.pos.z + p.vel.z * dt;
+            match ground.floor_below(at + Vec3::Z * 0.1) {
+                Some(f) if f >= z => {
+                    at.z = f;
+                    p.vel = Vec3::ZERO;
+                    p.loco.land(p.fall_from - f, dir != Vec2::ZERO);
+                }
+                _ => at.z = z,
+            }
+            p.pos = at;
+        } else {
+            let running = p.loco.speed >= 1.5 && dir != Vec2::ZERO;
+            let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            // freerun: up onto a ledge ahead
+            let up = running.then(|| jump::ledge_up(ground, p.pos, fwd)).flatten();
+            let (to, ledge) = ground.move_on(p.pos, delta);
+            // pressing into a wall: ease out of the cycle instead of
+            // running on the spot (the run lean would put the head through)
+            let len = delta.length();
+            let blocked = len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3;
+            if up.is_none() && blocked {
+                p.loco.blocked(dt);
+            }
+            // walked into a wall with a hold above: climb it
+            if blocked && dir != Vec2::ZERO && clipset.climbs.is_some() {
+                if let Some(hold) = ground.mount_hold(p.pos, fwd) {
+                    p.climb = Some(Climb::mount(hold, p.pos));
+                    p.vel = Vec3::ZERO;
+                    return;
+                }
+            }
+            // freerun: over a gap instead of dropping into it
+            let across = (ledge && running).then(|| jump::across(ground, p.pos, fwd)).flatten();
+            if let Some(target) = up.or(across) {
+                jump::take_off(p, clips, sk, target, if up.is_some() { "ledge" } else { "gap" });
+            } else {
+                if ledge {
+                    p.loco.start_fall();
+                    p.vel = (delta / dt.max(1e-4)).extend(0.0);
+                    p.fall_from = p.pos.z;
+                }
+                // shoulder past people rather than through them (walls win)
+                let mut push = Vec2::ZERO;
+                for a in bodies.iter().enumerate().filter(|(i, a)| *i != me && a.scripted.is_none()).map(|x| x.1) {
+                    let o = a.entity.w_axis.truncate();
+                    let d = (to - o).truncate();
+                    let len = d.length();
+                    if len > 1e-3 && len < PERSONAL && (to.z - o.z).abs() < 1.5 {
+                        push += d / len * (PERSONAL - len);
+                    }
+                }
+                p.pos = if push == Vec2::ZERO { to } else { ground.move_on(to, push).0 };
+            }
+        }
+    } else {
+        p.pos += delta.extend(0.0);
+    }
+
+    // ACBMP_TRACE=1: player state four times a second (simulated time)
+    if crate::trace() && (time * 4.0).floor() != ((time - dt) * 4.0).floor() {
+        eprintln!(
+            "t {:.2} pos {:.2} {:.2} {:.2} yaw {:.0} speed {:.2}{}",
+            time,
+            p.pos.x,
+            p.pos.y,
+            p.pos.z,
+            p.yaw.to_degrees(),
+            p.loco.speed,
+            if p.loco.airborne() { " AIR" } else { "" }
+        );
+    }
+    let world = p.entity() * bodies[me].model;
+    bodies[me].show(world, step.pose);
+}

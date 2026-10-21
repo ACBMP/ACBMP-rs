@@ -1,12 +1,13 @@
 //! Player collision: the map's Havok shapes (`MeshShape`, `BoxShape`)
 //! bucketed in a 2D grid, split into walkable (floor) and steep (wall)
-//! faces.
+//! faces, plus the freerun guidance edges (ledges for jumps, holds for
+//! climbing; their queries live in `jump.rs` and `climb.rs`).
 
 use std::collections::HashMap;
 
 use acb_world::{Archive, CollisionMesh};
 
-use crate::climb::{Dir, Hold};
+use crate::climb::Hold;
 use glam::{Mat4, Vec2, Vec3};
 
 const CELL: f32 = 2.0;
@@ -19,16 +20,18 @@ pub struct Ground {
     tris: Vec<[Vec3; 3]>,
     floor: HashMap<(i32, i32), Vec<u32>>,
     wall: HashMap<(i32, i32), Vec<u32>>,
-    /// Freerun guidance edges with an upward face (ledges): ends, up
-    /// face normal.
-    ledges: Vec<(Vec3, Vec3)>,
-    ledge_grid: HashMap<(i32, i32), Vec<u32>>,
+    /// Freerun guidance edges with an upward face (ledges): ends.
+    pub(crate) ledges: Vec<(Vec3, Vec3)>,
+    pub(crate) ledge_grid: HashMap<(i32, i32), Vec<u32>>,
     /// Guidance edges along walls, for climbing.
-    holds: Vec<Hold>,
-    hold_grid: HashMap<(i32, i32), Vec<u32>>,
+    pub(crate) holds: Vec<Hold>,
+    pub(crate) hold_grid: HashMap<(i32, i32), Vec<u32>>,
 }
 
-fn cell(p: Vec2) -> (i32, i32) {
+/// Height a character steps up or down without falling, metres.
+pub const STEP: f32 = 0.6;
+
+pub(crate) fn cell(p: Vec2) -> (i32, i32) {
     ((p.x / CELL).floor() as i32, (p.y / CELL).floor() as i32)
 }
 
@@ -117,132 +120,6 @@ impl Ground {
         }
     }
 
-    /// A ledge to jump up onto from `pos` running along `fwd` (unit): the
-    /// nearest guidance edge ahead within `reach` metres whose top is `min`
-    /// to `max` above the feet and has floor just behind it. Returns the
-    /// landing point on top.
-    pub fn ledge_ahead(&self, pos: Vec3, fwd: Vec2, reach: f32, min: f32, max: f32) -> Option<Vec3> {
-        let probe = pos.truncate() + fwd * reach * 0.5;
-        let (c0, c1) = (cell(probe - Vec2::splat(reach)), cell(probe + Vec2::splat(reach)));
-        let mut best: Option<(f32, Vec3)> = None;
-        for x in c0.0..=c1.0 {
-            for y in c0.1..=c1.1 {
-                for &i in self.ledge_grid.get(&(x, y)).into_iter().flatten() {
-                    let (a, b) = self.ledges[i as usize];
-                    // closest point of the edge to the line ahead
-                    let ab = b - a;
-                    let t = if ab.length_squared() > 1e-6 { ((pos - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
-                    let q = a + ab * t;
-                    let d = (q - pos).truncate();
-                    let (dist, dz) = (d.length(), q.z - pos.z);
-                    if dist < 0.3 || dist > reach || dz < min || dz > max || d.normalize().dot(fwd) < 0.8 {
-                        continue;
-                    }
-                    // somewhere to stand just past the edge
-                    let land = q + (fwd * 0.45).extend(0.0);
-                    let Some(z) = self.floor_below(land + Vec3::Z * 0.5) else { continue };
-                    if (z - q.z).abs() > 0.3 {
-                        continue;
-                    }
-                    if best.is_none_or(|(bd, _)| dist < bd) {
-                        best = Some((dist, land.with_z(z)));
-                    }
-                }
-            }
-        }
-        best.map(|b| b.1)
-    }
-
-    fn holds_near(&self, p: Vec3, r: f32) -> impl Iterator<Item = &Hold> + '_ {
-        let (c0, c1) = (cell(p.truncate() - Vec2::splat(r)), cell(p.truncate() + Vec2::splat(r)));
-        let mut ids: Vec<u32> =
-            (c0.0..=c1.0).flat_map(|x| (c0.1..=c1.1).map(move |y| (x, y))).filter_map(|k| self.hold_grid.get(&k)).flatten().copied().collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids.into_iter().map(|i| &self.holds[i as usize])
-    }
-
-    /// A hold to start climbing from feet at `pos` facing `fwd`: a wall
-    /// edge facing us within 0.9 m, 1.3-2.6 m up.
-    pub fn mount_hold(&self, pos: Vec3, fwd: Vec2) -> Option<Hold> {
-        self.holds_near(pos, 1.5)
-            .filter(|h| h.wall.dot(fwd) < -0.7)
-            .filter_map(|h| {
-                let q = h.nearest(pos);
-                let d = (q - pos).truncate();
-                let dz = q.z - pos.z;
-                (d.length() < 0.9 && d.dot(fwd) > 0.0 && (1.3..=2.6).contains(&dz)).then_some((dz, *h))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|x| x.1)
-    }
-
-    /// A hold to grab while falling at `pos` facing `fwd`: a wall edge
-    /// facing us within 0.7 m ahead, 1.3-2.2 m above the feet.
-    pub fn catch_hold(&self, pos: Vec3, fwd: Vec2) -> Option<Hold> {
-        self.holds_near(pos, 1.5)
-            .filter(|h| h.wall.dot(fwd) < -0.5)
-            .filter_map(|h| {
-                let q = h.nearest(pos);
-                let d = (q - pos).truncate();
-                let dz = q.z - pos.z;
-                (d.length() < 0.7 && d.dot(fwd) > -0.1 && (1.3..=2.2).contains(&dz)).then_some((d.length(), *h))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|x| x.1)
-    }
-
-    /// The next hold from hands at `hand` on a wall facing `n`, moving
-    /// `dir`: an edge on the same wall plane, 0.5-2 m away that way.
-    pub fn next_hold(&self, hand: Vec3, n: Vec2, dir: Dir) -> Option<(Hold, Vec3)> {
-        // facing f = -n, the character's right is (f.y, -f.x)
-        let right = Vec2::new(-n.y, n.x);
-        let probe = match dir {
-            Dir::Up => hand + Vec3::Z * 1.2,
-            Dir::Down => hand - Vec3::Z * 1.2,
-            Dir::Left => hand - (right * 1.2).extend(0.0),
-            Dir::Right => hand + (right * 1.2).extend(0.0),
-        };
-        self.holds_near(probe, 2.0)
-            .filter(|h| h.wall.dot(n) > 0.8)
-            .filter_map(|h| {
-                let q = h.nearest(probe);
-                let d = q - hand;
-                let (lat, up, out) = (d.truncate().dot(right), d.z, d.truncate().dot(n));
-                let ok = out.abs() < 0.35
-                    && match dir {
-                        Dir::Up => (0.5..=2.0).contains(&up) && lat.abs() < 0.5,
-                        Dir::Down => (-2.0..=-0.5).contains(&up) && lat.abs() < 0.5,
-                        Dir::Left => (-2.0..=-0.5).contains(&lat) && up.abs() < 0.5,
-                        Dir::Right => (0.5..=2.0).contains(&lat) && up.abs() < 0.5,
-                    };
-                ok.then_some((q.distance(probe), *h, q))
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|x| (x.1, x.2))
-    }
-
-    /// Debug: standing spots from which a hold can be mounted, nearest
-    /// `near` first (spot, facing).
-    pub fn mount_spots(&self, near: Vec3, count: usize) -> Vec<(Vec3, Vec2)> {
-        let mut out: Vec<(f32, Vec3, Vec2)> = self
-            .holds
-            .iter()
-            .filter_map(|h| {
-                let q = (h.a + h.b) / 2.0;
-                let stand = q + (h.wall * 0.6).extend(0.0);
-                let z = self.floor_below(stand.with_z(q.z - 1.2))?;
-                let dz = q.z - z;
-                // and another hold above to climb to
-                let hand = q;
-                let stacked = self.next_hold(hand, h.wall, Dir::Up).is_some();
-                ((1.4..=2.5).contains(&dz) && stacked).then(|| (stand.with_z(z).distance(near), stand.with_z(z), -h.wall))
-            })
-            .collect();
-        out.sort_by(|a, b| a.0.total_cmp(&b.0));
-        out.into_iter().take(count).map(|x| (x.1, x.2)).collect()
-    }
-
     /// Nearest hit of the segment `o + t*d`, t in 0..1, with any collision
     /// triangle (floors and walls).
     pub fn ray(&self, o: Vec3, d: Vec3) -> Option<f32> {
@@ -312,5 +189,47 @@ impl Ground {
             n = -n;
         }
         Some((((t - radius) / len).max(0.0), n))
+    }
+
+    /// Horizontal move with wall sliding, swept at knee and chest height (so
+    /// steps and curbs pass).
+    pub fn slide(&self, pos: Vec3, delta: Vec2) -> Vec3 {
+        const RADIUS: f32 = 0.3;
+        let blocked = |from: Vec3, d: Vec2| {
+            [0.55, 1.3]
+                .into_iter()
+                .filter_map(|h| self.sweep_wall(from + Vec3::Z * h, d, RADIUS))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+        };
+        let mut at = pos;
+        let mut d = delta;
+        for _ in 0..2 {
+            match blocked(at, d) {
+                None => {
+                    at += d.extend(0.0);
+                    break;
+                }
+                Some((f, n)) => {
+                    at += (d * f).extend(0.0);
+                    let rest = d * (1.0 - f);
+                    d = rest - n * rest.dot(n);
+                }
+            }
+        }
+        at
+    }
+
+    /// Moves a character standing at `pos` by `delta`: slides along walls
+    /// and snaps to the floor within a step. Returns the new position and
+    /// whether it left a ledge (floor more than a step below: start
+    /// falling, position not snapped). Moves onto no floor at all are
+    /// refused.
+    pub fn move_on(&self, pos: Vec3, delta: Vec2) -> (Vec3, bool) {
+        let at = self.slide(pos, delta);
+        match self.floor_below(at + Vec3::Z * STEP) {
+            Some(z) if z >= at.z - STEP => (at.with_z(z), false),
+            Some(_) => (at, true),
+            None => (pos, false),
+        }
     }
 }

@@ -13,7 +13,7 @@ use acb_anim::BuiltinTracks;
 use acb_world::Archive;
 use glam::{Mat4, Quat, Vec2, Vec3};
 
-pub type Pose = Vec<(Vec3, Quat)>;
+pub use crate::Pose;
 
 /// Cross-fade length when switching between the cycle and a one-shot.
 const FADE: f32 = 0.15;
