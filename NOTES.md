@@ -491,16 +491,39 @@ its exact byte length and by key continuity (`acbmp animstats`).
   `--at x,y,z` starts the player elsewhere; `ACBMP_TRACE=1` prints its
   state four times a simulated second. Roof at (-31.3, 42.0, 7.5) next to
   the San Donato spawn plaza drops 4.5 m.
-- Freerun jumps (`acb-game/src/jump.rs`): `xx_h_run_{up,front,down}_{050,300,550}cm_foot{l,r}_to_air`
-  (takeoff, 0.13-0.2 s) and `xx_h_air_..._to_surface` (landing). Their
-  root tracks are not trajectories (run_up_050cm rises 0.87 m in place):
-  the engine flies the character. Viewer: while running, a guidance ledge
-  0.4-2.2 m up within 2 m ahead (with floor behind it) or a drop with
-  floor 1.5-5.5 m ahead triggers a jump; velocity = parabola landing on
-  the target at t = dist / 6 m/s (0.4-0.8 s); pose = takeoff clip held on
-  its last frame, landing clip at touchdown, then the run at the matching
-  phase. Kind by height/distance (up > 0.3 m, down < -1 m; 050/300/550 by
-  < 2.5 / < 4 m). Chains naturally (post -> stairs on San Donato).
+- Freerun jumps (`acb-game/src/jump.rs`), after retail's targeted jumps:
+  - Reach = `HumanSharedData::SetupJumpDetectionCurves` landing polygon
+    (fwd, up): (0.5,-5) (0.5,1.3) (3.5,1.3) (4.7,0.8) (6.0,-0.5) (8.0,-3)
+    (8.0,-5); inner points scaled by `Human::ForwardJumpDetectionScale`
+    (1.0). 10 curve slots: default source 1-3 (1 = feet, 2/3 = hands, up
+    2.5 / 3.0 m), detection type 3 slots 4-6, sources 1/2 or type 4 slots
+    7-9 (short). Search box 9 m ahead, 5 down, 3 up.
+  - Timing/arc: retail plays takeoff `xx_h_run_{dir}_{dist}_*_to_air` then
+    `xx_h_air_{dir}_{dist}_*_to_freestep[_down]` (not `_to_surface`, that
+    is onto a wall), progress = t / (len1 + len2) (InAirData +0x1e4/+0x1e8),
+    clip displacement warped onto the target (IgnoreGravity). Clip pairs
+    end: up +1.31 m (0 / 2.5 m ahead, 0.2 / 0.4 s), front -0.5 m
+    (0.5 / 2.5 / 5.2 m, 0.27 / 0.4 / 0.73 s), down -3.0 m (0.5 / 2.5 /
+    5.2 m). `Flight` blends the two nearest direction classes by height and
+    the distance classes by distance, warps the end error (horizontal
+    linear, vertical early up / late down), adds sqrt(2h/g) for extra drop;
+    closed form in elapsed time, so 60 Hz tick and --fps 144 agree exactly.
+  - Free fall: g = 9.81 (HumanInAir GetDropTime).
+  - Targets from collision floors (not guidance edges): a floor profile
+    every 5 cm on three lanes (0, +-0.25 m); up = a rise > STEP within 2 m,
+    gap = first floor past the drop (else down onto the first floor below,
+    not deeper than 3.2 m). Tops narrower than 0.6 m are centred
+    (`Ground::settle_top`). Path checked at 0.2 / 0.9 / 1.6 m above the
+    feet (feet not in the last 0.5 m), retried with the horizontal held
+    back (u^1.5..3) to go up before over a close edge; headroom 1.8 m.
+  - Gate (San Donato): bollard post at (22.9,-22.44) +1.02 m from 2.0 m:
+    up 300cm in 0.363 s, lands and stays; balcony parapet (-10.15,-0.34)
+    +1.20 m from 1.0 m: up 050cm in 0.287 s. Identical at --fps 144.
+    Thin collision railings exist (5-9 cm tops, e.g. 38.6,-53.5; gallery
+    y=-16.73 under a roof) but those tested had geometry over them.
+  - Debug: ACBMP_TRACE=1 prints jump/landed lines, ACBMP_JUMPDBG=1 the
+    profile and rejected candidates. Examples: `jumpclips` (clip lengths,
+    root displacement), `narrow` (narrow tops / thin triangles / profile).
 - Climbing (`acb-game/src/climb.rs`): guidance edges with a horizontal
   face normal are holds (wall = that normal; `top` if the other face is
   up). On-wall pose `xx_climb_wait_1m`: hands 0.5 m ahead and 1.6 m above
