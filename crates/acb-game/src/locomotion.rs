@@ -337,6 +337,47 @@ fn wrap_angle(a: f32) -> f32 {
     (a + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
 }
 
+/// `a` in (-pi, pi], the same heading.
+pub fn norm_yaw(a: f32) -> f32 {
+    let w = wrap_angle(a);
+    if w <= -std::f32::consts::PI { w + std::f32::consts::TAU } else { w }
+}
+
+/// Retail heading turn rate (rad/s) at heading errors up to [`HEADING_MIN_ANGLE`]...
+pub const HEADING_MIN_SPEED: f32 = 1.5;
+/// ...and from [`HEADING_MAX_ANGLE`] on, linear in between. Retail
+/// `HumanGround::UpdateMovementIntention` sets these on the HumanGround
+/// (Set Heading Min/Max RotationSpeed 1.5 / 4.0 * 1.5, Min/Max RotationAngle
+/// 10 / 40 degrees) and `UpdateOrientation` turns the facing by them
+/// (`RotateVectorToVectorWithAngularSpeed`: snap when the step overshoots).
+pub const HEADING_MAX_SPEED: f32 = 6.0;
+pub const HEADING_MIN_ANGLE: f32 = 0.174_532_9;
+pub const HEADING_MAX_ANGLE: f32 = 0.698_131_7;
+
+/// Turn rate (rad/s) for a heading error of `err` radians (retail curve).
+pub fn heading_speed(err: f32) -> f32 {
+    let err = err.abs();
+    if err >= HEADING_MAX_ANGLE {
+        HEADING_MAX_SPEED
+    } else if err >= HEADING_MIN_ANGLE {
+        let u = (err - HEADING_MIN_ANGLE) / (HEADING_MAX_ANGLE - HEADING_MIN_ANGLE);
+        HEADING_MIN_SPEED + (HEADING_MAX_SPEED - HEADING_MIN_SPEED) * u
+    } else {
+        HEADING_MIN_SPEED
+    }
+}
+
+/// One tick of turning `yaw` toward `want`, shortest way.
+pub fn turn_toward(yaw: f32, want: f32, dt: f32) -> f32 {
+    let err = wrap_angle(want - yaw);
+    let step = heading_speed(err) * dt;
+    if step >= err.abs() {
+        norm_yaw(want)
+    } else {
+        norm_yaw(yaw + step * err.signum())
+    }
+}
+
 fn yaw_of(m: &Mat4) -> f32 {
     let (_, r, _) = m.to_scale_rotation_translation();
     r.to_euler(glam::EulerRot::ZXY).0
@@ -512,8 +553,7 @@ impl Locomotion {
         }
         if let (Some(a), Some(w)) = (&self.action, want) {
             if a.steer {
-                let turn = 7.0 * dt;
-                *yaw = wrap_angle(*yaw + wrap_angle(w - *yaw).clamp(-turn, turn));
+                *yaw = turn_toward(*yaw, w, dt);
             }
         }
         let (delta, pose) = match self.action.is_some() {
@@ -665,8 +705,7 @@ impl Locomotion {
         let ease = 2.5 * dt;
         self.speed += (target - self.speed).clamp(-ease, ease);
         if let Some(w) = want {
-            let turn = 7.0 * dt;
-            *yaw = wrap_angle(*yaw + wrap_angle(w - *yaw).clamp(-turn, turn));
+            *yaw = turn_toward(*yaw, w, dt);
         }
         let s = self.speed;
         let ids = self.cycles();

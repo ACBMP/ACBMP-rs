@@ -51,10 +51,11 @@ pub const FALL_DAMAGE: [(f32, u32, LandingType); 4] = [
     (20.0, 200, LandingType::Fatal),
 ];
 
-/// Safe falls from this height on use the hard forward landing. Not a
-/// retail landing-type row: retail's only sub-damage height in
-/// `HumanInAir::CheckForLanding` is the 5.25 m hurt-landing cut (our
-/// reading of which landing the soft / hard animation pair splits at).
+/// Safe falls from this height on use the hard forward landing. Retail
+/// constant: `HumanInAir::IsHurtFallLandingWithoutRagdoll` (used by
+/// `CheckForLanding`) is `fall height < 5.25`; it is retail's only
+/// sub-damage landing height (the HealthSettings rows start at 8 m), so the
+/// soft / hard animation pair splits there.
 pub const HARD_LANDING: f32 = 5.25;
 
 /// Damage percentage and landing type of a fall of `height` metres.

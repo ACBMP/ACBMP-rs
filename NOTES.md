@@ -842,3 +842,28 @@ Pure, deterministic functions the server and client prediction share (no clock, 
 - Stun test `acb-net/tests/stun_map.rs`: 3 clients (loss 3 %, 60 ms): the pursuer of player 0 walks
   up, player 0 stuns it at tick 350: StunStarted + Stunned + Score 200 + pursuer's ContractLost in the
   same tick, all clients exact (0 desync).
+
+### Ground locomotion vs retail (tests/loco_map.rs)
+
+- Speeds: retail HumanGround is root-motion driven (its speed table is
+  built from the anim set, `HumanSharedData::AddSpeedTableForAnimSet`), no
+  speed tuning in data (GamePlaySettings has none). Steady speeds = cycle
+  root speeds, asserted: walk 1.90, run 5.12, sprint 6.28 m/s. The 0..3
+  speed ease (2.5/s) is still ours.
+- Heading: `HumanGround::UpdateOrientation` turns by
+  `RotateVectorToVectorWithAngularSpeed` with Min/MaxRotationSpeed and
+  Min/MaxRotationAngle (HumanGround +0xa08..+0xa14, set through the vtable;
+  ctor zeroes them). The only setter call found, in
+  `UpdateMovementIntention` (networked player heading): 1.5 / 6.0 rad/s,
+  10 / 40 degrees (flagged variant 0.975 / 3.9). We use that curve
+  (`locomotion::turn_toward`) instead of our old 7 rad/s clamp; gates
+  unchanged. The local player's own setter values are not found yet.
+- Edge stop: `TestMoveToEdgeStop..UnbalanceOnEdge` needs a narrow edge,
+  gap depth > 2.0 m and pull-down clearance: `LEDGE_STOP` = 2.0 (was 1.5).
+- Soft/hard landing at 5.25 m is retail's
+  `HumanInAir::IsHurtFallLandingWithoutRagdoll` (height < 5.25).
+- Player yaw is kept in (-180, 180] (`locomotion::norm_yaw`).
+- Retail BipedComponent (AC2MP_Generic_PlayerEntity): radius 0.4,
+  height 1.8, mass 65 (we sweep radius 0.3). Max slope / step height:
+  Havok `CharacterController::MaxSlopeAngle` exists but no data object
+  found; still ours (|nz| >= 0.6 floor, 0.6 m step).
