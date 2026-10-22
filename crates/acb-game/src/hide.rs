@@ -132,7 +132,7 @@ pub struct Hide {
 }
 
 /// Ground entry reach outside the box, metres (our choice: one stride).
-pub const ENTRY_MARGIN: f32 = 0.5;
+pub const ENTRY_MARGIN: f32 = 1.2;
 /// Air entry: no higher than this above the box top, metres.
 pub const AIR_ENTRY: f32 = 1.5;
 /// Blend-in time into the entry clip, seconds.

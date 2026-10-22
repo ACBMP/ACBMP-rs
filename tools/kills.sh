@@ -4,6 +4,8 @@
 # player line of each run. Expected (both rates):
 #   air  AirDrop2Ground, start set 6 at 36.50 20.20 5.00, lead 1.00, player at 38.01 19.65 0.02
 #   run  Run2Ground, start set 5 at 35.58 20.40 0.02, lead 0.30, player at 37.21 20.19 0.02
+#   hay  runs into haystack 13 (24.62,7), body 1 placed at 24.62,9.4: Haystack2Ground Front,
+#        start set 10 at 24.53 7.05 0.00, lead 0.40, player at 24.47 9.36 0.05
 set -u
 : "${ACBMP_SCHEMAS:=$HOME/Music/anvilforge-py/src/anvilforge/schemas}" "${ACBMP_EXE:=$HOME/Music/ACB/ACBMP.exe}"
 export ACBMP_SCHEMAS ACBMP_EXE
@@ -12,6 +14,7 @@ out=$(mktemp -d)
 runs=(
   "air|36.5,20.2,5,-90|0=e 1="
   "run|31,20.4,0.02,-90|0=w,shift,e 2.5="
+  "hay|21,7,0,-90,24.62,9.4,0,180|0=w,shift 0.8= 2.5=e 2.6="
 )
 for fps in 60 144; do
   for r in "${runs[@]}"; do

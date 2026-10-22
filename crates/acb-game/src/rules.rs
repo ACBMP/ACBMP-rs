@@ -260,7 +260,9 @@ pub fn check(act: Act, killer: &Actor, victim: &Actor, rel: Relation, rules: &Ru
     let dz = victim.pos.z - killer.pos.z;
     let dir = d.normalize_or_zero();
     // very close victims are always "ahead"
-    let in_cone = dist < BAND_CLOSE || dir.dot(killer.facing()) >= TARGET_CONE_COS;
+    // from a hiding spot all around (our reading: the hidden killer has no
+    // facing to aim with; retail grabs front or back by the victim's side)
+    let in_cone = dist < BAND_CLOSE || killer.stance == Stance::Hidden || dir.dot(killer.facing()) >= TARGET_CONE_COS;
     let side = side(killer.pos, victim.pos, victim.yaw);
     let running = killer.speed >= RUN_SPEED;
     let (situation, reach, approach) = match (killer.stance, victim.stance) {

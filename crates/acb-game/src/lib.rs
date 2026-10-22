@@ -344,10 +344,19 @@ impl World {
             let (at, yaw) = match setup.at.as_deref() {
                 Some([x, y, z]) => (Vec3::new(*x, *y, *z), yaw),
                 // facing as a compass-free angle: 0 = +Y, 90 = -X
-                Some([x, y, z, deg]) => (Vec3::new(*x, *y, *z), deg.to_radians()),
+                Some([x, y, z, deg, ..]) => (Vec3::new(*x, *y, *z), deg.to_radians()),
                 _ => (m.w_axis.truncate(), yaw),
             };
             w.players.push(Player::new(0, at, yaw, Locomotion::new(clips, &body.character.skeleton)));
+        }
+        // further x,y,z,yaw groups place bodies 1, 2, ... (scripted scenes)
+        if let Some(rest) = setup.at.as_deref().filter(|a| a.len() > 4).map(|a| &a[4..]) {
+            for (k, c) in rest.chunks_exact(4).enumerate() {
+                if let Some(b) = w.bodies.get_mut(k + 1) {
+                    let m = Mat4::from_rotation_translation(glam::Quat::from_rotation_z(c[3].to_radians()), Vec3::new(c[0], c[1], c[2]));
+                    (b.spawn, b.entity) = (m, m);
+                }
+            }
         }
         if loco.is_some() {
             let t = std::time::Instant::now();
