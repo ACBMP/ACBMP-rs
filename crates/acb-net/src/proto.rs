@@ -261,6 +261,10 @@ pub enum Reject {
     Angle = 5,
     /// Already in a kill.
     Busy = 6,
+    /// A player, but not the contract's target.
+    NotTarget = 7,
+    /// A stun on a player who is not hunting the stunner.
+    NotPursuer = 8,
 }
 
 impl Reject {
@@ -272,6 +276,8 @@ impl Reject {
             R::Range => Reject::Range,
             R::Height => Reject::Height,
             R::Angle => Reject::Angle,
+            R::NotTarget => Reject::NotTarget,
+            R::NotPursuer => Reject::NotPursuer,
         }
     }
 
@@ -283,6 +289,8 @@ impl Reject {
             4 => "height",
             5 => "angle",
             6 => "busy",
+            7 => "not your target",
+            8 => "not your pursuer",
             _ => "?",
         }
     }

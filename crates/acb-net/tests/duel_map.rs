@@ -162,7 +162,7 @@ fn duel_over_lossy_localhost() {
     let ev = |kind: EventKind, x: u8, y: u8| a.events.iter().find(|e| e.kind == kind && e.a == x && e.b == y).map(|e| e.tick);
     // the non-target kill: refused for the relation, before any contract
     let first = ev(EventKind::ContractAssigned, 0, 1).expect("A got a contract on B");
-    let rel = ev(EventKind::KillRejected, 0, Reject::Relation as u8).expect("relation rejection");
+    let rel = ev(EventKind::KillRejected, 0, Reject::NotTarget as u8).expect("not your target");
     assert!(rel < first);
     // the dodge: predicted, refused for range, rolled back
     assert!(ev(EventKind::KillRejected, 0, Reject::Range as u8).is_some(), "{:?}", a.stats);
