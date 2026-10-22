@@ -52,7 +52,9 @@ On a wall: W/S/A/D climb up/down/left/right (fixed directions, not camera
 relative); F + S or F alone jumps back off the wall, F + A/D jumps sideways
 across a gap, F + W leaps to a hold above; Shift + A/D at the end of an edge
 also side-jumps. Walk into a haystack in high profile (or drop onto it) to
-hide; any move key leaves. Walking slowly among the crowd blends you. Stand
+hide; any move key leaves. Bushes count as haystacks too (one is right
+behind the first San Donato spawn): sunk into one with the legs out of sight
+means hidden, not stuck; any move key hops out. Walking slowly among the crowd blends you. Stand
 or walk (low profile) next to a bench seat and press F to sit (blended);
 E kills a passer-by from the bench, a fresh move key stands up.
 
