@@ -174,7 +174,8 @@ fn duel_over_lossy_localhost() {
     let respawn = a.events.iter().find(|e| e.kind == EventKind::Respawn && e.a == 1 && e.tick > death).expect("B respawned").tick;
     assert_eq!(respawn - death, acb_game::mode::ticks(RULES.respawn_delay));
     let again = a.events.iter().find(|e| e.kind == EventKind::ContractAssigned && e.a == 0 && e.tick > death).expect("A reassigned").tick;
-    assert!(again >= death + acb_game::mode::ticks(acb_game::rules::MIN_WAIT_TIME));
+    // the contract cooldown already counts down in the death tick
+    assert!(again + 1 >= death + acb_game::mode::ticks(acb_game::rules::MIN_WAIT_TIME), "{again} {death}");
     let g = a.game.as_ref().unwrap();
     assert_eq!((g.players[0].score, g.players[1].score), (100, 0));
     // B is where A sees it, away from A

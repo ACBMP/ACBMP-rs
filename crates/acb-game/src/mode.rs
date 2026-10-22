@@ -136,7 +136,8 @@ impl Match {
         for e in self.contracts.on_death(victim, Some(killer)) {
             self.events.push(MatchEvent::Contract(e));
         }
-        self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1));
+        // +1: the clock part of this same tick already counts down once
+        self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1) + 1);
     }
 
     /// The spawn for `p`: the one furthest from the nearest other living
@@ -210,7 +211,8 @@ mod tests {
         assert!(!m.alive(1));
         assert_eq!(m.contracts.hunters[0].target, None);
         // victim at the old place: the spawn furthest from player 0 (index 1)
-        let back = run(&mut m, 60, &pos);
+        // (on_action outside a step: one extra countdown tick)
+        let back = run(&mut m, 61, &pos);
         assert_eq!(back, vec![(1, 1)]);
         assert!(m.alive(1));
         // both cool down MinWaitTime, then hunt each other again
