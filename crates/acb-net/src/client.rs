@@ -552,6 +552,36 @@ impl Client {
         }
     }
 
+    /// The HUD line for the own player from the predicted match state
+    /// (a pure function of the sim tick, so the same at any frame rate):
+    /// target and its distance with the compass fill, scores, time left,
+    /// respawn countdown and the last event that concerned this player.
+    /// `None` outside a match.
+    pub fn hud(&self, world: &World) -> Option<String> {
+        let m = world.mode.as_ref()?;
+        let me = self.slot;
+        let pos = |p: usize| world.players.get(p).map(|p| p.pos).unwrap_or_default();
+        let mut s = match (m.respawn.get(me).copied().flatten(), m.contracts.hunters.get(me).and_then(|h| h.target)) {
+            (Some(r), _) => format!("respawn in {:.1} s", r as f32 / TICK_HZ as f32),
+            (None, Some(t)) => {
+                let l = acb_game::rules::locate(pos(me), pos(t), false, false);
+                format!("target p{t} {:.1} m compass {:.0}%", l.dist, l.fill * 100.0)
+            }
+            (None, None) => "no target".into(),
+        };
+        let pursued = (0..m.contracts.hunters.len()).filter(|&h| h != me && m.contracts.hunters[h].target == Some(me)).count();
+        if pursued > 0 {
+            s += &format!(" | pursued x{pursued}");
+        }
+        let scores: Vec<String> = m.score.iter().enumerate().map(|(i, v)| if i == me { format!("[p{i} {v}]") } else { format!("p{i} {v}") }).collect();
+        let left = m.ticks_left() / TICK_HZ;
+        s += &format!(" | {} | {}:{:02}", scores.join(" "), left / 60, left % 60);
+        if let Some(msg) = &self.last_message {
+            s += &format!(" | {msg}");
+        }
+        Some(s)
+    }
+
     /// Placement and pose to draw remote player `j` with: its confirmed
     /// ticks ~100 ms behind the newest, interpolated. `None` for the own
     /// player (draw the predicted body) or before there is any.
