@@ -90,6 +90,7 @@ pub fn game_state(m: &Match) -> GameState {
                 health: m.health[i].min(255) as u8,
                 chase: m.chases[i].map_or(NONE, |c| c.phase as u8),
                 escape: m.chases[i].map_or(0, |c| (c.coef.clamp(0.0, 1.0) * 65535.0).round() as u16),
+                threat: (m.threat[i].clamp(0.0, 1.0) * 65535.0).round() as u16,
             })
             .collect(),
     }
@@ -107,6 +108,8 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) {
         m.score[i] = p.score as u32;
         m.respawn[i] = (p.respawn > 0).then_some(p.respawn as u32);
         m.health[i] = p.health as u32;
+        m.threat[i] = p.threat as f32 / 65535.0;
+        m.threat_of[i] = h.target;
         m.chases[i] = match (acb_game::mode::ChasePhase::from_u8(p.chase), h.target) {
             (Some(phase), Some(target)) => Some(acb_game::mode::Chase { target, coef: p.escape as f32 / 65535.0, phase }),
             _ => None,

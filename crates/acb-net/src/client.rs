@@ -576,6 +576,9 @@ impl Client {
             }
             (None, None) => "no target".into(),
         };
+        if m.contracts.hunters.get(me).is_some_and(|h| h.target.is_some()) && m.chases.get(me).is_some_and(|c| c.is_none()) {
+            s += &format!(" | threat {:.0}%", m.threat.get(me).copied().unwrap_or(0.0) * 100.0);
+        }
         let pursued = (0..m.contracts.hunters.len()).filter(|&h| h != me && m.contracts.hunters[h].target == Some(me)).count();
         if pursued > 0 {
             s += &format!(" | pursued x{pursued}");
