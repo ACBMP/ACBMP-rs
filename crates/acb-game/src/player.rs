@@ -463,12 +463,13 @@ pub(crate) fn drive(
             let why = if up.is_some() { "up" } else { "gap" };
             let across = (ledge && running && up.is_none()).then(|| jump::target(ground, clips, p.pos, fwd, true)).flatten();
             // low profile at a drop (a roof edge, a beam end): stop at the
-            // edge; the jump button lowers onto the wall below or steps off
+            // edge (a beam end at any drop); the jump button lowers onto the
+            // wall below or steps off
             let deep = |g: &Ground| match g.floor_below(to + Vec3::Z * 0.1) {
                 Some(f) => p.pos.z - f > LEDGE_STOP,
                 None => true,
             };
-            if ledge && !input.run && up.is_none() && len > 1e-4 && deep(ground) {
+            if ledge && !input.run && up.is_none() && len > 1e-4 && (beam.is_some() || deep(ground)) {
                 let along = delta / len;
                 if input.jump {
                     let hang = clipset.climbs.as_ref().and_then(|_| ground.ledge_hold(p.pos, along));
