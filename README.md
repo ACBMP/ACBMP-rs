@@ -75,8 +75,9 @@ Known gaps (Phase 2): no on-screen HUD; respawn (5 s) and start (3 s) delays
 are placeholders; blending uses retail's group polygons but our crowd forms
 its groups by distance (retail groups not traced); bench kill placement is
 our stand-in (clips lack a Reference track), ledge kills and beam-end edge animations are missing; chase start uses
-the retail threat-meter rates but our awareness (distance ramp only, no facing cones or speed ramp, no
-lock-on 0.99) and the meter is not replicated; walkable slope and step height are still ours (retail values not
+the retail threat meter (rates, in-air rates, awareness with distance ramp, facing cones and speed ramp; HUD
+"threat NN%"), but which vectors the facing cones compare is our reading and there is no target lock-on, so
+the retail lock-on 0.99 (KillerDiscoveredEvent) is missing; walkable slope and step height are still ours (retail values not
 found).
 
 Crates:

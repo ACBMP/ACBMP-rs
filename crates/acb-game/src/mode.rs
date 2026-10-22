@@ -50,6 +50,55 @@ pub const THREAT_RATE_FAR: f32 = -0.25;
 /// (`GameInfo::GetTargetAwearness` 0x011850aa), full up to close, 0 at far.
 pub const THREAT_CLOSE: f32 = 10.0;
 pub const THREAT_FAR: f32 = 35.0;
+/// `ThreatDistanceDowning`: awareness loss at [`THREAT_FAR`] and beyond.
+pub const THREAT_DIST_DOWNING: f32 = 4.0;
+/// `ThreatToTargetDowning` / `ThreatBehindTargetDowning`: the two facing terms.
+pub const THREAT_TO_DOWNING: f32 = 3.0;
+pub const THREAT_BEHIND_DOWNING: f32 = 2.0;
+/// `ThreatLowSpeed` / `ThreatHighSpeed` (m/s): the facing terms ramp in
+/// with the hunter's speed between these.
+pub const THREAT_LOW_SPEED: f32 = 2.0;
+pub const THREAT_HIGH_SPEED: f32 = 4.0;
+/// Facing cones (deg, inner/outer) of `GetTargetAwearness` (retail
+/// defaults, GameParameters +0x78/+0x7c and +0x84/+0x88).
+pub const THREAT_TO_CONE: (f32, f32) = (45.57, 154.16);
+pub const THREAT_BEHIND_CONE: (f32, f32) = (25.84, 134.43);
+/// `ThreatmeterInAirFastSpeed` / `InAirSlowSpeed` (seen) and the OOS pair.
+pub const THREAT_RATE_AIR: [f32; 2] = [0.65, 0.25];
+pub const THREAT_RATE_AIR_OOS: [f32; 2] = [-0.066, -0.0825];
+/// `KillerDiscoveredEvent`: the meter of a hunter its target locked on.
+pub const THREAT_DISCOVERED: f32 = 0.99;
+
+fn ramp(x: f32, lo: f32, hi: f32) -> f32 {
+    ((x - lo) / (hi - lo)).clamp(0.0, 1.0)
+}
+
+/// 0 inside the cone of half-angle `cone.0`, 1 beyond `cone.1`.
+fn cone(dot: f32, cone: (f32, f32)) -> f32 {
+    let (a, b) = (cone.0.to_radians().cos(), cone.1.to_radians().cos());
+    ((a - dot) / (a - b)).clamp(0.0, 1.0)
+}
+
+/// How aware `target` is of `hunter`, 0..=1 (`GameInfo::GetTargetAwearness`
+/// Mac 0x011850aa): 1 / sqrt(1 + distance + to + behind) with a distance
+/// term ramping [`THREAT_CLOSE`]..[`THREAT_FAR`] up to
+/// [`THREAT_DIST_DOWNING`], and two facing terms scaled by the hunter's
+/// speed ramp: "to" (hunter moving toward the target, 0 straight at it
+/// and growing outside [`THREAT_TO_CONE`]) and "behind" (full when the
+/// hunter is within [`THREAT_BEHIND_CONE`] behind the target). Which
+/// vectors retail dots is our reading of the decompile.
+pub fn awareness(hunter: &Presence, target: &Presence) -> f32 {
+    let d = (target.pos - hunter.pos).truncate();
+    let dist = d.length();
+    let fwd = |yaw: f32| glam::Vec2::new(-yaw.sin(), yaw.cos());
+    let dir = if dist > 1e-4 { d / dist } else { glam::Vec2::ZERO };
+    let speed = ramp(hunter.speed, THREAT_LOW_SPEED, THREAT_HIGH_SPEED);
+    let far = THREAT_DIST_DOWNING * ramp(dist, THREAT_CLOSE, THREAT_FAR);
+    let toward = fwd(hunter.yaw).dot(dir);
+    let to = if toward > 0.0 && dist > 0.0 { THREAT_TO_DOWNING * speed * cone(toward, THREAT_TO_CONE) } else { 0.0 };
+    let behind = THREAT_BEHIND_DOWNING * speed * (1.0 - cone(fwd(target.yaw).dot(dir), THREAT_BEHIND_CONE));
+    1.0 / (1.0 + far + to + behind).sqrt()
+}
 /// In sight for the escape meter: line of sight within this range (our
 /// reading: retail `GameBrick::CanSee` is a head-to-head ray; we bound it by
 /// the compass `DetectionRange`).
@@ -126,6 +175,12 @@ pub struct Presence {
     pub blended: bool,
     /// High profile on foot (running): starts a chase when seen.
     pub running: bool,
+    /// Facing (entity +Y is (-sin yaw, cos yaw)).
+    pub yaw: f32,
+    /// Horizontal speed, m/s.
+    pub speed: f32,
+    /// Jumping or falling.
+    pub in_air: bool,
 }
 
 impl Presence {
@@ -170,6 +225,9 @@ pub struct Match {
     /// Per hunter: threat meter 0..=1 toward its target; a full meter
     /// starts the chase (`GBrick_Escape::Update`, StartChaseAtFullThreat).
     pub threat: Vec<f32>,
+    /// Per hunter: the target its threat meter is toward (a new target
+    /// starts from 0).
+    pub threat_of: Vec<Option<usize>>,
     pub over: bool,
     /// This tick's decisions (cleared at every step).
     pub events: Vec<MatchEvent>,
@@ -192,6 +250,7 @@ impl Match {
             health: vec![FULL_HEALTH; players],
             chases: vec![None; players],
             threat: vec![0.0; players],
+            threat_of: vec![None; players],
             over: false,
             events: Vec::new(),
         }
@@ -289,6 +348,10 @@ impl Match {
                 self.threat[h] = 0.0;
                 continue;
             };
+            if self.threat_of[h] != Some(t) {
+                self.threat_of[h] = Some(t);
+                self.threat[h] = 0.0;
+            }
             if self.chases[h].is_some_and(|c| c.target != t) {
                 self.chases[h] = None;
             }
@@ -298,11 +361,14 @@ impl Match {
                 None => {
                     let seen = dist <= SIGHT_RANGE && los(t, h);
                     let state = if who[h].running { 0 } else if who[h].hidden || who[h].blended { 2 } else { 1 };
-                    let aware = if seen { ((THREAT_FAR - dist) / (THREAT_FAR - THREAT_CLOSE)).clamp(0.0, 1.0) } else { 0.0 };
-                    let rate = match (seen, aware > 0.0) {
-                        (false, _) => THREAT_RATE_OOS[state],
-                        (true, false) => THREAT_RATE_FAR,
-                        (true, true) => THREAT_RATE[state],
+                    let aware = if seen && dist <= THREAT_FAR { awareness(&who[h], &who[t]) } else { 0.0 };
+                    let fast = who[h].running as usize ^ 1;
+                    let rate = match (seen, aware > 0.0, who[h].in_air) {
+                        (false, _, true) => THREAT_RATE_AIR_OOS[fast],
+                        (false, _, false) => THREAT_RATE_OOS[state],
+                        (true, false, _) => THREAT_RATE_FAR,
+                        (true, true, true) => THREAT_RATE_AIR[fast],
+                        (true, true, false) => THREAT_RATE[state],
                     };
                     let step = if rate > 0.0 { rate * aware } else { rate * (2.0 - aware).max(1.0) };
                     self.threat[h] = (self.threat[h] + step * crate::DT).clamp(0.0, 1.0);
@@ -515,5 +581,52 @@ mod tests {
         let _ = run(&mut m, 1, &pos);
         assert!(m.over);
         assert_eq!(m.events.last(), Some(&MatchEvent::Over { winner: Some(h) }));
+    }
+
+    #[test]
+    fn awareness_terms() {
+        let t = Presence::at(Vec3::ZERO);
+        // close and slow: fully aware
+        let h = Presence::at(Vec3::new(-5.0, 0.0, 0.0));
+        assert!((awareness(&h, &t) - 1.0).abs() < 1e-6);
+        // at the far distance: 1 / sqrt(1 + 4)
+        let far = Presence::at(Vec3::new(-35.0, 0.0, 0.0));
+        assert!((awareness(&far, &t) - 1.0 / 5f32.sqrt()).abs() < 1e-5);
+        // fast, behind the target (target faces +Y, hunter at -Y), running
+        // straight at it: only the behind term, 1 / sqrt(1 + 2)
+        let h = Presence { pos: Vec3::new(0.0, -5.0, 0.0), speed: 5.0, ..Default::default() };
+        assert!((awareness(&h, &t) - 1.0 / 3f32.sqrt()).abs() < 1e-5);
+        // fast, in front of the target, running straight at it: aware
+        let h = Presence { pos: Vec3::new(0.0, 5.0, 0.0), yaw: std::f32::consts::PI, speed: 5.0, ..Default::default() };
+        assert!((awareness(&h, &t) - 1.0).abs() < 1e-5);
+        // half the speed ramp halves the terms
+        let h = Presence { pos: Vec3::new(0.0, -5.0, 0.0), speed: 3.0, ..Default::default() };
+        assert!((awareness(&h, &t) - 1.0 / 2f32.sqrt()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn threat_in_air_and_retarget() {
+        let mut m = m(3);
+        m.config.time_limit = 100.0;
+        let mut who = vec![Presence::at(Vec3::ZERO), Presence::at(Vec3::new(20.0, 0.0, 0.0)), Presence::at(Vec3::new(0.0, 30.0, 0.0))];
+        let los = |_: usize, _: usize| true;
+        for _ in 0..30 {
+            m.tick(&who, &los);
+        }
+        let h = 0;
+        let t = m.contracts.hunters[h].target.unwrap();
+        who[h].pos = who[t].pos - Vec3::new(8.0, 0.0, 0.0);
+        who[h].running = true;
+        who[h].in_air = true;
+        // InAirFastSpeed 0.65/s at full awareness: 1 s -> 0.65
+        for _ in 0..60 {
+            m.tick(&who, &los);
+        }
+        assert!((m.threat[h] - 0.65).abs() < 1e-3, "{}", m.threat[h]);
+        // a new target starts the meter from 0
+        let other = (0..3).find(|&p| p != h && p != t).unwrap();
+        m.contracts.hunters[h].target = Some(other);
+        m.tick(&who, &los);
+        assert!(m.threat[h] < 0.05, "{}", m.threat[h]);
     }
 }

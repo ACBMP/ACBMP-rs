@@ -521,7 +521,7 @@ impl World {
             let who: Vec<mode::Presence> = self
                 .players
                 .iter()
-                .map(|p| mode::Presence { pos: p.pos, hidden: p.hidden, blended: p.blended, running: p.moved >= rules::RUN_SPEED && p.kill.is_none() })
+                .map(|p| mode::Presence { pos: p.pos, hidden: p.hidden, blended: p.blended, running: p.moved >= rules::RUN_SPEED && p.kill.is_none(), yaw: p.yaw, speed: p.moved, in_air: p.loco.airborne() || p.flight.is_some() })
                 .collect();
             let ground = self.ground.as_ref();
             // head to head (retail GameBrick::CanSee); no collision: clear

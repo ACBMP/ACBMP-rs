@@ -952,3 +952,17 @@ Pure, deterministic functions the server and client prediction share (no clock, 
   the winner check is by slot (5% loss can delay "a"'s join so "b" gets slot 0); B turns at 3.4 s so A
   always mispredicts the dodge. 20/20 passes, kill at tick 516 every run. tools/duel.sh still feeds viewer
   keys in real time (kill tick varies there).
+
+## Threat meter finished (2026-10-22, threat)
+- `mode::awareness` = GameInfo::GetTargetAwearness 011850aa: 1/sqrt(1 + far + to + behind). far =
+  ThreatDistanceDowning 4 * ramp(dist, 10, 35); to = ThreatToTargetDowning 3 * speedramp * cone(hunter
+  facing . dir-to-target, 45.57/154.16 deg) when the dot > 0; behind = ThreatBehindTargetDowning 2 *
+  speedramp * (1 - cone(target facing . dir hunter->target, 25.84/134.43 deg)); speedramp = hunter speed
+  ThreatLowSpeed 2 .. ThreatHighSpeed 4 m/s. The decompile shows the cone ramps as (cosA - dot)/(cosA - cosB);
+  which vectors are dotted (+0x10 of the 0xb0 behaviour table) is our reading. Beyond 35 m: FarSpeed.
+- In air (Presence.in_air = loco airborne or freerun flight): InAirFast 0.65 / InAirSlow 0.25 seen,
+  -0.066 / -0.0825 OOS; fast = running.
+- New target -> meter 0 (`Match::threat_of`). Lock-on 0.99 (THREAT_DISCOVERED) NOT wired: no target
+  lock/selection exists in our code.
+- Wire v6: PlayerGame.threat u16 (*65535), client applies it with the server state. HUD: " | threat NN%"
+  while holding a contract and not chasing.
