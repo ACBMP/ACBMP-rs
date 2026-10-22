@@ -627,6 +627,12 @@ impl Client {
     }
 
     /// The tick remote players are drawn at.
+    /// The confirmed tick and where its crowd NPCs stand (the crowd is
+    /// not in snapshots: every peer simulates it from the applied inputs).
+    pub fn confirmed_crowd(&self) -> Option<(u64, Vec<glam::Vec3>)> {
+        self.confirmed.as_ref().map(|c| (c.tick, c.crowd_positions()))
+    }
+
     pub fn remote_tick(&self) -> f64 {
         self.interp
     }
