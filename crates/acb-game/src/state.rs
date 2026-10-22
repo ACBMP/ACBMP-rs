@@ -46,6 +46,13 @@ struct BodyState {
     prev_pose: Pose,
 }
 
+impl Saved {
+    /// Where the saved crowd NPCs stand (bodies with a wanderer, in order).
+    pub fn crowd_positions(&self) -> Vec<Vec3> {
+        self.bodies.iter().filter(|b| b.agent.is_some()).map(|b| b.entity.w_axis.truncate()).collect()
+    }
+}
+
 impl World {
     /// Saves the mutable state (see [`Saved`]).
     pub fn save(&self) -> Saved {

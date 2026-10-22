@@ -235,6 +235,23 @@ fn by_name(archive: &Archive, ty: &str, name: &str) -> Option<u32> {
 }
 
 impl World {
+    /// Restarts every crowd NPC from `seed` (NPC `i` from `seed + i + 1`;
+    /// seed 0 is what [`World::load`] builds). Server and clients of a
+    /// match call this with the same seed, so they build the same crowd.
+    pub fn seed_crowd(&mut self, seed: u64) {
+        let Some(crowd) = &self.crowd else { return };
+        let mut i = 0u64;
+        for b in self.bodies.iter_mut().filter(|b| b.agent.is_some()) {
+            let agent = Agent::new(&crowd.nav, seed.wrapping_add(i + 1));
+            i += 1;
+            b.entity = agent.entity();
+            b.spawn = b.entity;
+            let world = b.entity * b.model;
+            (b.world, b.prev_world) = (world, world);
+            b.agent = Some(agent);
+        }
+    }
+
     /// Places the characters (and with `play` loads the player's clips and
     /// the map collision).
     pub fn load(archive: &Archive, setup: &Setup) -> anyhow::Result<World> {
@@ -468,9 +485,19 @@ impl World {
             }
         }
         // blending: walking among a crowd group (NPCs, persona lookalikes)
-        let npcs: Vec<Vec3> = self.bodies.iter().skip(n_players).filter(|b| b.scripted.is_none()).map(|b| b.entity.w_axis.truncate()).collect();
+        let npcs: Vec<rules::Member> = self
+            .bodies
+            .iter()
+            .skip(n_players)
+            .filter(|b| b.scripted.is_none())
+            .map(|b| {
+                let f = b.entity.y_axis;
+                rules::Member { pos: b.entity.w_axis.truncate(), yaw: (-f.x).atan2(f.y) }
+            })
+            .collect();
+        let polygons = if npcs.len() >= rules::BLEND_MIN_GROUP { rules::blend_polygons(&npcs) } else { Vec::new() };
         for p in &mut self.players {
-            p.blended = p.hide.is_none() && rules::blended(&p.actor(), npcs.iter().copied());
+            p.blended = p.hide.is_none() && rules::blended(&p.actor(), &polygons);
         }
         if let Some(m) = &mut self.mode {
             for (k, v, set) in actions {

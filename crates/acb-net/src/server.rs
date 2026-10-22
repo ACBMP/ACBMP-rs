@@ -37,6 +37,8 @@ pub struct ServeConfig {
     /// A match (duel with 2 players): contracts, scores, respawns, limits.
     /// `None`: free play.
     pub rules: Option<acb_game::mode::MatchConfig>,
+    /// NPCs every peer simulates (0: none).
+    pub crowd: CrowdConfig,
 }
 
 /// Ticks of applied inputs a snapshot repeats at most.
@@ -150,12 +152,12 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
         .map(|(i, p)| Slot { name: p.name.clone(), character: p.character.clone(), at: cfg.at.get(i).copied().flatten() })
         .collect();
     let t = Instant::now();
-    let mut world = game::load_world(&archive, &slots, builtins.as_ref(), cfg.rules)?;
+    let mut world = game::load_world(&archive, &slots, builtins.as_ref(), cfg.rules, cfg.crowd)?;
     if let Some(m) = &world.mode {
         eprintln!("serve: match {:?} on {} player spawns", m.config, m.spawns.len());
     }
     eprintln!("serve: world with {} players loaded in {:.1}s", world.players.len(), t.elapsed().as_secs_f64());
-    let start = Msg::Start { map: map_name.clone(), snapshot_every: cfg.snapshot_every as u8, slots: slots.clone(), rules: cfg.rules }.encode();
+    let start = Msg::Start { map: map_name.clone(), snapshot_every: cfg.snapshot_every as u8, slots: slots.clone(), rules: cfg.rules, crowd: cfg.crowd }.encode();
     let mut last_start = Instant::now() - Duration::from_secs(1);
     let wait = Instant::now();
     while !peers.iter().all(|p| p.ready) {

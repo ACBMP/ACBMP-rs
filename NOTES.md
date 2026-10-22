@@ -910,3 +910,23 @@ Pure, deterministic functions the server and client prediction share (no clock, 
   escape N%", hidden/blended, health.
 - Tests: `acb-game/tests/hide_map.rs` (enter/exit, haystack kill, blend, fatal fall), mode tests
   `escape_scores_and_reassigns`, `falls_hurt_and_kill`, rules `blend_rules`, `hidden_killer_all_around`.
+
+## Online crowd and retail blend groups (proto v4)
+- `acbmp serve --crowd N [--crowd-seed S]`: `Start` carries `CrowdConfig { count u16, seed u32 }` (wire v4);
+  `game::load_world(.., crowd)` builds N wanderers after the players and `World::seed_crowd(seed)` reseeds
+  them (NPC i from seed+i+1; 0 = what `World::load` builds). The crowd is in `Saved`, so the client's
+  confirmed world and rollback replay simulate it from the applied inputs; snapshots carry no crowd.
+  `acb-net/tests/crowd_map.rs`: 40 NPCs, 3% loss, slot 1 runs to the nearest blend group and blends
+  (180 ticks), 0 desync, both clients' confirmed crowds identical every common tick.
+- Blend groups (retail, Mac): `GSrvGroupPolygon::CanUse::Method_IsEntityPositionInsideGroupPolygon`
+  0x01088556: 2D convex hull of each member's position plus `ModifyFormationPolygon` 0x01088206
+  (pos +- r along the entity X and Y axes), `GroupConvexHull::IsPointInsideConvexHull` 0x0108ad3e
+  (crossing number, XY only); r from the caller (untraced; the FX polygon `UpdateGroupPolygon` 0x010887c4
+  uses 0.8, we use 0.8). `IsGroupDispersed` 0x01079faa: a member > 6 m from the first. Groups are
+  blendable AI groups (`AIEntityGroupUtils::IsGroupBlendable` 0x01123abe, `FindBlendGroups` 0x01189530,
+  `NetPlayer::AddToBlendingGroup` 0x0114de98). Our crowd has no AI groups, so `rules::blend_groups`
+  chains NPCs within 2 m (our reading) and caps at the 6 m dispersion; <= 2 m/s on the ground stays ours.
+- Benches (not done): sit clips `xx_rest_sit_{left,right}_{000,090,180}_to_sitting`,
+  `xx_rest_sit_sitting_tr_sit_idle_040cm_01`, loop `xx_rest_sit_idle_040cm_01`, out
+  `xx_rest_sit_idle_040cm_01_tr_l_wait_footl`; kills exist (`IDxx_Bench2Bench_{Left,Right}_Kill_*`,
+  `ID05_Walk2Bench_*`, `ID05_Bench2Walk_*`, `xx_h_assassina_sit_bench_close_*`), all in DataPC.forge.

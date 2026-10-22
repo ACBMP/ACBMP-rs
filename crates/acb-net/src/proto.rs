@@ -9,7 +9,8 @@ use glam::Vec3;
 
 pub const MAGIC: [u8; 2] = *b"AB";
 /// 2: match rules in `Start`, match state in `Snapshot`, match events.
-pub const VERSION: u8 = 3;
+/// 4: crowd size and seed in `Start`.
+pub const VERSION: u8 = 4;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -425,6 +426,14 @@ fn read_config(r: &mut Reader) -> Option<MatchConfig> {
 
 // -------------------------------------------------------------- messages
 
+/// The match's crowd: `count` NPCs seeded from `seed`, built identically
+/// by the server and every client ([`crate::game::load_world`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CrowdConfig {
+    pub count: u16,
+    pub seed: u32,
+}
+
 /// A player slot of a match.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Slot {
@@ -509,8 +518,9 @@ pub enum Msg {
     Welcome { slot: u8, players: u8 },
     Reject { reason: String },
     Lobby { joined: u8, players: u8, echo_ms: u32 },
-    /// `rules`: the match everyone runs (`None`: free play).
-    Start { map: String, snapshot_every: u8, slots: Vec<Slot>, rules: Option<MatchConfig> },
+    /// `rules`: the match everyone runs (`None`: free play); `crowd`: the
+    /// NPCs everyone simulates (part of the deterministic sim).
+    Start { map: String, snapshot_every: u8, slots: Vec<Slot>, rules: Option<MatchConfig>, crowd: CrowdConfig },
     Snapshot(Snapshot),
     Over { reason: String },
 }
@@ -571,7 +581,7 @@ impl Msg {
                 w.u8(*players);
                 w.u32(*echo_ms);
             }
-            Msg::Start { map, snapshot_every, slots, rules } => {
+            Msg::Start { map, snapshot_every, slots, rules, crowd } => {
                 w.u8(T_START);
                 w.str(map);
                 w.u8(*snapshot_every);
@@ -594,6 +604,8 @@ impl Msg {
                     }
                     None => w.u8(0),
                 }
+                w.u16(crowd.count);
+                w.u32(crowd.seed);
             }
             Msg::Snapshot(s) => {
                 w.u8(T_SNAPSHOT);
@@ -666,7 +678,8 @@ impl Msg {
                     slots.push(Slot { name, character, at });
                 }
                 let rules = if r.u8()? != 0 { Some(read_config(&mut r)?) } else { None };
-                Msg::Start { map, snapshot_every, slots, rules }
+                let crowd = CrowdConfig { count: r.u16()?, seed: r.u32()? };
+                Msg::Start { map, snapshot_every, slots, rules, crowd }
             }
             T_SNAPSHOT => {
                 let tick = r.u32()?;
@@ -928,6 +941,7 @@ mod tests {
                 snapshot_every: 2,
                 slots: vec![Slot { name: "a".into(), character: "c".into(), at: Some([1.0, 2.0, 3.0, 4.0]) }, Slot { name: "b".into(), character: "d".into(), at: None }],
                 rules: None,
+                crowd: CrowdConfig::default(),
             },
             Msg::Snapshot(Snapshot { game: None, ..s.clone() }),
             Msg::Start {
@@ -935,6 +949,7 @@ mod tests {
                 snapshot_every: 2,
                 slots: vec![],
                 rules: Some(MatchConfig { time_limit: 120.0, score_limit: 500, respawn_delay: 5.0, start_delay: 3.0 }),
+                crowd: CrowdConfig { count: 40, seed: 0xdead_beef },
             },
             Msg::Snapshot(s),
             Msg::Over { reason: "done".into() },

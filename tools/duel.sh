@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # usage: tools/duel.sh [FPS_A FPS_B INPUT_A INPUT_B [extra serve args]]
 # Localhost duel: acbmp serve + two headless viewers (A at 60 fps, B at 144) over netsim
-# loss/latency. Expect: kill rejected at tick 30, A kills B at 427, server prints
+# loss/latency. Expect: kill rejected at tick 30, A kills B around tick 400-430
+# (scripted keys are fed in real time, so the tick varies a little), server prints
 # "result after 20.0 s: a 100, b 0 (a wins)". Run from the repo root after cargo build --release.
 export ACBMP_SCHEMAS=~/Music/anvilforge-py/src/anvilforge/schemas ACBMP_MULTI=~/Music/ACB/multi ACBMP_EXE=~/Music/ACB/ACBMP.exe
 M=~/Music/ACB/multi; O=$(mktemp -d)

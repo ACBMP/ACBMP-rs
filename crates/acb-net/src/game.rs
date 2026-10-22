@@ -12,13 +12,14 @@ use acb_game::{Setup, World};
 use acb_world::Archive;
 use glam::Vec3;
 
-use crate::proto::{Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_VICTIM, NONE};
+use crate::proto::{CrowdConfig, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_VICTIM, NONE};
 
 /// Builds a match world: slot `i` is player `i` on the map's player spawn
-/// `i` (or its `at`), no crowd; with `rules` a match on the map's player
+/// `i` (or its `at`) plus `crowd.count` NPCs seeded from `crowd.seed`
+/// (bodies after the players); with `rules` a match on the map's player
 /// spawns. Server and clients call this with the same slots and rules, so
 /// both start from the same state.
-pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>, rules: Option<MatchConfig>) -> anyhow::Result<World> {
+pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>, rules: Option<MatchConfig>, crowd: CrowdConfig) -> anyhow::Result<World> {
     let mut cache: HashMap<String, Arc<acb_anim::character::Character>> = HashMap::new();
     let mut characters = Vec::new();
     for s in slots {
@@ -38,7 +39,7 @@ pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTr
         anim: "xx_l_wait_hipm_footl".into(),
         wander: 0.0,
         play: true,
-        crowd: 0,
+        crowd: crowd.count as usize,
         pair: Vec::new(),
         at: None,
         builtins,
@@ -47,6 +48,7 @@ pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTr
     if world.bodies.len() < slots.len() {
         anyhow::bail!("the map has {} player spawns for {} players", world.bodies.len(), slots.len());
     }
+    world.seed_crowd(crowd.seed as u64);
     world.add_players(slots.len());
     for (i, s) in slots.iter().enumerate() {
         if let Some([x, y, z, yaw]) = s.at {

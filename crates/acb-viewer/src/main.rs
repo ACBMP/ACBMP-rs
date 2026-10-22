@@ -357,7 +357,7 @@ impl App {
         );
         let world = match self.connect.take() {
             Some(start) => {
-                let world = acb_net::game::load_world(&archive, &start.slots, self.builtins().as_ref(), start.rules)?;
+                let world = acb_net::game::load_world(&archive, &start.slots, self.builtins().as_ref(), start.rules, start.crowd)?;
                 eprintln!("net: match world with {} players, playing slot {}", world.players.len(), start.slot);
                 world
             }

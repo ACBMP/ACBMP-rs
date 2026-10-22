@@ -67,7 +67,7 @@ fn play(schemas: PathBuf, map: PathBuf, exe: PathBuf, name: &str) -> Seen {
     let schema = Box::leak(Box::new(acb_world::load_schema(&schemas).unwrap()));
     let archive = acb_world::open_map(&map, schema).unwrap();
     let builtins = BuiltinTracks::from_executable(&std::fs::read(&exe).unwrap());
-    let mut world = acb_net::game::load_world(&archive, &start.slots, builtins.as_ref(), start.rules).unwrap();
+    let mut world = acb_net::game::load_world(&archive, &start.slots, builtins.as_ref(), start.rules, start.crowd).unwrap();
     let slot = start.slot;
     let t0 = Instant::now();
     while client.over.is_none() && t0.elapsed() < Duration::from_secs(60) {
@@ -100,6 +100,7 @@ fn stun_the_pursuer() {
                 log: None,
                 duration: None,
                 rules: Some(RULES),
+                crowd: Default::default(),
             })
         })
     };

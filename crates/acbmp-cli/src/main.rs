@@ -329,12 +329,18 @@ enum Cmd {
         /// No contracts during the first seconds
         #[arg(long, default_value_t = acb_net::mode::START_DELAY)]
         start_delay: f32,
+        /// Crowd NPCs every peer simulates (blending; the map needs a navmesh)
+        #[arg(long, default_value_t = 0)]
+        crowd: u16,
+        /// Seed of the crowd's wandering
+        #[arg(long, default_value_t = 0)]
+        crowd_seed: u32,
     },
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
-        Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, mode, time_limit, score_limit, respawn, start_delay } => {
+        Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, mode, time_limit, score_limit, respawn, start_delay, crowd, crowd_seed } => {
             let rules = match mode.as_str() {
                 "duel" => Some(acb_net::mode::MatchConfig { time_limit, score_limit, respawn_delay: respawn, start_delay }),
                 "free" => None,
@@ -349,7 +355,7 @@ fn main() -> anyhow::Result<()> {
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let netsim = acb_net::link::NetSim::parse(&netsim)?;
-            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, rules })?;
+            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, rules, crowd: acb_net::proto::CrowdConfig { count: crowd, seed: crowd_seed } })?;
         }
         Cmd::Ls { forge } => {
             let forge = Forge::open(forge)?;

@@ -619,23 +619,136 @@ pub fn locate_concealed(hunter: Vec3, target: Vec3, was_near: bool, los: bool, c
 // ---------------------------------------------------------------------------
 // blending
 
-/// Blend group reach around the player, metres (our reading: retail blends
-/// inside a crowd group's polygon, `GSrvGroupPolygon`; we use a circle of
-/// about the group spacing).
-pub const BLEND_RADIUS: f32 = 2.0;
-/// People needed within [`BLEND_RADIUS`] (a group: two or more).
+/// Blend groups (retail `GSrvGroupPolygon`, Mac 0x01088556 / 0x01088206 /
+/// 0x0108ad3e / 0x01079faa): a blendable AI group's polygon is the 2D convex
+/// hull of every member's position and the four points [`BLEND_FORMATION`]
+/// along its entity X and Y axes; whoever stands inside it (XY only) is in
+/// the group. A group with a member more than [`BLEND_DISPERSED`] from its
+/// first member is dispersed.
+pub const BLEND_FORMATION: f32 = 0.8;
+pub const BLEND_DISPERSED: f32 = 6.0;
+/// Members a blend group needs (a group: two or more; retail groups are
+/// level data, ours are formed from the crowd, see [`blend_groups`]).
 pub const BLEND_MIN_GROUP: usize = 2;
-/// Blending is low profile: walking speed at most, m/s.
+/// Our reading: crowd NPCs this close (chained) walk as one group; retail
+/// groups come from the crowd spawner's AI groups, not traced.
+pub const BLEND_LINK: f32 = 2.0;
+/// Blending is low profile: walking speed at most, m/s (our reading).
 pub const BLEND_MAX_SPEED: f32 = 2.0;
 
-/// Whether `me` blends among `others` (crowd NPCs, persona lookalikes
-/// included): on the ground, walking or standing, with a group around.
-pub fn blended(me: &Actor, others: impl IntoIterator<Item = Vec3>) -> bool {
+/// A crowd NPC as blend groups see it: position and yaw (entity +Y is
+/// (-sin yaw, cos yaw)).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Member {
+    pub pos: Vec3,
+    pub yaw: f32,
+}
+
+/// The crowd's blend groups, as member index lists: in index order every
+/// NPC not yet in a group starts one and takes in the NPCs within
+/// [`BLEND_LINK`] of a member (|dz| <= [`DIST_HEIGHT_GAP`]) that stay within
+/// [`BLEND_DISPERSED`] of it; groups smaller than [`BLEND_MIN_GROUP`] are
+/// dropped. Deterministic for the same members.
+pub fn blend_groups(members: &[Member]) -> Vec<Vec<usize>> {
+    let mut taken = vec![false; members.len()];
+    let mut groups = Vec::new();
+    for seed in 0..members.len() {
+        if taken[seed] {
+            continue;
+        }
+        taken[seed] = true;
+        let first = members[seed].pos;
+        let mut group = vec![seed];
+        let mut k = 0;
+        while k < group.len() {
+            let at = members[group[k]].pos;
+            for (j, m) in members.iter().enumerate() {
+                if taken[j] {
+                    continue;
+                }
+                let near = (m.pos - at).truncate().length() <= BLEND_LINK && (m.pos.z - at.z).abs() <= DIST_HEIGHT_GAP;
+                if near && (m.pos - first).truncate().length() <= BLEND_DISPERSED {
+                    taken[j] = true;
+                    group.push(j);
+                }
+            }
+            k += 1;
+        }
+        if group.len() >= BLEND_MIN_GROUP {
+            groups.push(group);
+        }
+    }
+    groups
+}
+
+/// The group's polygon: convex hull (counter-clockwise) of the members'
+/// formation points.
+pub fn blend_polygon(members: impl IntoIterator<Item = Member>) -> Vec<glam::Vec2> {
+    let mut pts = Vec::new();
+    for m in members {
+        let p = m.pos.truncate();
+        let (s, c) = m.yaw.sin_cos();
+        let (x, y) = (glam::Vec2::new(c, s), glam::Vec2::new(-s, c));
+        pts.extend([p, p + x * BLEND_FORMATION, p - x * BLEND_FORMATION, p + y * BLEND_FORMATION, p - y * BLEND_FORMATION]);
+    }
+    convex_hull(pts)
+}
+
+/// Andrew's monotone chain; collinear points dropped.
+fn convex_hull(mut pts: Vec<glam::Vec2>) -> Vec<glam::Vec2> {
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    pts.dedup();
+    if pts.len() < 3 {
+        return pts;
+    }
+    let cross = |o: glam::Vec2, a: glam::Vec2, b: glam::Vec2| (a - o).perp_dot(b - o);
+    let mut hull: Vec<glam::Vec2> = Vec::with_capacity(pts.len() * 2);
+    for pass in 0..2 {
+        let start = hull.len();
+        let iter: Box<dyn Iterator<Item = &glam::Vec2>> = if pass == 0 { Box::new(pts.iter()) } else { Box::new(pts.iter().rev()) };
+        for &p in iter {
+            while hull.len() >= start + 2 && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= 0.0 {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    hull
+}
+
+/// Point in polygon, crossing number in XY (retail
+/// `GroupConvexHull::IsPointInsideConvexHull`).
+pub fn inside_polygon(poly: &[glam::Vec2], p: glam::Vec2) -> bool {
+    let n = poly.len();
+    let mut crossings = 0;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+            crossings += 1;
+        }
+    }
+    crossings % 2 == 1
+}
+
+/// Whether `me` blends: on the ground, walking or standing, inside one of
+/// the crowd's blend group polygons (`polygons` from [`blend_polygon`]).
+pub fn blended(me: &Actor, polygons: &[(Vec<glam::Vec2>, f32)]) -> bool {
     if me.stance != Stance::Ground || me.speed > BLEND_MAX_SPEED {
         return false;
     }
-    let near = others.into_iter().filter(|o| (*o - me.pos).truncate().length() <= BLEND_RADIUS && (o.z - me.pos.z).abs() <= DIST_HEIGHT_GAP).count();
-    near >= BLEND_MIN_GROUP
+    polygons.iter().any(|(poly, z)| (me.pos.z - z).abs() <= DIST_HEIGHT_GAP && inside_polygon(poly, me.pos.truncate()))
+}
+
+/// The crowd's blend polygons with their mean height.
+pub fn blend_polygons(members: &[Member]) -> Vec<(Vec<glam::Vec2>, f32)> {
+    blend_groups(members)
+        .into_iter()
+        .map(|g| {
+            let z = g.iter().map(|&i| members[i].pos.z).sum::<f32>() / g.len() as f32;
+            (blend_polygon(g.iter().map(|&i| members[i])), z)
+        })
+        .collect()
 }
 
 /// Threat state of a target with a pursuer at `pursuer` (hysteresis 15 / 70 m).
@@ -660,12 +773,23 @@ mod tests {
     #[test]
     fn blend_rules() {
         let me = at(0.0, 0.0, 0.0);
-        let group = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(-0.5, 1.2, 0.0), Vec3::new(9.0, 0.0, 0.0)];
-        assert!(blended(&me, group));
+        let m = |x: f32, y: f32| Member { pos: Vec3::new(x, y, 0.0), yaw: 0.0 };
+        // two NPCs 1.6 m apart are a group, the far one is alone
+        let crowd = [m(0.8, 0.0), m(-0.8, 0.0), m(9.0, 0.0)];
+        assert_eq!(blend_groups(&crowd), vec![vec![0, 1]]);
+        let polys = blend_polygons(&crowd);
+        // hull: x -1.6..1.6, y -0.8..0.8 (formation points 0.8 m out)
+        assert!(blended(&me, &polys));
+        assert!(blended(&at(1.5, 0.0, 0.0), &polys));
+        assert!(!blended(&at(0.0, 0.85, 0.0), &polys));
+        assert!(!blended(&at(1.0, 0.7, 0.0), &polys), "outside the diamond corner");
         // one person is not a group; running or climbing breaks it
-        assert!(!blended(&me, group[1..].iter().copied()));
-        assert!(!blended(&Actor { speed: 3.5, ..me }, group));
-        assert!(!blended(&Actor { stance: Stance::Climb, ..me }, group));
+        assert!(!blended(&me, &blend_polygons(&crowd[1..])));
+        assert!(!blended(&Actor { speed: 3.5, ..me }, &polys));
+        assert!(!blended(&Actor { stance: Stance::Climb, ..me }, &polys));
+        // chained links, but not past the dispersion radius from the first
+        let line: Vec<Member> = (0..6).map(|i| m(i as f32 * 1.9, 0.0)).collect();
+        assert_eq!(blend_groups(&line), vec![vec![0, 1, 2, 3], vec![4, 5]]);
         // concealed targets: compass fills, picked out only up close
         let h = Vec3::ZERO;
         let l = locate_concealed(h, Vec3::new(8.0, 0.0, 0.0), false, true, true);
