@@ -201,9 +201,23 @@ struct Orbit {
     yaw: f32,
     pitch: f32,
     dist: f32,
+    /// Extra distance while the player is on a wall (eased in and out):
+    /// the wall fills the view at the running distance.
+    pull: f32,
 }
 
+/// How far the follow camera backs off while climbing, and how fast it
+/// gets there (1/e time).
+const CLIMB_PULL: f32 = 1.75;
+const CLIMB_PULL_TIME: f32 = 0.4;
+
 impl Orbit {
+    /// Eases [`Orbit::pull`] towards the climbing distance or back.
+    fn ease_climb(&mut self, climbing: bool, dt: f32) {
+        let want = if climbing { CLIMB_PULL } else { 0.0 };
+        self.pull += (want - self.pull) * (1.0 - (-dt / CLIMB_PULL_TIME).exp());
+    }
+
     fn look(&self) -> Vec3 {
         Vec3::new(self.yaw.cos() * self.pitch.cos(), self.yaw.sin() * self.pitch.cos(), self.pitch.sin())
     }
@@ -211,7 +225,7 @@ impl Orbit {
     /// Eye and target following a character standing at `pos`.
     fn eye_target(&self, pos: Vec3, ground: Option<&Ground>) -> (Vec3, Vec3) {
         let target = pos + Vec3::Z * 1.6;
-        let mut dist = self.dist;
+        let mut dist = self.dist + self.pull;
         let back = -self.look();
         // pull in in front of whatever is between the player and the eye
         // (keeping 0.25 m off it; geometry hugging the player is ignored)
@@ -365,7 +379,7 @@ impl App {
             self.fly.yaw = facing.y.atan2(facing.x);
             self.fly.pitch = -0.15;
             self.fly.speed = 4.0;
-            self.orbit = Orbit { yaw: self.fly.yaw, pitch: -0.25, dist: 3.5 };
+            self.orbit = Orbit { yaw: self.fly.yaw, pitch: -0.25, dist: 3.5, pull: 0.0 };
         }
         self.world = Some(world);
         self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, skins });
@@ -468,6 +482,8 @@ impl App {
             pose_skin(&mut g.scene, &g.renderer, &b.character, skin, &globals, world, dt);
         }
         self.alpha = alpha;
+        let climbing = self.world.as_ref().and_then(|w| w.players.get(self.me())).is_some_and(|p| p.climb.is_some());
+        self.orbit.ease_climb(climbing, dt);
     }
 
     fn update(&mut self, dt: f32) {
@@ -706,7 +722,7 @@ fn main() -> anyhow::Result<()> {
         gfx: None,
         world: None,
         fly: Fly { pos: Vec3::new(-20.0, -60.0, 12.0), yaw: 1.2, pitch: -0.1, speed: 12.0 },
-        orbit: Orbit { yaw: 0.0, pitch: -0.25, dist: 3.5 },
+        orbit: Orbit { yaw: 0.0, pitch: -0.25, dist: 3.5, pull: 0.0 },
         keys: hold,
         tapped: HashSet::new(),
         script,
