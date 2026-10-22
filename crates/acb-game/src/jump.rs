@@ -479,7 +479,7 @@ impl Ground {
     /// fraction of the ray at the first hit.
     pub fn headroom(&self, p: Vec3) -> Option<f32> {
         let rings = [Vec2::ZERO, Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y];
-        rings.iter().filter_map(|d| self.ray(p + (*d * BODY).extend(0.3), Vec3::Z * 1.5)).min_by(f32::total_cmp)
+        rings.iter().filter_map(|d| self.ray(p + (*d * BODY).extend(0.3), Vec3::Z * (crate::ground::BODY_HEIGHT - 0.3))).min_by(f32::total_cmp)
     }
 
     /// Where to stand on the top under `p` (its floor height in `p.z`):

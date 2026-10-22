@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use acb_anim::BuiltinTracks;
-use acb_game::locomotion::{heading_speed, norm_yaw, turn_toward, HEADING_MAX_SPEED, HEADING_MIN_SPEED};
+use acb_game::locomotion::{
+    anim_decel, anim_speed, blend_speed, heading_speed, heading_speed_sprint, norm_yaw, ramp_anim_speed, turn_toward,
+    turn_toward_at, HEADING_MAX_SPEED, HEADING_MIN_SPEED, RUN_TURN_ANGLE, STOP_ANIM_SPEED,
+};
 use acb_game::{PlayerInput, Setup, World, DT};
 
 /// Retail heading: 1.5 rad/s up to 10 degrees of error, 6 rad/s from 40,
@@ -36,6 +39,56 @@ fn heading_turn_rate() {
     assert!(y > 170.0 * d && y <= std::f32::consts::PI, "{}", y.to_degrees());
     assert_eq!(norm_yaw(-std::f32::consts::PI), std::f32::consts::PI);
     assert!((norm_yaw(-258.0 * d).to_degrees() - 102.0).abs() < 1e-3);
+}
+
+/// Retail sprint heading (`UpdateMovementIntention`, HumanGround sprint
+/// flag): 0.975 rad/s up to 10 degrees, 3.9 from 40, same angles.
+#[test]
+fn sprint_turn_rate() {
+    let d = std::f32::consts::PI / 180.0;
+    assert!((heading_speed_sprint(5.0 * d) - 0.975).abs() < 1e-5);
+    assert!((heading_speed_sprint(90.0 * d) - 3.9).abs() < 1e-5);
+    assert!((heading_speed_sprint(25.0 * d) - (0.975 + 3.9) / 2.0).abs() < 1e-4);
+    // one tick at 90 degrees of error: 3.9 / 60 rad
+    let y = turn_toward_at(0.0, 90.0 * d, DT, true);
+    assert!((y - 3.9 * DT).abs() < 1e-6);
+    assert!((turn_toward_at(0.0, 90.0 * d, DT, false) - 6.0 * DT).abs() < 1e-6);
+}
+
+/// Retail move-cycle anim speed (`UpdateMoveCycleMain`): walk 0.2, run 0.8,
+/// sprint 1.0; up 1.0/s, down by the `LocalInit` curve of the current speed;
+/// a stop above 0.4; a running turn beyond 120 degrees.
+#[test]
+fn anim_speed_ramp() {
+    assert_eq!(anim_speed(1.0), 0.2);
+    assert!((anim_speed(2.0) - 0.8).abs() < 1e-6);
+    assert_eq!(anim_speed(3.0), 1.0);
+    for b in [0.0, 0.5, 1.0, 1.667, 2.0, 2.5, 3.0] {
+        assert!((blend_speed(anim_speed(b)) - b).abs() < 1e-5, "{b}");
+    }
+    assert_eq!(STOP_ANIM_SPEED, 0.4);
+    assert!((RUN_TURN_ANGLE.to_degrees() - 120.0).abs() < 1e-3);
+    assert_eq!(anim_decel(0.2), 1.0);
+    assert!((anim_decel(0.4) - 0.3).abs() < 1e-6);
+    assert!((anim_decel(0.666) - 0.2).abs() < 1e-6);
+    assert_eq!(anim_decel(1.0), 1.0);
+    // ticks at 60 Hz to go between two speeds
+    let ticks = |from: f32, to: f32| {
+        let (mut s, mut n) = (from, 0);
+        while s != to {
+            s = ramp_anim_speed(s, to, DT);
+            n += 1;
+            assert!(n < 1000);
+        }
+        n
+    };
+    // walk -> run 0.6 s, run -> sprint 0.2 s
+    assert!((35..=37).contains(&ticks(0.2, 0.8)), "{}", ticks(0.2, 0.8));
+    assert!((11..=13).contains(&ticks(0.8, 1.0)));
+    // sprint -> run fast (curve ~0.5..1 /s), run -> walk slow (0.2..0.3 /s)
+    let down = ticks(1.0, 0.8);
+    let slow = ticks(0.8, 0.2);
+    assert!(down < 30 && slow > 100, "{down} {slow}");
 }
 
 fn world() -> Option<(acb_world::Archive<'static>, Option<BuiltinTracks>)> {

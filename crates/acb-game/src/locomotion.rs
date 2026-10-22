@@ -354,6 +354,69 @@ pub const HEADING_MAX_SPEED: f32 = 6.0;
 pub const HEADING_MIN_ANGLE: f32 = 0.174_532_9;
 pub const HEADING_MAX_ANGLE: f32 = 0.698_131_7;
 
+/// Retail `HumanGround::UpdateMoveCycleMain` drives the move cycle by a
+/// normalized anim speed in [0, 1] (bands at 0.2 / 0.4 / 0.6 / 0.8): full
+/// stick walks at 0.2, runs at 0.8, sprints at 1.0. Our blend speed is
+/// 1 walk / 2 run / 3 sprint; these map the two piecewise linearly.
+pub fn anim_speed(blend: f32) -> f32 {
+    let b = blend.clamp(0.0, 3.0);
+    if b <= 1.0 {
+        0.2 * b
+    } else if b <= 2.0 {
+        0.2 + 0.6 * (b - 1.0)
+    } else {
+        0.8 + 0.2 * (b - 2.0)
+    }
+}
+
+/// Inverse of [`anim_speed`].
+pub fn blend_speed(s: f32) -> f32 {
+    let s = s.clamp(0.0, 1.0);
+    if s <= 0.2 {
+        s / 0.2
+    } else if s <= 0.8 {
+        1.0 + (s - 0.2) / 0.6
+    } else {
+        2.0 + (s - 0.8) / 0.2
+    }
+}
+
+/// Retail speeds up by 1.0 anim-speed unit per second...
+pub const ANIM_ACCEL: f32 = 1.0;
+/// ...and slows down by this response curve of the current anim speed
+/// (`HumanGround::LocalInit`, the curve at +0x96c), per second: quick out of
+/// the sprint and below a walk, slow through the run.
+pub const ANIM_DECEL: [(f32, f32); 5] = [(0.0, 1.0), (0.333, 1.0), (0.4, 0.3), (0.666, 0.2), (1.0, 1.0)];
+/// Released above this anim speed (the run bands, `TestMoveCycleToMoveStopMain`)
+/// the character plays a stop; below it the cycle just runs down to idle.
+pub const STOP_ANIM_SPEED: f32 = 0.4;
+/// Retail `TestMoveStopToRunTurnMain`: a 180 turn when the wish is more
+/// than 120 degrees off the heading.
+pub const RUN_TURN_ANGLE: f32 = 2.094_395_2;
+
+/// Piecewise-linear [`ANIM_DECEL`] at `s`.
+pub fn anim_decel(s: f32) -> f32 {
+    let s = s.clamp(0.0, 1.0);
+    for w in ANIM_DECEL.windows(2) {
+        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+        if s <= x1 {
+            return y0 + (y1 - y0) * (s - x0) / (x1 - x0);
+        }
+    }
+    1.0
+}
+
+/// One tick of the retail anim-speed ramp from `s` toward `target`.
+pub fn ramp_anim_speed(s: f32, target: f32, dt: f32) -> f32 {
+    if (target - s).abs() <= 0.0005 {
+        target
+    } else if target > s {
+        (s + ANIM_ACCEL * dt).min(target)
+    } else {
+        (s - anim_decel(s) * dt).max(target)
+    }
+}
+
 /// Turn rate (rad/s) for a heading error of `err` radians (retail curve).
 pub fn heading_speed(err: f32) -> f32 {
     let err = err.abs();
@@ -367,10 +430,26 @@ pub fn heading_speed(err: f32) -> f32 {
     }
 }
 
+/// Sprinting heading rates: `UpdateMovementIntention` picks 0.975 / 2.6 * 1.5
+/// rad/s instead when the HumanGround sprint flag (`SetSprint`) is set.
+pub const HEADING_SPRINT_MIN_SPEED: f32 = 0.975;
+pub const HEADING_SPRINT_MAX_SPEED: f32 = 3.9;
+
+/// Turn rate while sprinting: the same angles, the slower rates.
+pub fn heading_speed_sprint(err: f32) -> f32 {
+    let u = (heading_speed(err) - HEADING_MIN_SPEED) / (HEADING_MAX_SPEED - HEADING_MIN_SPEED);
+    HEADING_SPRINT_MIN_SPEED + (HEADING_SPRINT_MAX_SPEED - HEADING_SPRINT_MIN_SPEED) * u
+}
+
 /// One tick of turning `yaw` toward `want`, shortest way.
 pub fn turn_toward(yaw: f32, want: f32, dt: f32) -> f32 {
+    turn_toward_at(yaw, want, dt, false)
+}
+
+/// [`turn_toward`] with the sprint rates when `sprint`.
+pub fn turn_toward_at(yaw: f32, want: f32, dt: f32, sprint: bool) -> f32 {
     let err = wrap_angle(want - yaw);
-    let step = heading_speed(err) * dt;
+    let step = if sprint { heading_speed_sprint(err) } else { heading_speed(err) } * dt;
     if step >= err.abs() {
         norm_yaw(want)
     } else {
@@ -553,7 +632,7 @@ impl Locomotion {
         }
         if let (Some(a), Some(w)) = (&self.action, want) {
             if a.steer {
-                *yaw = turn_toward(*yaw, w, dt);
+                *yaw = turn_toward_at(*yaw, w, dt, gait == Gait::Sprint);
             }
         }
         let (delta, pose) = match self.action.is_some() {
@@ -585,7 +664,7 @@ impl Locomotion {
     fn maybe_start_action(&mut self, clips: &Clips, sk: &Skeleton, want: Option<f32>, gait: Gait, yaw: f32) {
         match want {
             // released while running: brake on the foot the pose is on
-            None if self.speed >= 1.5 => {
+            None if self.speed > blend_speed(STOP_ANIM_SPEED) => {
                 let sprint = self.speed >= 2.5 && !self.beam;
                 let beam = self.beam;
                 let first = |f| match (beam, sprint) {
@@ -610,7 +689,7 @@ impl Locomotion {
             }
             // running and asked to go back the way we came: run turn
             // (no running turn on a beam: the move steers round)
-            Some(w) if self.speed >= 1.5 && !self.beam && wrap_angle(w - yaw).abs() > 135f32.to_radians() => {
+            Some(w) if self.speed >= 1.5 && !self.beam && wrap_angle(w - yaw).abs() > RUN_TURN_ANGLE => {
                 let f = (0..2)
                     .min_by(|&a, &b| {
                         let d = |f| pose_distance(&self.last, &clips.get(Id::RunTurn(f)).sample(sk, 0.0));
@@ -647,7 +726,7 @@ impl Locomotion {
                     let id = if self.beam { Id::BeamStart(self.beam_foot, usize::from(jog)) } else { Id::Start(usize::from(jog)) };
                     let mut a = Action::new(vec![id], Cancel::OnRelease);
                     a.steer = true;
-                    a.end = (if jog { 1.6 } else { 1.0 }, 0.5);
+                    a.end = (blend_speed(if jog { 0.6 } else { 0.2 }), 0.5);
                     self.start(a);
                 }
             }
@@ -701,11 +780,10 @@ impl Locomotion {
     }
 
     fn play_cycle(&mut self, clips: &Clips, sk: &Skeleton, want: Option<f32>, gait: Gait, yaw: &mut f32, dt: f32) -> (Vec2, Pose) {
-        let target = if want.is_some() { gait.speed() } else { 0.0 };
-        let ease = 2.5 * dt;
-        self.speed += (target - self.speed).clamp(-ease, ease);
+        let target = if want.is_some() { anim_speed(gait.speed()) } else { 0.0 };
+        self.speed = blend_speed(ramp_anim_speed(anim_speed(self.speed), target, dt));
         if let Some(w) = want {
-            *yaw = turn_toward(*yaw, w, dt);
+            *yaw = turn_toward_at(*yaw, w, dt, gait == Gait::Sprint);
         }
         let s = self.speed;
         let ids = self.cycles();

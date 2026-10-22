@@ -28,6 +28,12 @@ pub struct Ground {
     pub(crate) hold_grid: HashMap<(i32, i32), Vec<u32>>,
 }
 
+/// Retail player body (`BipedComponent` of AC2MP_Generic_PlayerEntity):
+/// capsule radius, height (m) and mass (kg). Walls are swept at the radius.
+pub const BODY_RADIUS: f32 = 0.4;
+pub const BODY_HEIGHT: f32 = 1.8;
+pub const BODY_MASS: f32 = 65.0;
+
 /// Height a character steps up or down without falling, metres.
 pub const STEP: f32 = 0.6;
 
@@ -202,11 +208,10 @@ impl Ground {
     /// Horizontal move with wall sliding, swept at knee and chest height (so
     /// steps and curbs pass).
     pub fn slide(&self, pos: Vec3, delta: Vec2) -> Vec3 {
-        const RADIUS: f32 = 0.3;
         let blocked = |from: Vec3, d: Vec2| {
             [0.55, 1.3]
                 .into_iter()
-                .filter_map(|h| self.sweep_wall(from + Vec3::Z * h, d, RADIUS))
+                .filter_map(|h| self.sweep_wall(from + Vec3::Z * h, d, BODY_RADIUS))
                 .min_by(|a, b| a.0.total_cmp(&b.0))
         };
         let mut at = pos;

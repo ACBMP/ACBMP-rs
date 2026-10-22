@@ -70,7 +70,7 @@ are best: `--input "0=w,shift 1.5= 2=d"` (keys from each time in seconds) plus
 Known gaps (Phase 2): no on-screen HUD; respawn (5 s) and start (3 s) delays
 are placeholders; blending rules are partly our reading; online matches have
 no crowd yet; benches, ledge kills and beam-end edge animations are missing;
-the stand-in collision body is narrower than retail's.
+walkable slope and step height are still ours (retail values not found).
 
 Crates:
 - `anvil-forge`: `.forge` archive index, `.data` containers, LZO2A/LZO1X blocks

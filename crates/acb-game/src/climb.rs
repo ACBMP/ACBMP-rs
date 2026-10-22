@@ -659,7 +659,7 @@ impl Climb {
                         let side = right_of(n) * if dir == Dir::Left { -1.0 } else { 1.0 };
                         let spot = self.pos + (side * 1.0 + n * 0.5).extend(0.0);
                         let f = ground.floor_below(spot + Vec3::Z * 0.3)?;
-                        (self.pos.z - f < 1.0 && ground.sweep_wall(self.pos + Vec3::Z * 0.5, side * 1.0, 0.3).is_none()).then(|| {
+                        (self.pos.z - f < 1.0 && ground.sweep_wall(self.pos + Vec3::Z * 0.5, side * 1.0, crate::ground::BODY_RADIUS).is_none()).then(|| {
                             let clips: [&'static str; 2] = if dir == Dir::Left {
                                 ["xx_l_climb_1m_to_groundentry_left", "xx_l_climb_1m_to_groundentry_left_tr_h_wait_footl"]
                             } else {

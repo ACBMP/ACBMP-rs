@@ -863,10 +863,23 @@ Pure, deterministic functions the server and client prediction share (no clock, 
 - Soft/hard landing at 5.25 m is retail's
   `HumanInAir::IsHurtFallLandingWithoutRagdoll` (height < 5.25).
 - Player yaw is kept in (-180, 180] (`locomotion::norm_yaw`).
-- Retail BipedComponent (AC2MP_Generic_PlayerEntity): radius 0.4,
-  height 1.8, mass 65 (we sweep radius 0.3). Max slope / step height:
-  Havok `CharacterController::MaxSlopeAngle` exists but no data object
-  found; still ours (|nz| >= 0.6 floor, 0.6 m step).
+- Body: retail BipedComponent (AC2MP_Generic_PlayerEntity) radius 0.4,
+  height 1.8, mass 65 = `ground::BODY_*`. Walls swept at 0.4, people kept
+  2 x 0.4 apart (`PERSONAL`, was 0.6), landing headroom 1.8. Gates, kills
+  and duel positions unchanged by the switch.
+- Move-cycle speed (`UpdateMoveCycleMain`): normalized anim speed, walk
+  0.2 / run 0.8 / sprint 1.0 (`locomotion::anim_speed`), up 1.0/s, down by
+  the `LocalInit` curve (0,1)(0.333,1)(0.4,0.3)(0.666,0.2)(1,1) of the
+  current speed; release above 0.4 plays a stop; a running turn beyond
+  120 degrees; sprint heading 0.975 / 3.9 rad/s. Tests: loco_map
+  `anim_speed_ramp`, `sprint_turn_rate`. kills `run` start 1 cm earlier.
+- Standing turn-on-spot threshold (60 deg) is still ours: the
+  `TestWaitToTurnStart/OnSpot` conditions read player-flag fields we have
+  not identified.
+- Slopes/steps: no player value. The player has no CharacterController
+  (MaxSlopeAngle is reflection-only); `HumanInAir::LandedOnSlope` counts a
+  landing contact 44..65 degrees as a slope; `CanStepUp/Down` are FSM
+  transitions. Still ours: |nz| >= 0.6 floor, 0.6 m step.
 
 ## Wanted mechanics: hiding, blending, escape, falls (proto v3)
 - Hiding spots (`hide.rs`): map Entities with a `HayStackComponent` (top-level or inside EntityGroups; San
