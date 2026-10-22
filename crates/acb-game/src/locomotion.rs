@@ -104,7 +104,8 @@ pub struct Clips {
     turn: [Clip; 4],
     turn_settle: [Clip; 4],
     fall: [Clip; 2],
-    land: [Clip; 6],
+    /// soft, hard, damage (still / input held), damage roll, fatal
+    land: [Clip; 8],
     start: [Clip; 2],
     run_turn: [Clip; 2],
     run_turn_out: [Clip; 2],
@@ -211,6 +212,8 @@ impl Clips {
                 load("xx_h_landing_forward_hard_footl_tr_h_jog_footr_a")?,
                 load("xx_h_landing_damage_footl_tr_h_wait_footr")?,
                 load("xx_h_landing_damage_footl_tr_h_jog_footl")?,
+                load("xx_h_landing_damage_footl_roll")?,
+                load("xx_h_landing_death_back")?,
             ],
         })
     }
@@ -457,15 +460,18 @@ impl Locomotion {
             self.fade = Some((self.last.clone(), FADE));
             return;
         }
-        let severity = if height < 3.0 {
-            0
-        } else if height < 6.0 {
-            1
-        } else {
-            2
+        // retail landing type by fall height (`jump::landing`): safe ->
+        // soft / hard forward landing, small / heavy damage -> the damage
+        // landing, or its roll with input held, fatal -> death
+        let clip = match crate::jump::landing(height).1 {
+            crate::jump::LandingType::Safe if height < crate::jump::HARD_LANDING => usize::from(moving),
+            crate::jump::LandingType::Safe => 2 + usize::from(moving),
+            crate::jump::LandingType::Fatal => 7,
+            _ if moving => 6,
+            _ => 4,
         };
-        self.speed = if moving { 2.0 } else { 0.0 };
-        let mut a = Action::new(vec![Id::Land(severity * 2 + usize::from(moving))], Cancel::Never);
+        self.speed = if moving && clip != 7 { 2.0 } else { 0.0 };
+        let mut a = Action::new(vec![Id::Land(clip)], Cancel::Never);
         a.end = (self.speed, 0.5);
         self.start(a);
     }

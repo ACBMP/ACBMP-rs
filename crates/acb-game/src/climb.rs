@@ -114,6 +114,12 @@ const CLIPS: &[&str] = &[
     "xx_h_climbing_climb1m_tr_hangwall_down_2_b",
     "xx_h_climbing_climb1m_tr_hangwall_down_2_c",
     "xx_l_climb_1m_u_hangwall",
+    // wall jumps (rebound = back eject)
+    "xx_h_hangwall_tr_rebound_footl",
+    // walking off a ledge: pull down onto the wall below
+    "xx_l_ledge_pulldown_soft_to_climbing_2m_a",
+    "xx_l_ledge_pulldown_soft_to_climbing_2m_b",
+    "xx_l_ledge_pulldown_soft_tr_climbing_2m",
     // back to the ground
     "xx_l_climb_1m_tr_h_wait_hipm_footl_a",
     "xx_l_climb_1m_to_groundentry_left",
@@ -152,6 +158,22 @@ impl ClimbClips {
                 names.push(format!("xx_h_climbing_hangwall_tr_climb1m_up_l_hand_{n}_{s}"));
             }
         }
+        for from in ["hangwall", "hangfree", "climb1m"] {
+            for side in ["left", "right"] {
+                for n in [2, 3] {
+                    for s in ["a", "b", "c"] {
+                        names.push(format!("xx_h_climbing_{from}_tr_hangwall_{side}_{n}_{s}"));
+                    }
+                }
+            }
+        }
+        for k in [120, 180, 240] {
+            names.push(format!("xx_h_climbing_hangwall_jump_straight_{k}cm_jump_targeted_start"));
+            names.push(format!("xx_h_climbing_hangwall_jump_straight_{k}cm_jump_targeted"));
+            names.push(format!("xx_h_climbing_climb1m_jump_straight_{k}cm_jump_targeted_start"));
+            names.push(format!("xx_h_climbing_climb1m_jump_straight_{k}cm_jump_targeted"));
+            names.push(format!("xx_h_climbing_climb1m_jump_straight_{k}cm_jump_targeted_tr_hangwall"));
+        }
         for n in &names {
             clips.insert(n.clone(), load(n)?);
         }
@@ -172,6 +194,8 @@ enum Then {
     Hold(Stance, Hold),
     /// Let go: fall with this velocity.
     Drop(Vec3),
+    /// Pushed off the wall (back eject): fall with this velocity.
+    Eject(Vec3),
     /// Back on the ground (stand up where the last pose stands).
     Stand,
 }
@@ -322,6 +346,9 @@ pub enum Outcome {
     Climbing,
     /// Let go: fall from the current position with this velocity.
     Drop(Vec3),
+    /// Pushed off the wall: fall away from it with this velocity (the
+    /// wall just left is not grabbed again at once).
+    Eject(Vec3),
     /// Standing again at this entity position and facing.
     Stand(Vec3, f32),
 }
@@ -374,6 +401,19 @@ impl Climb {
     }
 
     /// Grabs `hold` while falling past it at `pos`.
+    /// Walked off the top of `hold` (low profile, retail
+    /// `xx_l_ledge_pulldown_soft_to_climbing_2m`): turns round and lowers
+    /// itself onto the wall below, hands at `point`.
+    pub fn pulldown(hold: Hold, point: Vec3, stance: Stance, pos: Vec3, yaw: f32, from: Pose) -> Climb {
+        let to = entity_for(point, hold.wall, stance);
+        let clips =
+            ["xx_l_ledge_pulldown_soft_to_climbing_2m_a", "xx_l_ledge_pulldown_soft_to_climbing_2m_b", "xx_l_ledge_pulldown_soft_tr_climbing_2m"];
+        let seq = Seq::new(&clips, pos, to, yaw, yaw_into(hold.wall), Then::Hold(stance, hold));
+        let mut c = Climb::new(hold, stance, pos, yaw, Phase::Seq(seq), Some(from));
+        c.last = "ledge pulldown";
+        c
+    }
+
     pub fn catch(hold: Hold, stance: Stance, pos: Vec3, from: Pose) -> Climb {
         let yaw = yaw_into(hold.wall);
         let mut c = Climb::new(hold, stance, pos, yaw, Phase::Catch(0.0), Some(from));
@@ -392,8 +432,11 @@ impl Climb {
     }
 
     /// Advances one tick; `want` is the stick direction on the wall.
-    pub fn update(&mut self, clips: &ClimbClips, sk: &Skeleton, ground: &Ground, want: Option<Dir>, dt: f32) -> (Pose, Outcome) {
-        let (pose, outcome) = self.step(clips, sk, ground, want, dt);
+    /// `jump`: the jump button (wall jumps: back eject, side jump, leap
+    /// up); `run`: high profile (a held side stick jumps a shimmy gap).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update(&mut self, clips: &ClimbClips, sk: &Skeleton, ground: &Ground, want: Option<Dir>, jump: bool, run: bool, dt: f32) -> (Pose, Outcome) {
+        let (pose, outcome) = self.step(clips, sk, ground, want, jump, run, dt);
         let pose = match &mut self.fade {
             Some((from, t)) => {
                 *t += dt;
@@ -410,7 +453,8 @@ impl Climb {
         (pose, outcome)
     }
 
-    fn step(&mut self, clips: &ClimbClips, sk: &Skeleton, ground: &Ground, want: Option<Dir>, dt: f32) -> (Pose, Outcome) {
+    #[allow(clippy::too_many_arguments)]
+    fn step(&mut self, clips: &ClimbClips, sk: &Skeleton, ground: &Ground, want: Option<Dir>, jump: bool, run: bool, dt: f32) -> (Pose, Outcome) {
         let n = self.hold.wall;
         match &mut self.phase {
             Phase::Catch(t) => {
@@ -430,8 +474,22 @@ impl Climb {
                 let wait = clips.get(self.stance.wait());
                 let pose = wait.sample(sk, *t % wait.length.max(1e-3));
                 let settled = *t >= self.settle;
-                if let Some(dir) = want.filter(|_| settled) {
-                    if let Some((seq, name)) = self.plan(ground, dir) {
+                let planned = if !settled {
+                    None
+                } else if jump {
+                    self.plan_jump(ground, want)
+                } else {
+                    want.and_then(|dir| {
+                        self.plan(ground, dir).or_else(|| {
+                            // high profile at a shimmy dead end: jump the gap
+                            (run && matches!(dir, Dir::Left | Dir::Right) && self.stance != Stance::Climb)
+                                .then(|| self.plan_jump(ground, Some(dir)))
+                                .flatten()
+                        })
+                    })
+                };
+                {
+                    if let Some((seq, name)) = planned {
                         self.last = name;
                         self.settle = 0.0;
                         self.phase = Phase::Seq(seq);
@@ -467,6 +525,7 @@ impl Climb {
                         (pose, Outcome::Climbing)
                     }
                     Then::Drop(v) => (pose, Outcome::Drop(v)),
+                    Then::Eject(v) => (pose, Outcome::Eject(v)),
                     Then::Stand => {
                         // stand where the last pose's Reference stands
                         let frame = Mat4::from_rotation_translation(Quat::from_rotation_z(self.yaw), self.pos);
@@ -477,6 +536,65 @@ impl Climb {
                         (pose, Outcome::Stand(pos.with_z(s.to.z), yaw))
                     }
                 }
+            }
+        }
+    }
+
+    /// A wall jump with the jump button and stick `dir` (none or down:
+    /// back eject; up: leap to a hold 0.9-2.6 m above; left/right: jump
+    /// to a hold 0.5-2.6 m along the wall, across a shimmy gap).
+    fn plan_jump(&self, ground: &Ground, dir: Option<Dir>) -> Option<(Seq, &'static str)> {
+        let n = self.hold.wall;
+        let hand = hands_of(self.pos, n, self.stance);
+        let yaw = self.yaw;
+        match dir {
+            None | Some(Dir::Down) => {
+                // retail rebound: push off in place (0.2 s), then the
+                // untargeted rebound_tr_fall carries the root 0.80 m back
+                // in 0.467 s: [`EJECT_SPEED`] away from the wall, gravity
+                // does the rest
+                if self.stance == Stance::HangFree {
+                    return None;
+                }
+                let v = (n * EJECT_SPEED).extend(0.0);
+                Some((Seq::new(&["xx_h_hangwall_tr_rebound_footl"], self.pos, self.pos, yaw, yaw, Then::Eject(v)), "back eject"))
+            }
+            Some(Dir::Up) => {
+                let (hold, point) = ground.jump_hold(&self.hold, hand, n, Dir::Up, 0.9, 2.6)?;
+                let stance = ground.hang_stance(point, hold.wall);
+                let to = entity_for(point, hold.wall, stance);
+                // clip by rise: 120 / 180 / 240 cm (the root rises exactly that)
+                let rise = (point.z - hand.z) * 100.0;
+                let k = [120, 180, 240]
+                    .into_iter()
+                    .min_by(|a, b| (*a as f32 - rise).abs().total_cmp(&(*b as f32 - rise).abs()))
+                    .unwrap();
+                let clips: Vec<&'static str> = if self.stance == Stance::Climb {
+                    ["_start", "", "_tr_hangwall"]
+                        .iter()
+                        .map(|s| leak(format!("xx_h_climbing_climb1m_jump_straight_{k}cm_jump_targeted{s}")))
+                        .collect()
+                } else {
+                    ["_start", ""].iter().map(|s| leak(format!("xx_h_climbing_hangwall_jump_straight_{k}cm_jump_targeted{s}"))).collect()
+                };
+                Some((Seq::new(&clips, self.pos, to, yaw, yaw_into(hold.wall), Then::Hold(stance, hold)), "leap up"))
+            }
+            Some(side) => {
+                let (hold, point) = ground.jump_hold(&self.hold, hand, n, side, 0.5, 2.6)?;
+                let stance = ground.hang_stance(point, hold.wall);
+                let to = entity_for(point, hold.wall, stance);
+                // _2 carries the root 1.50 m sideways, _3 2.25 m
+                let lat = (point - hand).truncate().dot(right_of(n)).abs();
+                let k = if lat > 1.875 { 3 } else { 2 };
+                let from = match self.stance {
+                    Stance::Climb => "climb1m",
+                    Stance::HangWall => "hangwall",
+                    Stance::HangFree => "hangfree",
+                };
+                let sname = if side == Dir::Left { "left" } else { "right" };
+                let clips: Vec<&'static str> =
+                    ["a", "b", "c"].iter().map(|s| leak(format!("xx_h_climbing_{from}_tr_hangwall_{sname}_{k}_{s}"))).collect();
+                Some((Seq::new(&clips, self.pos, to, yaw, yaw_into(hold.wall), Then::Hold(stance, hold)), "side jump"))
             }
         }
     }
@@ -658,6 +776,10 @@ pub enum Shimmy {
 /// One shimmy step (an open + close strafe pair), metres.
 pub const SHIMMY_STEP: f32 = 1.0;
 
+/// Back eject push-off speed, m/s: `xx_h_rebound_footl_tr_fall` moves the
+/// root 0.80 m back in 0.467 s.
+pub const EJECT_SPEED: f32 = 0.8 / 0.467;
+
 /// Retail walling test constants (`HumanJumpDetector::DoWallingRaycastTest`,
 /// `CalculateWallingRaycastDirDepth`).
 pub const WALLING_RAY_HEIGHT: f32 = 1.3;
@@ -787,6 +909,55 @@ impl Ground {
         } else {
             Stance::HangFree
         }
+    }
+
+    /// A hold for a wall jump from `hand` on `from` (wall facing `n`)
+    /// towards `dir`, `min..=max` m away that way (up: rise; sides: along
+    /// the wall), on the same wall plane; the hands land at least 0.25 m
+    /// in from the target edge's ends.
+    pub fn jump_hold(&self, from: &Hold, hand: Vec3, n: Vec2, dir: Dir, min: f32, max: f32) -> Option<(Hold, Vec3)> {
+        let right = right_of(n);
+        let axis = match dir {
+            Dir::Up => Vec3::Z,
+            Dir::Down => -Vec3::Z,
+            Dir::Left => (-right).extend(0.0),
+            Dir::Right => right.extend(0.0),
+        };
+        let vertical = axis.z.abs() > 0.5;
+        let probe = hand + axis * (min + max) * 0.5;
+        self.holds_near(probe, max)
+            .filter(|h| h.wall.dot(n) > 0.8 && !same(h, from))
+            .filter_map(|h| {
+                let m = (0.25 / h.length().max(1e-3)).min(0.5);
+                let q = h.at(h.param(hand + axis * min).clamp(m, 1.0 - m));
+                let d = q - hand;
+                let along = d.dot(axis);
+                let off = d - axis * along;
+                let out = off.truncate().dot(n).abs();
+                let cross = if vertical { off.truncate().dot(right).abs() } else { off.z.abs() };
+                let ok = (min..=max).contains(&along) && out < 0.35 && cross < if vertical { 0.5 } else { 0.6 };
+                ok.then_some((along, *h, q))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| (x.1, x.2))
+    }
+
+    /// Low profile at a drop: the top edge near the feet at `pos` that
+    /// walking along `dir` steps off (its wall faces `dir`), and the hands
+    /// point on it.
+    pub fn ledge_hold(&self, pos: Vec3, dir: Vec2) -> Option<(Hold, Vec3)> {
+        self.holds_near(pos, 1.5)
+            .filter(|h| h.top && h.wall.dot(dir) > 0.7)
+            .filter_map(|h| {
+                let m = (0.25 / h.length().max(1e-3)).min(0.5);
+                let q = h.at(h.param(pos).clamp(m, 1.0 - m));
+                let d = q - pos;
+                let ahead = d.truncate().dot(dir);
+                let ok = (-0.3..=0.9).contains(&ahead) && d.truncate().perp_dot(dir).abs() < 0.6 && (-0.3..=0.2).contains(&d.z);
+                ok.then_some((d.length(), *h, q))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| (x.1, x.2))
     }
 
     /// A hold to grab while falling at `pos` facing `fwd`: a wall edge

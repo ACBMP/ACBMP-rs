@@ -67,7 +67,9 @@ pub struct PlayerInput {
     pub cam_yaw: f32,
     pub run: bool,
     pub sprint: bool,
-    /// Not used yet: freerun jumps start by themselves while running.
+    /// Jump button (viewer F): wall jumps while climbing, ledge pulldown /
+    /// step-off at a low-profile edge stop. Ground freerun jumps start by
+    /// themselves while running.
     pub jump: bool,
     pub kill: bool,
     pub stun: bool,

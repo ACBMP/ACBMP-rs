@@ -116,6 +116,7 @@ fn parse_keys(list: &str) -> anyhow::Result<HashSet<KeyCode>> {
                 "space" => KeyCode::Space,
                 "e" => KeyCode::KeyE,
                 "q" => KeyCode::KeyQ,
+                "f" => KeyCode::KeyF,
                 other => anyhow::bail!("unknown key {other}"),
             })
         })
@@ -292,7 +293,7 @@ fn input_from(keys: &HashSet<KeyCode>, tapped: &HashSet<KeyCode>, cam_yaw: f32) 
         cam_yaw,
         run: k(KeyCode::ShiftLeft) || k(KeyCode::ShiftRight),
         sprint: k(KeyCode::Space),
-        jump: false,
+        jump: k(KeyCode::KeyF),
         kill: k(KeyCode::KeyE),
         stun: k(KeyCode::KeyQ),
     }
