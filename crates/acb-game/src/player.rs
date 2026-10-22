@@ -45,8 +45,10 @@ pub struct Player {
 /// Low profile stops at a drop deeper than this instead of walking off
 /// (retail `xx_l_ledge_lookdown_*`, `xx_l_beam_edge_stop`); the jump
 /// button then lowers onto the wall below (`Climb::pulldown`) or steps
-/// off. The depth is our choice: a few steps.
-pub const LEDGE_STOP: f32 = 1.5;
+/// off. Retail: `HumanGround::TestMoveToEdgeStopOnHumanGroundInterfaceCommand_
+/// UnbalanceOnEdge` enters EdgeStop only for a narrow edge whose gap is
+/// deeper than 2 m (and pull-down clearance); shallower drops are walked off.
+pub const LEDGE_STOP: f32 = 2.0;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
@@ -291,7 +293,7 @@ pub(crate) fn drive(
         if let Some((rp, ry)) = kill::reference(&sc.clip, ct) {
             let (pos, yaw) = kill::reroot(sc.frame, rp, ry, neutral);
             p.pos = pos.with_z(sc.frame.w_axis.z);
-            p.yaw = yaw;
+            p.yaw = crate::locomotion::norm_yaw(yaw);
         }
         p.kill = None;
         p.approach = None;
@@ -389,7 +391,7 @@ pub(crate) fn drive(
             // closing in: pose eases into the clip's first frame
             let (pos, yaw) = lead.at(kill.t);
             p.pos = pos;
-            p.yaw = yaw;
+            p.yaw = crate::locomotion::norm_yaw(yaw);
             let mut pose = kill.from_pose.clone();
             acb_anim::pose::blend(&mut pose, &clip.sample(sk, 0.0), (kill.t / lead.time).min(1.0));
             bodies[me].show(p.entity(), pose);
@@ -409,7 +411,7 @@ pub(crate) fn drive(
         if let Some((rp, ry)) = kill::reference(clip, t) {
             let (pos, yaw) = kill::reroot(kill.frame, rp, ry, neutral);
             p.pos = pos.with_z(kill.frame.w_axis.z);
-            p.yaw = yaw;
+            p.yaw = crate::locomotion::norm_yaw(yaw);
         }
         let mut world = kill.frame * clip.root_motion(t);
         if w < 1.0 {
@@ -439,7 +441,7 @@ pub(crate) fn drive(
         };
         let (pose, outcome) = cl.update(cc, sk, ground, want, input.jump, input.run, dt);
         p.pos = cl.pos;
-        p.yaw = cl.yaw;
+        p.yaw = crate::locomotion::norm_yaw(cl.yaw);
         if crate::trace() && (time * 4.0).floor() != ((time - dt) * 4.0).floor() {
             eprintln!("t {:.2} pos {:.2} {:.2} {:.2} yaw {:.0} {}", time, p.pos.x, p.pos.y, p.pos.z, p.yaw.to_degrees(), cl.describe());
         }
@@ -448,7 +450,7 @@ pub(crate) fn drive(
             Outcome::Stand(pos, yaw) => {
                 p.climb = None;
                 p.pos = pos;
-                p.yaw = yaw;
+                p.yaw = crate::locomotion::norm_yaw(yaw);
                 p.vel = Vec3::ZERO;
                 p.loco.resume(pose.clone());
             }
