@@ -261,6 +261,8 @@ struct App {
     /// --capture with --connect: when the first frame ran (frames are
     /// paced to real time).
     net_t0: Option<Instant>,
+    /// --connect: the last HUD line traced (second, text).
+    hud_traced: Option<(u32, String)>,
     /// --connect: the match start, until the world is built from it.
     connect: Option<acb_net::client::Start>,
 }
@@ -339,7 +341,7 @@ impl App {
         );
         let world = match self.connect.take() {
             Some(start) => {
-                let world = acb_net::game::load_world(&archive, &start.slots, self.builtins().as_ref())?;
+                let world = acb_net::game::load_world(&archive, &start.slots, self.builtins().as_ref(), start.rules)?;
                 eprintln!("net: match world with {} players, playing slot {}", world.players.len(), start.slot);
                 world
             }
@@ -430,6 +432,17 @@ impl App {
                 tapped.clear();
                 i
             });
+            // HUD trace: once per sim second and on every new message
+            if acb_game::trace() {
+                if let Some(h) = net.hud(&world) {
+                    let sec = (world.tick / TICK_HZ as u64) as u32;
+                    let msg_changed = self.hud_traced.as_ref().is_none_or(|(_, t)| t.rsplit(" | ").next() != h.rsplit(" | ").next());
+                    if self.hud_traced.as_ref().is_none_or(|(s, _)| *s != sec) || msg_changed {
+                        eprintln!("hud tick {}: {h}", world.tick);
+                        self.hud_traced = Some((sec, h));
+                    }
+                }
+            }
             self.net = Some(net);
             self.world = Some(world);
             return alpha;
@@ -545,6 +558,9 @@ impl App {
                 "net: tick {} confirmed {} rtt {:.0} ms; {} snapshots, {} checked ({} exact, {} desync), {} corrections, {} rollbacks, {} rejected; sent {} recv {} dropped {}",
                 w.tick, n.confirmed_tick, n.rtt * 1000.0, s.snapshots, s.checked, s.exact, s.desyncs, s.corrections, s.rollbacks, s.rejected, l.sent, l.recv, l.dropped
             );
+            if let Some(h) = n.hud(w) {
+                eprintln!("hud: {h}");
+            }
             n.leave();
         }
         std::process::exit(0);
@@ -581,6 +597,11 @@ impl App {
             );
             if let Some(p) = player {
                 status += &format!("  yaw {:.0}  speed {:.2}", p.yaw.to_degrees(), p.loco.speed);
+            }
+            if let (Some(n), Some(w)) = (&self.net, &self.world) {
+                if let Some(h) = n.hud(w) {
+                    status = format!("acbmp {:.0} fps | {h}", self.frames as f32 / t);
+                }
             }
             g.window.set_title(&status);
             if std::env::var_os("ACB_VIEWER_LOG").is_some() {
@@ -719,6 +740,7 @@ fn main() -> anyhow::Result<()> {
         alpha: 1.0,
         net: None,
         net_t0: None,
+        hud_traced: None,
         connect: None,
     };
     event_loop.run_app(&mut app)?;

@@ -314,12 +314,32 @@ enum Cmd {
         /// Stop after this many seconds of play
         #[arg(long)]
         duration: Option<f32>,
+        /// duel (Wanted contracts, scores, respawns; any player count) or free (no match rules)
+        #[arg(long, default_value = "duel")]
+        mode: String,
+        /// Match length, seconds
+        #[arg(long, default_value_t = 300.0)]
+        time_limit: f32,
+        /// The first to this score wins (0: none)
+        #[arg(long, default_value_t = 1000)]
+        score_limit: u32,
+        /// Seconds from a kill to the victim's respawn
+        #[arg(long, default_value_t = acb_net::mode::RESPAWN_DELAY)]
+        respawn: f32,
+        /// No contracts during the first seconds
+        #[arg(long, default_value_t = acb_net::mode::START_DELAY)]
+        start_delay: f32,
     },
 }
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
-        Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration } => {
+        Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, mode, time_limit, score_limit, respawn, start_delay } => {
+            let rules = match mode.as_str() {
+                "duel" => Some(acb_net::mode::MatchConfig { time_limit, score_limit, respawn_delay: respawn, start_delay }),
+                "free" => None,
+                m => anyhow::bail!("--mode {m}: duel or free"),
+            };
             let at = at
                 .iter()
                 .map(|a| {
@@ -329,7 +349,7 @@ fn main() -> anyhow::Result<()> {
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let netsim = acb_net::link::NetSim::parse(&netsim)?;
-            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration })?;
+            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, rules })?;
         }
         Cmd::Ls { forge } => {
             let forge = Forge::open(forge)?;

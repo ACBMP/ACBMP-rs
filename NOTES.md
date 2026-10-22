@@ -726,3 +726,28 @@ Pure, deterministic functions the server and client prediction share (no clock, 
 - Gate: `--count 2 --wander 0 --at 38.6,23.96,0.5,171.4 --input "0= 0.5=e 0.6="` on San Donato (body 1 at 38,20):
   granted Far/Back at 4.0 m, walk-in 1.23 s (run, then walk under 2 m) to 1.06 m, then the back kill; identical
   trace at --fps 144.
+
+## Duel mode (`acb-game/src/mode.rs`, proto v2)
+- `World.mode: Option<Match>` (in `Saved`, so prediction/replay step it): `Contracts`
+  decide relations for `validate_action` (kills only on your target, stuns only on your
+  pursuer, crowd kills allowed without points). Kill = `KILL_POINTS` 100
+  (`GBrick_ScoreKill.TargetKilled`); stun 100, respawn delay 5 s, start delay 3 s are
+  placeholders. Respawn on the player spawn furthest from the nearest living player,
+  exactly `respawn_delay` ticks after the death tick; contract cooldown `MIN_WAIT_TIME`
+  counts from the death tick too. Ends on `--time-limit` / `--score-limit`; server prints
+  `serve: result after 20.0 s: a 100, b 0 (a wins)` and repeats `Msg::Over`.
+- `acbmp serve <map> --mode duel|free --time-limit --score-limit --respawn --start-delay`.
+- Wire: `Start.rules`, snapshot `GameState` (ticks_left, per player target/score/respawn/
+  cooldown; clients check it against their confirmed world: `game_checked/game_desyncs`),
+  events Score/Contract*/Respawn/MatchOver/KillRejected(reason).
+- HUD: no text path in the renderer, so `Client::hud(&world)` (target distance + compass
+  fill from `rules::locate`, pursuers, scores, m:ss left, last own event) goes to the
+  window title and, with ACBMP_TRACE=1, `hud tick N: ...` lines (per sim second / new
+  message) plus a final `hud:` line in --capture runs.
+- Gates: `acb-net/tests/duel_map.rs` (2 clients, loss 5% delay 150 ms: pre-contract kill
+  refused, predicted dodge kill refused+rolled back, kill scores, respawn +180 ticks,
+  reassignment, 0 desyncs). Localhost (`--at=31,20.4,0.02,-90 --at=41,20.4,0.02,90
+  --time-limit 20`, A `--input "0.5=e 0.8= 4=w,shift 6.2=w 6.8=e 7.2="`, B idle, netsim
+  loss 2% 40 ms): reject tick 30, contracts 180, kill 427, respawn 727, A reassigned 727,
+  B 1026, over 1200 "a 100, b 0"; events/final positions identical with A/B at 60/144
+  and 144/60 fps, 589/589 snapshots exact.

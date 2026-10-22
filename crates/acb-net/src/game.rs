@@ -6,16 +6,19 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use acb_anim::BuiltinTracks;
+use acb_game::mode::{Match, MatchConfig, MatchEvent};
+use acb_game::rules::ContractEvent;
 use acb_game::{Setup, World};
 use acb_world::Archive;
 use glam::Vec3;
 
-use crate::proto::{Event, EventKind, NetPos, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_CLIMBING, F_VICTIM};
+use crate::proto::{Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_CLIMBING, F_VICTIM, NONE};
 
 /// Builds a match world: slot `i` is player `i` on the map's player spawn
-/// `i` (or its `at`), no crowd. Server and clients call this with the same
-/// slots, so both start from the same state.
-pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>) -> anyhow::Result<World> {
+/// `i` (or its `at`), no crowd; with `rules` a match on the map's player
+/// spawns. Server and clients call this with the same slots and rules, so
+/// both start from the same state.
+pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>, rules: Option<MatchConfig>) -> anyhow::Result<World> {
     let mut cache: HashMap<String, Arc<acb_anim::character::Character>> = HashMap::new();
     let mut characters = Vec::new();
     for s in slots {
@@ -50,7 +53,72 @@ pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTr
             world.place_player(i, Vec3::new(x, y, z), yaw.to_radians());
         }
     }
+    if let Some(cfg) = rules {
+        let spawns = archive
+            .player_spawns()
+            .into_iter()
+            .filter(|s| s.kind == 0)
+            .map(|s| {
+                let m = glam::Mat4::from_cols_array(&s.matrix);
+                let f = m.y_axis.truncate();
+                (m.w_axis.truncate(), (-f.x).atan2(f.y))
+            })
+            .collect();
+        world.mode = Some(Match::new(slots.len(), cfg, spawns));
+    }
     Ok(world)
+}
+
+/// The match as a snapshot carries it.
+pub fn game_state(m: &Match) -> GameState {
+    let t = |secs: f32| (secs * acb_game::TICK_HZ as f32).round().clamp(0.0, u16::MAX as f32) as u16;
+    GameState {
+        ticks_left: m.ticks_left(),
+        over: m.over,
+        players: m
+            .contracts
+            .hunters
+            .iter()
+            .enumerate()
+            .map(|(i, h)| PlayerGame {
+                target: h.target.map_or(NONE, |x| x as u8),
+                score: m.score[i].min(u16::MAX as u32) as u16,
+                respawn: m.respawn[i].map_or(0, |r| r.min(u16::MAX as u32) as u16),
+                cooldown: t(h.cooldown),
+            })
+            .collect(),
+    }
+}
+
+/// Puts the server's match state into `m` (after a mismatch).
+pub fn apply_game_state(m: &mut Match, g: &GameState) {
+    m.ticks = acb_game::mode::ticks(m.config.time_limit).saturating_sub(g.ticks_left);
+    m.over = g.over;
+    for (i, p) in g.players.iter().enumerate().take(m.score.len()) {
+        let h = &mut m.contracts.hunters[i];
+        h.target = (p.target != NONE).then_some(p.target as usize);
+        h.cooldown = p.cooldown as f32 / acb_game::TICK_HZ as f32;
+        h.active = p.respawn == 0;
+        m.score[i] = p.score as u32;
+        m.respawn[i] = (p.respawn > 0).then_some(p.respawn as u32);
+    }
+}
+
+/// The match decisions of the last tick as events.
+pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
+    let ev = |kind, a: usize, b: usize| Event { tick, kind, a: a.min(255) as u8, b: b.min(255) as u8 };
+    m.events
+        .iter()
+        .filter_map(|e| match *e {
+            MatchEvent::Score { player, points, .. } => Some(ev(EventKind::Score, player, (points / 10) as usize)),
+            MatchEvent::Contract(ContractEvent::Assigned { hunter, target }) => Some(ev(EventKind::ContractAssigned, hunter, target)),
+            MatchEvent::Contract(ContractEvent::Lost { hunter, target }) => Some(ev(EventKind::ContractLost, hunter, target)),
+            MatchEvent::Contract(ContractEvent::Fulfilled { hunter, target }) => Some(ev(EventKind::ContractFulfilled, hunter, target)),
+            MatchEvent::Over { winner } => Some(ev(EventKind::MatchOver, winner.map_or(255, |w| w), 0)),
+            // reported by detect_events
+            MatchEvent::Respawn { .. } => None,
+        })
+        .collect()
 }
 
 /// Player `i`'s action flags.
@@ -151,9 +219,12 @@ pub fn authoritative_step(world: &mut World, wire: &mut [WireInput], prev: &mut 
     let mut out = Vec::new();
     // presses count against the inputs as sent, not as applied
     let raw = wire.to_vec();
-    let rules = acb_game::rules::Rules::default();
-    // contracts are not hooked in yet: everyone counts as a free-play victim
-    let relation = |_: usize, _: usize| acb_game::rules::Relation::Npc;
+    // a match: kills only on the target, stuns only on a pursuer (contracts)
+    let (rules, mode) = match &world.mode {
+        Some(m) => (m.rules(), Some(m.clone())),
+        None => (acb_game::rules::Rules::default(), None),
+    };
+    let relation = |i: usize, j: usize| mode.as_ref().map_or(acb_game::rules::Relation::Npc, |m| m.relation(i, j));
     for (i, w) in wire.iter_mut().enumerate() {
         if !w.attacks() {
             continue;
@@ -178,6 +249,12 @@ pub fn authoritative_step(world: &mut World, wire: &mut [WireInput], prev: &mut 
     let before = Before::of(world);
     world.step(&inputs);
     out.extend(detect_events(world, &before, wire, tick));
+    if let Some(m) = &world.mode {
+        out.extend(match_events(m, tick));
+    }
+    // one tick's events in (kind, player) order (clients skip what they saw)
+    out.sort_by_key(|e| (e.tick, e.kind as u8, e.a));
+    out.dedup_by_key(|e| (e.tick, e.kind as u8, e.a));
     out
 }
 

@@ -9,3 +9,5 @@ pub mod game;
 pub mod link;
 pub mod proto;
 pub mod server;
+/// The match rules (re-exported for the server CLI).
+pub use acb_game::mode;

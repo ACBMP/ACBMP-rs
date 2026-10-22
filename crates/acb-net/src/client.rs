@@ -59,6 +59,8 @@ pub struct Start {
     pub slot: usize,
     pub slots: Vec<Slot>,
     pub snapshot_every: u8,
+    /// The match (`None`: free play); pass to [`game::load_world`].
+    pub rules: Option<acb_game::mode::MatchConfig>,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -75,6 +77,9 @@ pub struct ClientStats {
     pub corrections: u64,
     pub rollbacks: u64,
     pub rejected: u64,
+    /// Snapshot match states compared / different (overwritten).
+    pub game_checked: u64,
+    pub game_desyncs: u64,
 }
 
 pub struct Client {
@@ -112,6 +117,12 @@ pub struct Client {
     snaps: VecDeque<(u32, Vec<NetPos>)>,
     /// Snapshot positions the confirmed world has not reached yet.
     pending_check: BTreeMap<u32, Vec<NetPos>>,
+    /// Snapshot match states the confirmed world has not reached yet.
+    pending_game: BTreeMap<u32, GameState>,
+    /// The newest match state from the server (HUD) and its tick.
+    pub game: Option<(u32, GameState)>,
+    /// The last event that concerns this player, for the HUD.
+    pub last_message: Option<String>,
     /// Per player: (tick, placement, pose) of the confirmed ticks.
     ring: Vec<VecDeque<(u32, Mat4, Pose)>>,
     interp: f64,
@@ -171,7 +182,7 @@ impl Client {
                         eprintln!("net: lobby {joined}/{players}");
                     }
                 }
-                Some(Msg::Start { map, snapshot_every, slots }) => {
+                Some(Msg::Start { map, snapshot_every, slots, rules }) => {
                     let Some(slot) = slot else { continue };
                     anyhow::ensure!(map.eq_ignore_ascii_case(&cfg.map), "server started {map}");
                     let n = slots.len();
@@ -201,6 +212,9 @@ impl Client {
                         newest_snapshot: None,
                         snaps: VecDeque::new(),
                         pending_check: BTreeMap::new(),
+                        pending_game: BTreeMap::new(),
+                        game: None,
+                        last_message: None,
                         ring: vec![VecDeque::new(); n],
                         interp: 0.0,
                         last_event: None,
@@ -208,7 +222,7 @@ impl Client {
                         stats: ClientStats::default(),
                         over: None,
                     };
-                    return Ok((client, Start { slot, slots, snapshot_every }));
+                    return Ok((client, Start { slot, slots, snapshot_every, rules }));
                 }
                 _ => {}
             }
@@ -333,6 +347,12 @@ impl Client {
                 self.pending_check.insert(s.tick, pos);
             }
         }
+        if let Some(g) = &s.game {
+            if s.tick > self.confirmed_tick {
+                self.pending_game.insert(s.tick, g.clone());
+            }
+            self.game = Some((s.tick, g.clone()));
+        }
         // applied inputs
         for (j, runs) in s.inputs.iter().enumerate().take(self.n) {
             for (t, w) in runs.ticks() {
@@ -389,8 +409,12 @@ impl Client {
             if e.kind == EventKind::KillRejected && e.a as usize == self.slot {
                 self.stats.rejected += 1;
             }
-            if trace() || e.a as usize == self.slot {
+            let mine = e.a as usize == self.slot || (matches!(e.kind, EventKind::Death | EventKind::Stunned | EventKind::ContractLost | EventKind::ContractFulfilled) && e.b as usize == self.slot) || e.kind == EventKind::MatchOver;
+            if trace() || mine {
                 eprintln!("net: event {}", e.describe());
+            }
+            if mine {
+                self.last_message = Some(self.message(e));
             }
             self.events.push(*e);
         }
@@ -429,8 +453,12 @@ impl Client {
             if let Some(server) = self.pending_check.remove(&t) {
                 self.check(world, t, &server);
             }
+            if let Some(server) = self.pending_game.remove(&t) {
+                self.check_game(world, t, &server);
+            }
         }
         self.pending_check.retain(|&k, _| k > end);
+        self.pending_game.retain(|&k, _| k > end);
         self.confirmed_tick = end;
         self.confirmed = Some(world.save());
         self.own.retain(|&k, _| k > end.min(self.input_ack));
@@ -452,6 +480,21 @@ impl Client {
                     eprintln!("net: correction at {predicted_tick} from {end}: own pos off {err:.3} m, action {k0} -> {k1}");
                 }
             }
+        }
+    }
+
+    /// Compares the confirmed match at `t` with the server's; the server's
+    /// wins.
+    fn check_game(&mut self, world: &mut World, t: u32, server: &GameState) {
+        let Some(m) = &mut world.mode else { return };
+        self.stats.game_checked += 1;
+        let ours = game::game_state(m);
+        if &ours != server {
+            self.stats.game_desyncs += 1;
+            if self.stats.game_desyncs < 20 {
+                eprintln!("net: match desync tick {t}: ours {ours:?} server {server:?}");
+            }
+            game::apply_game_state(m, server);
         }
     }
 
@@ -485,6 +528,59 @@ impl Client {
                 eprintln!("net: confirmed {t} player {j} pos {:.2} {:.2} {:.2} yaw {} flags {}", q.pos().x, q.pos().y, q.pos().z, q.yaw, q.flags);
             }
         }
+    }
+
+    /// An event in the own player's words (HUD).
+    pub fn message(&self, e: &Event) -> String {
+        let me = self.slot as u8;
+        match e.kind {
+            EventKind::KillRejected => format!("kill rejected: {}", crate::proto::Reject::name(e.b)),
+            EventKind::KillStarted if e.a == me => format!("killing player {}", e.b),
+            EventKind::StunStarted if e.a == me => format!("stunning player {}", e.b),
+            EventKind::Death if e.a == me => format!("killed by player {}", e.b),
+            EventKind::Stunned if e.a == me => format!("stunned by player {}", e.b),
+            EventKind::Respawn if e.a == me => "respawned".into(),
+            EventKind::Score => format!("+{} points", e.b as u32 * 10),
+            EventKind::ContractAssigned => format!("new target: player {}", e.b),
+            EventKind::ContractLost if e.a == me => format!("contract on player {} lost", e.b),
+            EventKind::ContractLost => format!("player {} lost you", e.a),
+            EventKind::ContractFulfilled if e.a == me => format!("contract on player {} fulfilled", e.b),
+            EventKind::ContractFulfilled => format!("killed by player {} (its target)", e.a),
+            EventKind::MatchOver if e.a == crate::proto::NONE => "match over: draw".into(),
+            EventKind::MatchOver if e.a == me => "match over: you win".into(),
+            EventKind::MatchOver => format!("match over: player {} wins", e.a),
+            _ => e.describe(),
+        }
+    }
+
+    /// The HUD line for the own player from the predicted match state
+    /// (a pure function of the sim tick, so the same at any frame rate):
+    /// target and its distance with the compass fill, scores, time left,
+    /// respawn countdown and the last event that concerned this player.
+    /// `None` outside a match.
+    pub fn hud(&self, world: &World) -> Option<String> {
+        let m = world.mode.as_ref()?;
+        let me = self.slot;
+        let pos = |p: usize| world.players.get(p).map(|p| p.pos).unwrap_or_default();
+        let mut s = match (m.respawn.get(me).copied().flatten(), m.contracts.hunters.get(me).and_then(|h| h.target)) {
+            (Some(r), _) => format!("respawn in {:.1} s", r as f32 / TICK_HZ as f32),
+            (None, Some(t)) => {
+                let l = acb_game::rules::locate(pos(me), pos(t), false, false);
+                format!("target p{t} {:.1} m compass {:.0}%", l.dist, l.fill * 100.0)
+            }
+            (None, None) => "no target".into(),
+        };
+        let pursued = (0..m.contracts.hunters.len()).filter(|&h| h != me && m.contracts.hunters[h].target == Some(me)).count();
+        if pursued > 0 {
+            s += &format!(" | pursued x{pursued}");
+        }
+        let scores: Vec<String> = m.score.iter().enumerate().map(|(i, v)| if i == me { format!("[p{i} {v}]") } else { format!("p{i} {v}") }).collect();
+        let left = m.ticks_left() / TICK_HZ;
+        s += &format!(" | {} | {}:{:02}", scores.join(" "), left / 60, left % 60);
+        if let Some(msg) = &self.last_message {
+            s += &format!(" | {msg}");
+        }
+        Some(s)
     }
 
     /// Placement and pose to draw remote player `j` with: its confirmed

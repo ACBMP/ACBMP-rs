@@ -30,6 +30,10 @@ impl World {
             return Ok(Request::None);
         }
         let Some(kills) = &self.clips.kills else { return Ok(Request::None) };
+        // being killed / stunned, dead or the match is over
+        if self.bodies.get(p.body).is_some_and(|b| b.scripted.is_some()) || self.mode.as_ref().is_some_and(|m| m.over || !m.alive(i)) {
+            return Err(Reject::Stance);
+        }
         let act = if input.stun { Act::Stun } else { Act::Kill };
         let me = p.actor();
         let candidates = || self.bodies.iter().enumerate().filter(|(j, _)| *j != p.body).map(|(j, b)| (j, body_actor(b), relation(i, j)));

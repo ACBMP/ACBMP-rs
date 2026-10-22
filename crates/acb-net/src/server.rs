@@ -34,6 +34,9 @@ pub struct ServeConfig {
     pub log: Option<PathBuf>,
     /// Stop after this many seconds of play.
     pub duration: Option<f32>,
+    /// A match (duel with 2 players): contracts, scores, respawns, limits.
+    /// `None`: free play.
+    pub rules: Option<acb_game::mode::MatchConfig>,
 }
 
 /// Ticks of applied inputs a snapshot repeats at most.
@@ -147,9 +150,12 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
         .map(|(i, p)| Slot { name: p.name.clone(), character: p.character.clone(), at: cfg.at.get(i).copied().flatten() })
         .collect();
     let t = Instant::now();
-    let mut world = game::load_world(&archive, &slots, builtins.as_ref())?;
+    let mut world = game::load_world(&archive, &slots, builtins.as_ref(), cfg.rules)?;
+    if let Some(m) = &world.mode {
+        eprintln!("serve: match {:?} on {} player spawns", m.config, m.spawns.len());
+    }
     eprintln!("serve: world with {} players loaded in {:.1}s", world.players.len(), t.elapsed().as_secs_f64());
-    let start = Msg::Start { map: map_name.clone(), snapshot_every: cfg.snapshot_every as u8, slots: slots.clone() }.encode();
+    let start = Msg::Start { map: map_name.clone(), snapshot_every: cfg.snapshot_every as u8, slots: slots.clone(), rules: cfg.rules }.encode();
     let mut last_start = Instant::now() - Duration::from_secs(1);
     let wait = Instant::now();
     while !peers.iter().all(|p| p.ready) {
@@ -238,8 +244,25 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
                 let _ = writeln!(l, "srv {tick} {i} {} {} {} {} {}", q.x, q.y, q.z & 0x7fff, q.yaw, q.flags);
             }
         }
-        if tick % cfg.snapshot_every.max(1) == 0 {
+        let over = world.mode.as_ref().is_some_and(|m| m.over);
+        if over || tick % cfg.snapshot_every.max(1) == 0 {
             send_snapshots(&mut link, &mut peers, &world, &used, &events, &mut history);
+        }
+        if over {
+            let result = match_result(&world, &peers);
+            eprintln!("serve: {result}");
+            // the last snapshots carry the result; repeat the end against loss
+            for _ in 0..3 {
+                for p in &peers {
+                    link.send(&Msg::Over { reason: result.clone() }.encode(), p.addr);
+                }
+            }
+            break;
+        }
+    }
+    if let Some(m) = &world.mode {
+        if !m.over {
+            eprintln!("serve: {}", match_result(&world, &peers));
         }
     }
     let secs = world.tick as f64 / acb_game::TICK_HZ as f64;
@@ -265,6 +288,17 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
         s.dropped
     );
     Ok(())
+}
+
+/// The scores line: `result: a 300, b 100 (a wins)`.
+fn match_result(world: &World, peers: &[Peer]) -> String {
+    let Some(m) = &world.mode else { return "free play".into() };
+    let scores: Vec<String> = peers.iter().enumerate().map(|(i, p)| format!("{} {}", p.name, m.score[i])).collect();
+    let best = m.score.iter().copied().max().unwrap_or(0);
+    let leaders: Vec<&str> = peers.iter().enumerate().filter(|(i, _)| m.score[*i] == best).map(|(_, p)| p.name.as_str()).collect();
+    let verdict = if leaders.len() == 1 { format!("{} wins", leaders[0]) } else { "draw".into() };
+    let secs = m.ticks as f32 / acb_game::TICK_HZ as f32;
+    format!("result after {secs:.1} s: {} ({verdict})", scores.join(", "))
 }
 
 fn handle(p: &mut Peer, data: &[u8], played: u32, link: &mut Link, start: &[u8]) {
@@ -331,6 +365,7 @@ fn send_snapshots(link: &mut Link, peers: &mut [Peer], world: &World, used: &[Ve
             pos,
             inputs,
             events: evs,
+            game: world.mode.as_ref().map(game::game_state),
         };
         let bytes = Msg::Snapshot(s).encode();
         p.snapshots += 1;

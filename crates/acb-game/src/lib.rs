@@ -13,6 +13,7 @@ pub mod ground;
 pub mod jump;
 pub mod kill;
 pub mod locomotion;
+pub mod mode;
 pub mod action;
 pub mod player;
 pub mod rules;
@@ -80,6 +81,9 @@ pub struct Scripted {
     pub frame: Mat4,
     /// Simulated time it started at.
     pub start: f32,
+    /// A kill victim in a match: stays down at the end (until the match
+    /// respawns it); otherwise a player victim gets up again.
+    pub dies: bool,
 }
 
 /// A character in the world.
@@ -200,6 +204,8 @@ pub struct World {
     /// Simulated seconds (sum of [`DT`]) and ticks since the start.
     pub time: f32,
     pub tick: u64,
+    /// A running match (contracts, scores, respawns); `None`: free play.
+    pub mode: Option<mode::Match>,
 }
 
 /// An Entity or EntityBuilder by name.
@@ -229,6 +235,7 @@ impl World {
             players: Vec::new(),
             time: 0.0,
             tick: 0,
+            mode: None,
         };
         let characters = &setup.characters;
         if characters.is_empty() {
@@ -287,7 +294,7 @@ impl World {
                 let shared = w.bodies[0].spawn;
                 if let Some(a) = w.bodies.get_mut(i) {
                     (a.spawn, a.entity, a.model) = (shared, shared, Mat4::IDENTITY);
-                    a.scripted = Some(Scripted { clip, frame: shared, start: 0.0 });
+                    a.scripted = Some(Scripted { clip, frame: shared, start: 0.0, dies: false });
                 }
             }
         }
@@ -374,12 +381,33 @@ impl World {
         self.time += DT;
         self.tick += 1;
         let t = self.time;
+        // the match: who may kill / stun whom this tick, who is in control
+        let n_bodies = self.bodies.len();
+        let n_players = self.players.len();
+        let (act_rules, relations, in_control) = match &mut self.mode {
+            Some(m) => {
+                m.events.clear();
+                let rel: Vec<Vec<rules::Relation>> = (0..self.players.len()).map(|i| (0..n_bodies).map(|j| m.relation(i, j)).collect()).collect();
+                let ctl: Vec<bool> = (0..self.players.len()).map(|i| m.alive(i) && !m.over).collect();
+                (m.rules(), Some(rel), ctl)
+            }
+            None => (rules::Rules::default(), None, vec![true; self.players.len()]),
+        };
+        let mut actions = Vec::new();
         for (i, p) in self.players.iter_mut().enumerate() {
-            let input = inputs.get(i).copied().unwrap_or_default();
+            let input = if in_control[i] { inputs.get(i).copied().unwrap_or_default() } else { PlayerInput { cam_yaw: inputs.get(i).map_or(0.0, |x| x.cam_yaw), ..Default::default() } };
+            let relation = |j: usize| relations.as_ref().map_or(rules::Relation::Npc, |r| r[i][j]);
+            let was_scripted: Vec<bool> = if relations.is_some() { self.bodies.iter().map(|b| b.scripted.is_some()).collect() } else { Vec::new() };
+            let was_attacking = p.kill.is_some();
             // ACBMP_TRACE=pose: per-tick pose change of the player (summed
             // bone rotation, radians), to spot clips that snap or reset
             let before = trace_pose().then(|| p.loco.last_pose().clone());
-            player::drive(p, &mut self.bodies, &self.clips, self.ground.as_ref(), &input, t, DT);
+            player::drive(p, &mut self.bodies, &self.clips, self.ground.as_ref(), &input, &act_rules, &relation, t, DT);
+            if relations.is_some() && p.kill.is_some() && !was_attacking {
+                if let Some(v) = (0..n_players).find(|&j| j != p.body && !was_scripted[j] && self.bodies[j].scripted.is_some()) {
+                    actions.push((i, v, input.stun));
+                }
+            }
             if let Some(before) = before {
                 let jump: f32 = before.iter().zip(p.loco.last_pose()).map(|((_, a), (_, b))| a.angle_between(*b)).sum();
                 eprintln!("pose t {t:.3} speed {:.2} change {jump:.2}", p.loco.speed);
@@ -387,6 +415,18 @@ impl World {
             // where others see it (crowd separation, targeting)
             if let Some(b) = self.bodies.get_mut(p.body) {
                 b.entity = p.entity();
+            }
+        }
+        if let Some(m) = &mut self.mode {
+            for (k, v, stun) in actions {
+                m.on_action(k, v, stun);
+            }
+            let pos: Vec<Vec3> = self.players.iter().map(|p| p.pos).collect();
+            let back: Vec<(usize, Vec3, f32)> =
+                m.tick(&pos).into_iter().map(|(p, s)| { let (at, yaw) = m.spawns.get(s).copied().unwrap_or((pos[p], 0.0)); (p, at, yaw) }).collect();
+            for (p, at, yaw) in back {
+                respawn(&mut self.players[p], &mut self.bodies);
+                self.place_player(p, at, yaw);
             }
         }
         let wander = self.wander;
@@ -448,4 +488,16 @@ impl World {
             }
         }
     }
+}
+
+/// Puts player `p` back in control: its victim clip and actions dropped.
+fn respawn(p: &mut player::Player, bodies: &mut [Body]) {
+    let b = &mut bodies[p.body];
+    b.scripted = None;
+    p.kill = None;
+    p.approach = None;
+    p.climb = None;
+    p.flight = None;
+    p.vel = Vec3::ZERO;
+    p.loco.resume(b.pose.clone());
 }

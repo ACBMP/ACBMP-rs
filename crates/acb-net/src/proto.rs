@@ -3,11 +3,13 @@
 //! Every datagram starts with `MAGIC` (2 bytes), the protocol version and a
 //! message type byte. See NOTES.md "Netcode (ours)".
 
+use acb_game::mode::MatchConfig;
 use acb_game::PlayerInput;
 use glam::Vec3;
 
 pub const MAGIC: [u8; 2] = *b"AB";
-pub const VERSION: u8 = 1;
+/// 2: match rules in `Start`, match state in `Snapshot`, match events.
+pub const VERSION: u8 = 2;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -212,6 +214,16 @@ pub enum EventKind {
     Stunned = 5,
     /// a = player (placed somewhere else or back in control).
     Respawn = 6,
+    /// a = player, b = points / 10.
+    Score = 7,
+    /// a = hunter, b = its new target.
+    ContractAssigned = 8,
+    /// a = hunter, b = the target it lost (killed by someone else, stunned).
+    ContractLost = 9,
+    /// a = hunter, b = the target it killed.
+    ContractFulfilled = 10,
+    /// a = winner (0xff: draw).
+    MatchOver = 11,
 }
 
 impl EventKind {
@@ -224,6 +236,11 @@ impl EventKind {
             4 => Death,
             5 => Stunned,
             6 => Respawn,
+            7 => Score,
+            8 => ContractAssigned,
+            9 => ContractLost,
+            10 => ContractFulfilled,
+            11 => MatchOver,
             _ => return None,
         })
     }
@@ -299,8 +316,70 @@ impl Event {
             EventKind::Death => format!("tick {} body {} killed by player {}", self.tick, self.a, self.b),
             EventKind::Stunned => format!("tick {} body {} stunned by player {}", self.tick, self.a, self.b),
             EventKind::Respawn => format!("tick {} player {} respawns", self.tick, self.a),
+            EventKind::Score => format!("tick {} player {} scores {}", self.tick, self.a, self.b as u32 * 10),
+            EventKind::ContractAssigned => format!("tick {} player {} now hunts player {}", self.tick, self.a, self.b),
+            EventKind::ContractLost => format!("tick {} player {} lost its contract on player {}", self.tick, self.a, self.b),
+            EventKind::ContractFulfilled => format!("tick {} player {} fulfilled its contract on player {}", self.tick, self.a, self.b),
+            EventKind::MatchOver if self.a == u8::MAX => format!("tick {} match over: draw", self.tick),
+            EventKind::MatchOver => format!("tick {} match over: player {} wins", self.tick, self.a),
         }
     }
+}
+
+// ----------------------------------------------------------- match state
+
+/// No target / not dead.
+pub const NONE: u8 = u8::MAX;
+
+/// One player's match state as a snapshot carries it (7 bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlayerGame {
+    /// Player it holds a contract on ([`NONE`]).
+    pub target: u8,
+    pub score: u16,
+    /// Ticks until it respawns (0: alive).
+    pub respawn: u16,
+    /// Ticks until it may get a new contract.
+    pub cooldown: u16,
+}
+
+/// The match part of a snapshot (5 + 7 per player bytes).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GameState {
+    pub ticks_left: u32,
+    pub over: bool,
+    pub players: Vec<PlayerGame>,
+}
+
+impl GameState {
+    fn write(&self, w: &mut Writer) {
+        w.u32(self.ticks_left);
+        w.u8(self.over as u8);
+        for p in &self.players {
+            w.u8(p.target);
+            w.u16(p.score);
+            w.u16(p.respawn);
+            w.u16(p.cooldown);
+        }
+    }
+
+    fn read(r: &mut Reader, players: u8) -> Option<GameState> {
+        let ticks_left = r.u32()?;
+        let over = r.u8()? != 0;
+        let players = (0..players).map(|_| Some(PlayerGame { target: r.u8()?, score: r.u16()?, respawn: r.u16()?, cooldown: r.u16()? })).collect::<Option<_>>()?;
+        Some(GameState { ticks_left, over, players })
+    }
+}
+
+fn write_config(w: &mut Writer, c: &MatchConfig) {
+    w.f32(c.time_limit);
+    w.u32(c.score_limit);
+    w.f32(c.respawn_delay);
+    w.f32(c.start_delay);
+}
+
+fn read_config(r: &mut Reader) -> Option<MatchConfig> {
+    Some(MatchConfig { time_limit: r.f32()?, score_limit: r.u32()?, respawn_delay: r.f32()?, start_delay: r.f32()? })
 }
 
 // -------------------------------------------------------------- messages
@@ -370,6 +449,8 @@ pub struct Snapshot {
     /// Per player.
     pub inputs: Vec<InputRuns>,
     pub events: Vec<Event>,
+    /// The match after `tick` (`None`: free play).
+    pub game: Option<GameState>,
 }
 
 pub const FULL: u32 = u32::MAX;
@@ -387,7 +468,8 @@ pub enum Msg {
     Welcome { slot: u8, players: u8 },
     Reject { reason: String },
     Lobby { joined: u8, players: u8, echo_ms: u32 },
-    Start { map: String, snapshot_every: u8, slots: Vec<Slot> },
+    /// `rules`: the match everyone runs (`None`: free play).
+    Start { map: String, snapshot_every: u8, slots: Vec<Slot>, rules: Option<MatchConfig> },
     Snapshot(Snapshot),
     Over { reason: String },
 }
@@ -448,7 +530,7 @@ impl Msg {
                 w.u8(*players);
                 w.u32(*echo_ms);
             }
-            Msg::Start { map, snapshot_every, slots } => {
+            Msg::Start { map, snapshot_every, slots, rules } => {
                 w.u8(T_START);
                 w.str(map);
                 w.u8(*snapshot_every);
@@ -463,6 +545,13 @@ impl Msg {
                         }
                         None => w.u8(0),
                     }
+                }
+                match rules {
+                    Some(c) => {
+                        w.u8(1);
+                        write_config(&mut w, c);
+                    }
+                    None => w.u8(0),
                 }
             }
             Msg::Snapshot(s) => {
@@ -490,6 +579,13 @@ impl Msg {
                 w.u8(s.events.len() as u8);
                 for e in &s.events {
                     e.write(&mut w);
+                }
+                match &s.game {
+                    Some(g) => {
+                        w.u8(1);
+                        g.write(&mut w);
+                    }
+                    None => w.u8(0),
                 }
             }
             Msg::Over { reason } => {
@@ -528,7 +624,8 @@ impl Msg {
                     let at = if r.u8()? != 0 { Some([r.f32()?, r.f32()?, r.f32()?, r.f32()?]) } else { None };
                     slots.push(Slot { name, character, at });
                 }
-                Msg::Start { map, snapshot_every, slots }
+                let rules = if r.u8()? != 0 { Some(read_config(&mut r)?) } else { None };
+                Msg::Start { map, snapshot_every, slots, rules }
             }
             T_SNAPSHOT => {
                 let tick = r.u32()?;
@@ -552,7 +649,8 @@ impl Msg {
                 }
                 let n = r.u8()?;
                 let events = (0..n).map(|_| Event::read(&mut r)).collect::<Option<_>>()?;
-                Msg::Snapshot(Snapshot { tick, baseline, input_ack, lead, echo_ms, hold_ms, changed, players, pos, inputs, events })
+                let game = if r.u8()? != 0 { Some(GameState::read(&mut r, players)?) } else { None };
+                Msg::Snapshot(Snapshot { tick, baseline, input_ack, lead, echo_ms, hold_ms, changed, players, pos, inputs, events, game })
             }
             T_OVER => Msg::Over { reason: r.str()? },
             _ => return None,
@@ -739,7 +837,21 @@ mod tests {
             players: 3,
             pos,
             inputs: vec![InputRuns::encode(119, &[a, a, b]), InputRuns::encode(119, &[]), InputRuns::encode(110, &[b; 11])],
-            events: vec![Event { tick: 119, kind: EventKind::KillRejected, a: 1, b: Reject::Range as u8 }],
+            events: vec![
+                Event { tick: 119, kind: EventKind::KillRejected, a: 1, b: Reject::Range as u8 },
+                Event { tick: 120, kind: EventKind::Score, a: 0, b: 10 },
+                Event { tick: 120, kind: EventKind::ContractFulfilled, a: 0, b: 2 },
+                Event { tick: 120, kind: EventKind::MatchOver, a: NONE, b: 0 },
+            ],
+            game: Some(GameState {
+                ticks_left: 17_999,
+                over: false,
+                players: vec![
+                    PlayerGame { target: 2, score: 100, respawn: 0, cooldown: 0 },
+                    PlayerGame { target: NONE, score: 0, respawn: 0, cooldown: 300 },
+                    PlayerGame { target: 0, score: 1200, respawn: 299, cooldown: 0 },
+                ],
+            }),
         }
     }
 
@@ -759,6 +871,14 @@ mod tests {
                 map: "m".into(),
                 snapshot_every: 2,
                 slots: vec![Slot { name: "a".into(), character: "c".into(), at: Some([1.0, 2.0, 3.0, 4.0]) }, Slot { name: "b".into(), character: "d".into(), at: None }],
+                rules: None,
+            },
+            Msg::Snapshot(Snapshot { game: None, ..s.clone() }),
+            Msg::Start {
+                map: "m".into(),
+                snapshot_every: 2,
+                slots: vec![],
+                rules: Some(MatchConfig { time_limit: 120.0, score_limit: 500, respawn_delay: 5.0, start_delay: 3.0 }),
             },
             Msg::Snapshot(s),
             Msg::Over { reason: "done".into() },
