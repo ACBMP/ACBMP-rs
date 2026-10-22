@@ -403,11 +403,16 @@ impl World {
             let spots = hide::spots(archive);
             match hide::HideClips::load(archive, builtins) {
                 Some(clips) => {
-                    eprintln!("hide: {} haystacks", spots.len());
+                    let seats = spots.iter().filter(|s| s.seat.is_some()).count();
+                    eprintln!("hide: {} haystacks", spots.len() - seats);
+                    eprintln!("hide: {seats} bench seats{}", if clips.sit.is_some() { "" } else { " (sit clips not found)" });
                     if trace() {
                         for (i, s) in spots.iter().enumerate() {
                             let c = s.center();
-                            eprintln!("hide spot {i} at {:.2} {:.2} {:.2} kind {}", c.x, c.y, c.z, s.kind);
+                            match s.seat {
+                                Some(t) => eprintln!("hide spot {i} at {:.2} {:.2} {:.2} seat {t} yaw {:.0}", c.x, c.y, c.z, hide::seat_yaw(s).to_degrees()),
+                                None => eprintln!("hide spot {i} at {:.2} {:.2} {:.2} kind {}", c.x, c.y, c.z, s.kind),
+                            }
                         }
                     }
                     Some(hide::Hide { spots, clips })
@@ -497,7 +502,11 @@ impl World {
             .collect();
         let polygons = if npcs.len() >= rules::BLEND_MIN_GROUP { rules::blend_polygons(&npcs) } else { Vec::new() };
         for p in &mut self.players {
-            p.blended = p.hide.is_none() && rules::blended(&p.actor(), &polygons);
+            // on a bench: blended (retail benches are blend spots)
+            p.blended = match &p.hide {
+                Some(h) => h.seated(),
+                None => rules::blended(&p.actor(), &polygons),
+            };
         }
         if let Some(m) = &mut self.mode {
             for (k, v, set) in actions {

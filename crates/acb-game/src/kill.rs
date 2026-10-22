@@ -17,7 +17,7 @@ const REFERENCE: u32 = 0x2c52_cbb0;
 pub struct KillClips {
     /// (assassin, victim) pairs, front then back for each kind: see
     /// [`WALK`], [`STUN`], [`RUN`], [`AIR`], [`DROP`], [`HAY_GRAB`],
-    /// [`TO_HAY`]. A kind the persona lacks falls back to the walking pair.
+    /// [`TO_HAY`], [`TO_BENCH`], [`FROM_BENCH`]. A kind the persona lacks falls back to the walking pair.
     pub sets: Vec<(Clip, Clip)>,
 }
 
@@ -39,6 +39,13 @@ pub const HAY_GRAB: usize = 10;
 /// Into a hiding spot: `{id}_Walk2Hayground_Kill_ass` (front and back
 /// alike) / `*_Walk2HayGround_Kill_Out_npc`.
 pub const TO_HAY: usize = 12;
+/// Onto someone sitting on a bench: `{id}_Walk2Bench_Front_kill_ass` /
+/// `_killed_npc` (front and back alike); only ID05 and ID14 have their own,
+/// the others use ID05's.
+pub const TO_BENCH: usize = 14;
+/// From a bench onto a passer-by: `{id}_Bench2Walk_{Front,Back}_100_kill_ass`
+/// / `_100_killed_npc` (ID05's for the personas without their own).
+pub const FROM_BENCH: usize = 16;
 
 /// Victim offset of a stun: `IDXX_G2G_Humil_*_Win_{ass,npc}` are authored
 /// each around its own origin (assassin facing +Y, the victim's frame
@@ -87,7 +94,8 @@ impl KillClips {
                 .find(|u| archive.loc(*u).is_some_and(|l| l.name.to_ascii_lowercase().ends_with("_walk2hayground_kill_out_npc")))
                 .and_then(|u| Clip::load_with(archive, u, builtins))
         };
-        for (k, side) in ["Front", "Back"].into_iter().enumerate().cycle().take(10) {
+        let bench = |who: &str| pair(format!("{who}_Walk2Bench_Front_kill_ass"), format!("{who}_Walk2Bench_Front_killed_npc"));
+        for (k, side) in ["Front", "Back"].into_iter().enumerate().cycle().take(14) {
             let kind = sets.len() / 2;
             let lower = side.to_ascii_lowercase();
             let got = match kind {
@@ -95,7 +103,12 @@ impl KillClips {
                 3 => pair(format!("{id}_Air2G_{side}_Kill_ass"), format!("{id}_Air2G_{side}_Killed_npc")),
                 4 => pair(format!("{id}_Drop2G_{side}_Kill_ass"), format!("{id}_Drop2G_{side}_Killed_npc")),
                 5 => pair(format!("{id}_Hayground2Walk_grab_{lower}_kill_ass"), format!("{id}_Hayground2Walk_grab_{lower}_killed_npc")),
-                _ => load(format!("{id}_Walk2Hayground_Kill_ass")).zip(hay_victim()),
+                6 => load(format!("{id}_Walk2Hayground_Kill_ass")).zip(hay_victim()),
+                7 => bench(&id).or_else(|| bench("ID05")),
+                _ => {
+                    let off = |who: &str| pair(format!("{who}_Bench2Walk_{side}_100_kill_ass"), format!("{who}_Bench2Walk_{side}_100_killed_npc"));
+                    off(&id).or_else(|| off("ID05"))
+                }
             };
             let got = match got {
                 Some(g) => g,
@@ -135,7 +148,12 @@ impl KillClips {
         let side = kind + side(from, victim, victim_yaw);
         let to_ass = (from - victim).truncate();
         let (ass, _) = &self.sets[side];
-        let (start, _) = reference(ass, 0.0)?;
+        let Some((start, _)) = reference(ass, 0.0) else {
+            // the bench clips carry no Reference track: play them in the
+            // assassin's frame facing the victim (our stand-in placement)
+            let world = to_ass.y.atan2(to_ass.x) + std::f32::consts::FRAC_PI_2;
+            return Some((side, Mat4::from_rotation_translation(Quat::from_rotation_z(world), from)));
+        };
         // turn the frame so the assassin's start pelvis points at `from`
         let local = start.y.atan2(start.x);
         let world = to_ass.y.atan2(to_ass.x);

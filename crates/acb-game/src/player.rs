@@ -85,6 +85,8 @@ impl Player {
             rules::Stance::Air
         } else if self.hidden {
             rules::Stance::Hidden
+        } else if self.hide.as_ref().is_some_and(|h| h.seated()) {
+            rules::Stance::Seated
         } else {
             rules::Stance::Ground
         };
@@ -142,6 +144,8 @@ pub fn kill_kind(situation: rules::Situation, act: rules::Act) -> usize {
         (_, S::Drop2Ground) => kill::DROP,
         (_, S::Ground2Haystack) => kill::TO_HAY,
         (_, S::Haystack2Ground) => kill::HAY_GRAB,
+        (_, S::Ground2Bench) => kill::TO_BENCH,
+        (_, S::Bench2Ground) => kill::FROM_BENCH,
     }
 }
 
@@ -536,6 +540,21 @@ pub(crate) fn drive(
             p.approach = None;
             p.fall_from = p.pos.z;
             let input = PlayerInput { kill: false, stun: false, ..*input };
+            return drive(p, bodies, clipset, ground, &input, rules, relation, seen, time, 0.0);
+        }
+        // onto a bench seat: the jump button at low profile next to one
+        let seat = if input.jump && !high && !air && hide.clips.sit.is_some() { crate::hide::seat(&hide.spots, p.pos) } else { None };
+        if let Some(i) = seat {
+            if crate::trace() {
+                eprintln!("hide: sit on seat {i} from {:.2} {:.2} {:.2}", p.pos.x, p.pos.y, p.pos.z);
+            }
+            let pose = p.loco.last_pose().clone();
+            p.hide = Some(crate::hide::Hiding::sit(hide, i, p.yaw, pose.clone(), bodies[me].world));
+            p.loco.resume(pose);
+            p.vel = Vec3::ZERO;
+            p.approach = None;
+            p.fall_from = p.pos.z;
+            let input = PlayerInput { kill: false, stun: false, jump: false, ..*input };
             return drive(p, bodies, clipset, ground, &input, rules, relation, seen, time, 0.0);
         }
     }

@@ -930,3 +930,21 @@ Pure, deterministic functions the server and client prediction share (no clock, 
   `xx_rest_sit_sitting_tr_sit_idle_040cm_01`, loop `xx_rest_sit_idle_040cm_01`, out
   `xx_rest_sit_idle_040cm_01_tr_l_wait_footl`; kills exist (`IDxx_Bench2Bench_{Left,Right}_Kill_*`,
   `ID05_Walk2Bench_*`, `ID05_Bench2Walk_*`, `xx_h_assassina_sit_bench_close_*`), all in DataPC.forge.
+
+## Benches, deterministic net tests (proto v5)
+- Seats (`hide.rs`): `RestObjectAttributeComponent.RestSpots[]` (`RestSpotType` 0/1/2, `LocalPosition` ~(0.7,
+  +1/0/-1, 0) entity space): 102 seats (34 benches) on San Donato, appended after the 20 haystacks as
+  `Spot { seat: Some(type) }`. Facing = entity +X (our reading, not checked visually). Sit (our reading of
+  retail): jump button (F) at low profile within 0.6 m; clip = `xx_rest_sit_{left,right}_{000,090,180}_to_sitting`
+  (turn 0/+-90/180, picked to reach the seat facing) + `_sitting_tr_sit_idle_040cm_01`, loop
+  `_idle_040cm_01`, out `_idle_040cm_01_tr_l_wait_footl` straight ahead. A fresh move key stands up.
+  Seated = `Stance::Seated`, `Player::blended` (retail benches are blend spots), not hidden.
+- Bench kills: `Ground2Bench` (`kill::TO_BENCH` 14, `{id}_Walk2Bench_Front_kill_ass`/`_killed_npc`) and
+  `Bench2Ground` (`FROM_BENCH` 16, `{id}_Bench2Walk_{Front,Back}_100_kill_ass`/`_killed_npc`), ID05's for
+  personas without their own (ID07 has only cameras), DIST_KILL_RUN reach, all-around from the bench. These
+  clips have no Reference track, so `KillClips::plan` places them in the assassin's frame facing the victim
+  (stand-in). kills.sh `bench`. Wire v5: flag `F_SEATED` 64.
+- Net tests: duel_map's script is a pure function of the sim tick (it read remote views / arrived events);
+  the winner check is by slot (5% loss can delay "a"'s join so "b" gets slot 0); B turns at 3.4 s so A
+  always mispredicts the dodge. 20/20 passes, kill at tick 516 every run. tools/duel.sh still feeds viewer
+  keys in real time (kill tick varies there).

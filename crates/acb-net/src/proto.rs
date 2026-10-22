@@ -10,7 +10,7 @@ use glam::Vec3;
 pub const MAGIC: [u8; 2] = *b"AB";
 /// 2: match rules in `Start`, match state in `Snapshot`, match events.
 /// 4: crowd size and seed in `Start`.
-pub const VERSION: u8 = 4;
+pub const VERSION: u8 = 5;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -130,6 +130,8 @@ pub const F_VICTIM: u8 = 8;
 pub const F_HIDDEN: u8 = 16;
 /// Blended in a crowd group.
 pub const F_BLENDED: u8 = 32;
+/// Sitting on a bench (wire v5; also F_BLENDED once seated).
+pub const F_SEATED: u8 = 64;
 
 fn cm(v: f32) -> i16 {
     (v * 100.0).trunc().clamp(i16::MIN as f32, i16::MAX as f32) as i16

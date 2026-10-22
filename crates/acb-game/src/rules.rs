@@ -89,8 +89,10 @@ pub enum Stance {
     Ground,
     Air,
     Climb,
-    /// In a hiding spot (haystack, bench, crowd blend).
+    /// In a hiding spot (haystack).
     Hidden,
+    /// Sitting on a bench (blended; can be killed, cannot act).
+    Seated,
     /// Being killed, stunned or dead: nobody can act on it.
     Down,
 }
@@ -148,6 +150,10 @@ pub enum Situation {
     Ground2Haystack,
     /// Out of a hiding spot onto a passer-by (`Hayground2Walk_grab`).
     Haystack2Ground,
+    /// Killing someone sitting on a bench (`Walk2Bench`).
+    Ground2Bench,
+    /// From a bench onto a passer-by (`Bench2Walk`).
+    Bench2Ground,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,7 +268,7 @@ pub fn check(act: Act, killer: &Actor, victim: &Actor, rel: Relation, rules: &Ru
     // very close victims are always "ahead"
     // from a hiding spot all around (our reading: the hidden killer has no
     // facing to aim with; retail grabs front or back by the victim's side)
-    let in_cone = dist < BAND_CLOSE || killer.stance == Stance::Hidden || dir.dot(killer.facing()) >= TARGET_CONE_COS;
+    let in_cone = dist < BAND_CLOSE || matches!(killer.stance, Stance::Hidden | Stance::Seated) || dir.dot(killer.facing()) >= TARGET_CONE_COS;
     let side = side(killer.pos, victim.pos, victim.yaw);
     let running = killer.speed >= RUN_SPEED;
     let (situation, reach, approach) = match (killer.stance, victim.stance) {
@@ -271,6 +277,9 @@ pub fn check(act: Act, killer: &Actor, victim: &Actor, rel: Relation, rules: &Ru
         (Stance::Ground, Stance::Ground) => (Situation::Ground2Ground, spacing + DIST_GAP, true),
         (Stance::Ground, Stance::Hidden) if act == Act::Kill => (Situation::Ground2Haystack, DIST_KILL_RUN, false),
         (Stance::Hidden, Stance::Ground) => (Situation::Haystack2Ground, DIST_KILL_RUN, false),
+        // a seated victim: our reading, like the haystack (no walk-in)
+        (Stance::Ground, Stance::Seated) if act == Act::Kill => (Situation::Ground2Bench, DIST_KILL_RUN, false),
+        (Stance::Seated, Stance::Ground) if act == Act::Kill => (Situation::Bench2Ground, DIST_KILL_RUN, false),
         (Stance::Air | Stance::Climb, Stance::Ground) if act == Act::Kill => {
             // from above only, within droptech reach (3D)
             if dz > -0.5 {

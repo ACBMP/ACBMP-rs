@@ -7,6 +7,9 @@
 #        (35.57: retail anim-speed ramp reaches the grant 1 cm earlier)
 #   hay  runs into haystack 13 (24.62,7), body 1 placed at 24.62,9.4: Haystack2Ground Front,
 #        start set 10 at 24.62 7.00 0.00, lead 0.40, player at 24.48 9.35 0.05
+#   bench  F sits on bench seat 20 (-23.25,-42.56), body 1 1.4 m in front: Bench2Ground Front,
+#        start set 16 at -23.25 -42.56 0.00, lead 0.10, player at -23.25 -42.56 0.05 (ID05 Bench2Walk
+#        in the player's frame: our stand-in, the clips have no Reference track)
 set -u
 : "${ACBMP_SCHEMAS:=$HOME/Music/anvilforge-py/src/anvilforge/schemas}" "${ACBMP_EXE:=$HOME/Music/ACB/ACBMP.exe}"
 export ACBMP_SCHEMAS ACBMP_EXE
@@ -16,6 +19,7 @@ runs=(
   "air|36.5,20.2,5,-90|0=e 1="
   "run|31,20.4,0.02,-90|0=w,shift,e 2.5="
   "hay|21,7,0,-90,24.62,9.4,0,180|0=w,shift 0.8= 2.5=e 2.6="
+  "bench|-23.25,-42.96,0.0,0,-23.25,-43.96,0.0,0|0.2=f 0.3= 2.5=e 2.6="
 )
 for fps in 60 144; do
   for r in "${runs[@]}"; do

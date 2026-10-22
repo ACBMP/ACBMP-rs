@@ -12,7 +12,7 @@ use acb_game::{Setup, World};
 use acb_world::Archive;
 use glam::Vec3;
 
-use crate::proto::{CrowdConfig, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_VICTIM, NONE};
+use crate::proto::{CrowdConfig, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_SEATED, F_VICTIM, NONE};
 
 /// Builds a match world: slot `i` is player `i` on the map's player spawn
 /// `i` (or its `at`) plus `crowd.count` NPCs seeded from `crowd.seed`
@@ -155,6 +155,9 @@ pub fn flags(world: &World, i: usize) -> u8 {
     }
     if p.blended {
         f |= F_BLENDED;
+    }
+    if p.hide.as_ref().is_some_and(|h| h.sit.is_some()) {
+        f |= F_SEATED;
     }
     f
 }
