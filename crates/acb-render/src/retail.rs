@@ -37,8 +37,8 @@ pub const MAIN_PASS: u32 = 1;
 pub const LIGHTING_KEY: u32 = 1;
 /// The shadowed sun (cascaded shadow map) instead of the direct light.
 pub const SHADOWED_LIGHTING_KEY: u32 = 0x80;
-/// Instance attribute locations: WVP rows, then World rows.
-const INSTANCE_LOC: u32 = 24;
+/// Instance rows per instance: 4 WVP rows, then 4 World rows.
+const INSTANCE_ROWS: u32 = 8;
 /// Pixel material register holding the alpha-test reference.
 const ALPHA_REF_REG: u32 = wgsl::PS_CONSTS as u32 - 1;
 /// Bytes per instance: 4 WVP rows + 4 World rows.
@@ -505,15 +505,26 @@ impl Retail {
 
         let vs_prog = d3d9_shader::parse(&vs_perm.code)?;
         let ps_prog = d3d9_shader::parse(&ps_perm.code)?;
+        // Instance rows take the lowest locations the vertex format leaves
+        // free: fixed 24..32 would need 32 attributes, and Intel's Vulkan
+        // driver allows only 29.
+        let instance_locs: Vec<u32> = (0..)
+            .filter(|l| !attrs.iter().any(|a| a.shader_location == *l))
+            .take(INSTANCE_ROWS as usize)
+            .collect();
+        let max_loc = r.device.limits().max_vertex_attributes;
+        if instance_locs.iter().any(|&l| l >= max_loc) {
+            anyhow::bail!("vertex format {} needs more than {max_loc} vertex attributes", key.format);
+        }
         let mut instance_consts = BTreeMap::new();
         for c in &vs_prog.constants {
             let base = match c.name.as_str() {
-                "g_WorldViewProj" => INSTANCE_LOC,
-                "g_World" => INSTANCE_LOC + 4,
+                "g_WorldViewProj" => 0,
+                "g_World" => 4,
                 _ => continue,
             };
             for k in 0..c.count.min(4) {
-                instance_consts.insert(c.index + k, base + k);
+                instance_consts.insert(c.index + k, instance_locs[(base + k) as usize]);
             }
         }
         let material_regs = |params: &[acb_world::ShaderParam]| -> BTreeSet<u32> {
@@ -596,11 +607,13 @@ impl Retail {
             bind_group_layouts: &[Some(&self.consts_layout), Some(&tex_layout)],
             immediate_size: 0,
         });
-        let instance_attrs: Vec<wgpu::VertexAttribute> = (0..8)
-            .map(|k| wgpu::VertexAttribute {
+        let instance_attrs: Vec<wgpu::VertexAttribute> = instance_locs
+            .iter()
+            .enumerate()
+            .map(|(k, &loc)| wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
                 offset: 16 * k as u64,
-                shader_location: INSTANCE_LOC + k,
+                shader_location: loc,
             })
             .collect();
         let buffers = [
