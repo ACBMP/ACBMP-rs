@@ -10,6 +10,7 @@
 pub mod climb;
 pub mod crowd;
 pub mod ground;
+pub mod hide;
 pub mod jump;
 pub mod kill;
 pub mod locomotion;
@@ -163,6 +164,8 @@ pub struct Clipset {
     pub loco: Option<Clips>,
     pub kills: Option<KillClips>,
     pub climbs: Option<ClimbClips>,
+    /// Hiding spots and their clips (`hide.rs`).
+    pub hide: Option<hide::Hide>,
 }
 
 /// The crowd: the navmesh and the clips wanderers blend.
@@ -238,7 +241,7 @@ impl World {
         let mut w = World {
             ground: None,
             crowd: None,
-            clips: Clipset { loco: None, kills: None, climbs: None },
+            clips: Clipset { loco: None, kills: None, climbs: None, hide: None },
             clip: None,
             wander: setup.wander,
             bodies: Vec::new(),
@@ -370,7 +373,28 @@ impl World {
             }
         }
         w.clip = clip;
-        w.clips = Clipset { loco, kills, climbs };
+        let hide = if setup.play {
+            let spots = hide::spots(archive);
+            match hide::HideClips::load(archive, builtins) {
+                Some(clips) => {
+                    eprintln!("hide: {} haystacks", spots.len());
+                    if trace() {
+                        for (i, s) in spots.iter().enumerate() {
+                            let c = s.center();
+                            eprintln!("hide spot {i} at {:.2} {:.2} {:.2} kind {}", c.x, c.y, c.z, s.kind);
+                        }
+                    }
+                    Some(hide::Hide { spots, clips })
+                }
+                None => {
+                    eprintln!("hide: haystack clips not found");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        w.clips = Clipset { loco, kills, climbs, hide };
         Ok(w)
     }
 
@@ -518,6 +542,8 @@ fn respawn(p: &mut player::Player, bodies: &mut [Body]) {
     p.approach = None;
     p.climb = None;
     p.flight = None;
+    p.hide = None;
+    p.hidden = false;
     p.vel = Vec3::ZERO;
     p.loco.resume(b.pose.clone());
 }
