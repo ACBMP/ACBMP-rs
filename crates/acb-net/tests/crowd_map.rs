@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use acb_anim::BuiltinTracks;
-use acb_game::PlayerInput;
+use acb_game::{rules, PlayerInput};
 use acb_net::client::{Client, ClientConfig, ClientStats};
 use acb_net::link::NetSim;
 use acb_net::proto::CrowdConfig;
@@ -30,13 +30,27 @@ fn env() -> Option<(PathBuf, PathBuf, PathBuf)> {
     Some((schemas, multi.join(MAP), exe))
 }
 
-/// Slot 0 stands; slot 1 walks (low profile, may blend) away and back.
-fn script(slot: usize, tick: u32) -> PlayerInput {
-    let t = tick as f32 / 60.0;
-    let mut i = PlayerInput { cam_yaw: if slot == 0 { 0.0 } else { std::f32::consts::PI }, ..Default::default() };
-    if slot == 1 {
-        i.forward = (0.5..2.5).contains(&t);
-        i.back = (2.5..4.5).contains(&t);
+/// Slot 0 stands; slot 1 walks (low profile) to the nearest crowd blend
+/// group's centre (running while farther than 1.2 m) and keeps following it.
+fn script(slot: usize, tick: u32, world: &acb_game::World) -> PlayerInput {
+    let mut i = PlayerInput::default();
+    if slot != 1 || tick < 30 {
+        return i;
+    }
+    let me = world.players[slot].pos;
+    let members: Vec<rules::Member> = world.bodies[world.players.len()..]
+        .iter()
+        .map(|b| rules::Member { pos: b.entity.w_axis.truncate(), yaw: (-b.entity.y_axis.x).atan2(b.entity.y_axis.y) })
+        .collect();
+    let centre = rules::blend_groups(&members)
+        .into_iter()
+        .map(|g| g.iter().map(|&k| members[k].pos).sum::<Vec3>() / g.len() as f32)
+        .min_by(|a, b| a.distance(me).total_cmp(&b.distance(me)));
+    if let Some(c) = centre {
+        let d = (c - me).truncate();
+        i.cam_yaw = d.y.atan2(d.x);
+        i.forward = d.length() > 0.3;
+        i.run = d.length() > 1.2;
     }
     i
 }
@@ -67,8 +81,9 @@ fn play(schemas: PathBuf, map: PathBuf, exe: PathBuf, name: &str) -> Seen {
     let mut crowd = BTreeMap::new();
     let mut blended = 0;
     let t0 = Instant::now();
-    while (world.tick < 300 || client.confirmed_tick < 290) && client.over.is_none() && t0.elapsed() < Duration::from_secs(60) {
-        client.advance(&mut world, |t| script(slot, t));
+    while (world.tick < 380 || client.confirmed_tick < 370) && client.over.is_none() && t0.elapsed() < Duration::from_secs(60) {
+        let input = script(slot, world.tick as u32, &world);
+        client.advance(&mut world, |_| input);
         if let Some((t, c)) = client.confirmed_crowd() {
             crowd.insert(t, c);
         }
@@ -117,6 +132,8 @@ fn crowd_over_lossy_localhost() {
         assert_eq!(s.stats.exact, s.stats.checked, "slot {} desynced", s.slot);
         assert_eq!(s.stats.game_desyncs, 0, "slot {} match desynced", s.slot);
     }
+    // slot 1 found a group and blended (its flags matched the server's)
+    assert!(seen[1].blended > 30, "slot 1 blended {} ticks", seen[1].blended);
     // both clients simulate the same crowd
     let common: Vec<u64> = seen[0].crowd.keys().filter(|t| seen[1].crowd.contains_key(t)).copied().collect();
     assert!(common.len() > 50, "{} common confirmed ticks", common.len());
