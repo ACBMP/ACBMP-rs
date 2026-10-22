@@ -392,6 +392,77 @@ mod tests {
     }
 
     #[test]
+    fn escape_scores_and_reassigns() {
+        let mut m = m(3);
+        m.config.time_limit = 100.0;
+        let mut who = vec![Presence::at(Vec3::ZERO), Presence::at(Vec3::new(20.0, 0.0, 0.0)), Presence::at(Vec3::new(0.0, 30.0, 0.0))];
+        let see = std::cell::Cell::new(true);
+        let los = |_: usize, _: usize| see.get();
+        for _ in 0..30 {
+            m.tick(&who, &los);
+        }
+        let h = 0;
+        let t = m.contracts.hunters[h].target.unwrap();
+        // the hunter runs up within 10 m in sight: chase
+        who[h].pos = who[t].pos - Vec3::new(8.0, 0.0, 0.0);
+        who[h].running = true;
+        m.tick(&who, &los);
+        assert!(m.events.contains(&MatchEvent::ChaseStarted { hunter: h, target: t }), "{:?}", m.events);
+        // out of sight, not hidden: 12 s to escape; back in sight resets
+        see.set(false);
+        for _ in 0..ticks(6.0) {
+            m.tick(&who, &los);
+        }
+        assert!((m.chases[h].unwrap().coef - 0.5).abs() < 0.01);
+        see.set(true);
+        m.tick(&who, &los);
+        assert_eq!(m.chases[h].unwrap().coef, 0.0);
+        assert_eq!(m.chases[h].unwrap().phase, ChasePhase::InSight);
+        // out of sight and hidden: 7 s
+        see.set(false);
+        who[t].hidden = true;
+        let mut n = 0;
+        while m.chases[h].is_some() {
+            m.tick(&who, &los);
+            n += 1;
+            assert!(n < 1000, "{:?} {:?}", m.chases[h], m.contracts.hunters[h]);
+        }
+        assert!((ticks(7.0)..=ticks(7.0) + 1).contains(&n), "{n}");
+        assert!(m.events.contains(&MatchEvent::Escaped { hunter: h, target: t }));
+        assert_eq!(m.score[t], ESCAPE_POINTS);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: h, target: t })));
+        assert_eq!(m.contracts.hunters[h].target, None);
+        // a new contract after the cooldown
+        for _ in 0..ticks(crate::rules::MIN_WAIT_TIME) + 1 {
+            m.tick(&who, &los);
+        }
+        assert!(m.contracts.hunters[h].target.is_some());
+    }
+
+    #[test]
+    fn falls_hurt_and_kill() {
+        let mut m = m(2);
+        let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0)];
+        run(&mut m, 30, &pos);
+        assert_eq!(m.contracts.relation(0, 1), Relation::Mutual);
+        m.on_fall(1, 30);
+        assert_eq!(m.health[1], 70);
+        assert!(m.alive(1));
+        m.on_fall(1, 75);
+        assert!(!m.alive(1));
+        assert!(m.events.contains(&MatchEvent::Fall { player: 1, damage: 75, fatal: true }));
+        // no killer: nobody scores, the pursuer loses its contract
+        assert_eq!(m.score, vec![0, 0]);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: 0, target: 1 })));
+        run(&mut m, ticks(1.0) + 1, &pos);
+        assert!(m.alive(1));
+        assert_eq!(m.health[1], FULL_HEALTH);
+        // a fatal fall (200 %) from full life
+        m.on_fall(0, 200);
+        assert!(!m.alive(0));
+    }
+
+    #[test]
     fn three_players_and_limits() {
         let mut m = m(3);
         let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0), Vec3::new(0.0, 30.0, 0.0)];

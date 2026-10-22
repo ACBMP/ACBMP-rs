@@ -276,7 +276,7 @@ mod tests {
         // walking (low profile), facing away, too far
         assert_eq!(entry(&s, p, Vec2::X, false, false, 0.0), None);
         assert_eq!(entry(&s, p, -Vec2::X, true, false, 0.0), None);
-        assert_eq!(entry(&s, Vec3::new(7.9, 0.0, 0.0), Vec2::X, true, false, 0.0), None);
+        assert_eq!(entry(&s, Vec3::new(7.2, 0.0, 0.0), Vec2::X, true, false, 0.0), None);
         // falling onto it: from 1.5 m above the top, not from higher up
         assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.0), Vec2::ZERO, false, true, -3.0), Some(0));
         assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.2), Vec2::ZERO, false, true, -3.0), None);
