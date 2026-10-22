@@ -136,9 +136,18 @@ pub enum Act {
 /// Which retail kill situation applies (`KillAnimTree.Situations`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Situation {
+    /// Walking (or standing) ground kill, after a walk-in; also stuns.
     Ground2Ground,
+    /// Running ground kill (`G2G_*_Run2All`), immediate.
+    Run2Ground,
+    /// Falling or jumping onto the victim (`Air2G`).
     AirDrop2Ground,
+    /// Letting go of a hold above the victim (`Drop2G`).
+    Drop2Ground,
+    /// Killing someone in a hiding spot (`Walk2Hayground`).
     Ground2Haystack,
+    /// Out of a hiding spot onto a passer-by (`Hayground2Walk_grab`).
+    Haystack2Ground,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,8 +168,12 @@ pub enum Band {
 /// Why an action is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reject {
-    /// Not a valid victim for this act (not my target / not my pursuer).
+    /// Not a valid victim for this act (a crowd NPC the rules protect).
     Relation,
+    /// A player, but not the one the contract is on.
+    NotTarget,
+    /// A stun on a player who is not hunting the stunner.
+    NotPursuer,
     /// Killer or victim state does not allow it.
     Stance,
     Range,
@@ -233,9 +246,13 @@ pub fn check(act: Act, killer: &Actor, victim: &Actor, rel: Relation, rules: &Ru
         _ => false,
     };
     if !allowed {
-        return Err(Reject::Relation);
+        return Err(match (act, rel) {
+            (_, Relation::Npc) => Reject::Relation,
+            (Act::Kill, _) => Reject::NotTarget,
+            (Act::Stun, _) => Reject::NotPursuer,
+        });
     }
-    if victim.stance == Stance::Down || killer.stance == Stance::Down || killer.stance == Stance::Hidden {
+    if victim.stance == Stance::Down || killer.stance == Stance::Down || (killer.stance == Stance::Hidden && act == Act::Stun) {
         return Err(Reject::Stance);
     }
     let d = (victim.pos - killer.pos).truncate();
@@ -248,10 +265,11 @@ pub fn check(act: Act, killer: &Actor, victim: &Actor, rel: Relation, rules: &Ru
     let running = killer.speed >= RUN_SPEED;
     let (situation, reach, approach) = match (killer.stance, victim.stance) {
         (Stance::Ground, Stance::Ground) if act == Act::Stun => (Situation::Ground2Ground, DIST_KILL_RUN, false),
-        (Stance::Ground, Stance::Ground) if running => (Situation::Ground2Ground, DIST_KILL_RUN, false),
+        (Stance::Ground, Stance::Ground) if running => (Situation::Run2Ground, DIST_KILL_RUN, false),
         (Stance::Ground, Stance::Ground) => (Situation::Ground2Ground, spacing + DIST_GAP, true),
         (Stance::Ground, Stance::Hidden) if act == Act::Kill => (Situation::Ground2Haystack, DIST_KILL_RUN, false),
-        (Stance::Air, Stance::Ground) if act == Act::Kill => {
+        (Stance::Hidden, Stance::Ground) => (Situation::Haystack2Ground, DIST_KILL_RUN, false),
+        (Stance::Air | Stance::Climb, Stance::Ground) if act == Act::Kill => {
             // from above only, within droptech reach (3D)
             if dz > -0.5 {
                 return Err(Reject::Height);
@@ -259,7 +277,8 @@ pub fn check(act: Act, killer: &Actor, victim: &Actor, rel: Relation, rules: &Ru
             if (victim.pos - killer.pos).length() > DIST_KILL_DROPTECH {
                 return Err(Reject::Range);
             }
-            return Ok(Grant { situation: Situation::AirDrop2Ground, side, band: band(dist), dist, approach: false });
+            let situation = if killer.stance == Stance::Air { Situation::AirDrop2Ground } else { Situation::Drop2Ground };
+            return Ok(Grant { situation, side, band: band(dist), dist, approach: false });
         }
         _ => return Err(Reject::Stance),
     };
@@ -295,6 +314,20 @@ pub fn best_victim(
 /// origin, assassin facing +Y). Returns position and yaw of that frame.
 pub fn stun_placement(stunner: &Actor, spacing: f32) -> (Vec3, f32) {
     (stunner.pos + (stunner.facing() * spacing).extend(0.0), stunner.yaw)
+}
+
+// ---------------------------------------------------------------------------
+// lag compensation
+
+/// Ticks of player positions the world keeps (1 s).
+pub const HISTORY: usize = 60;
+/// The furthest back a kill is checked: 200 ms.
+pub const MAX_REWIND: usize = 12;
+
+/// How many ticks back to check a kill whose input says the client drew
+/// the others `view_lag` ticks behind, with `kept` ticks of history.
+pub fn rewind(view_lag: u8, kept: usize) -> usize {
+    (view_lag as usize).min(MAX_REWIND).min(kept)
 }
 
 // ---------------------------------------------------------------------------
@@ -619,10 +652,10 @@ mod tests {
         assert_eq!(check(Act::Kill, &k, &v, Relation::Target, &MP, 1.0), Err(Reject::Height));
         // only targets die; only pursuers get stunned
         let v = at(0.0, 2.0, 0.0);
-        assert_eq!(check(Act::Kill, &k, &v, Relation::Other, &MP, 1.0), Err(Reject::Relation));
-        assert_eq!(check(Act::Kill, &k, &v, Relation::Pursuer, &MP, 1.0), Err(Reject::Relation));
+        assert_eq!(check(Act::Kill, &k, &v, Relation::Other, &MP, 1.0), Err(Reject::NotTarget));
+        assert_eq!(check(Act::Kill, &k, &v, Relation::Pursuer, &MP, 1.0), Err(Reject::NotTarget));
         assert!(check(Act::Stun, &k, &v, Relation::Pursuer, &MP, 1.0).is_ok());
-        assert_eq!(check(Act::Stun, &k, &v, Relation::Target, &MP, 1.0), Err(Reject::Relation));
+        assert_eq!(check(Act::Stun, &k, &v, Relation::Target, &MP, 1.0), Err(Reject::NotPursuer));
         assert_eq!(check(Act::Stun, &k, &v, Relation::Npc, &MP, 1.0), Err(Reject::Relation));
         assert!(check(Act::Stun, &k, &v, Relation::Npc, &Rules::default(), 1.0).is_ok());
     }
@@ -631,7 +664,7 @@ mod tests {
     fn kill_stances() {
         let k = at(0.0, 0.0, 0.0);
         let v = at(0.0, 2.0, 0.0);
-        for (ks, vs) in [(Stance::Climb, Stance::Ground), (Stance::Ground, Stance::Air), (Stance::Ground, Stance::Climb), (Stance::Hidden, Stance::Ground), (Stance::Ground, Stance::Down)] {
+        for (ks, vs) in [(Stance::Climb, Stance::Climb), (Stance::Ground, Stance::Air), (Stance::Ground, Stance::Climb), (Stance::Hidden, Stance::Hidden), (Stance::Ground, Stance::Down)] {
             let r = check(Act::Kill, &Actor { stance: ks, ..k }, &Actor { stance: vs, ..v }, Relation::Target, &MP, 1.0);
             assert_eq!(r, Err(Reject::Stance), "{ks:?} -> {vs:?}");
         }
@@ -644,6 +677,25 @@ mod tests {
         assert_eq!(check(Act::Kill, &a, &v, Relation::Target, &MP, 1.0).unwrap().situation, Situation::AirDrop2Ground);
         a.pos.z = 0.0;
         assert_eq!(check(Act::Kill, &a, &v, Relation::Target, &MP, 1.0), Err(Reject::Height));
+        // droptech reach: 8 m (3D) from above
+        a.pos = Vec3::new(0.0, 6.0, 5.0);
+        assert!(check(Act::Kill, &a, &v, Relation::Target, &MP, 1.0).is_ok());
+        a.pos = Vec3::new(0.0, 8.0, 6.0);
+        assert_eq!(check(Act::Kill, &a, &v, Relation::Target, &MP, 1.0), Err(Reject::Range));
+        // air: no stuns
+        a.pos = Vec3::new(0.0, 0.0, 3.0);
+        assert_eq!(check(Act::Stun, &a, &v, Relation::Pursuer, &MP, 1.0), Err(Reject::Stance));
+        // letting go of a hold above the victim: drop kill
+        let c = Actor { stance: Stance::Climb, pos: Vec3::new(0.0, 0.5, 3.0), ..k };
+        assert_eq!(check(Act::Kill, &c, &v, Relation::Target, &MP, 1.0).unwrap().situation, Situation::Drop2Ground);
+        // out of a hiding spot onto a passer-by, within run reach; no stun from there
+        let h = Actor { stance: Stance::Hidden, ..k };
+        assert_eq!(check(Act::Kill, &h, &v, Relation::Target, &MP, 1.0).unwrap().situation, Situation::Haystack2Ground);
+        assert_eq!(check(Act::Kill, &h, &at(0.0, 2.6, 0.0), Relation::Target, &MP, 1.0), Err(Reject::Range));
+        assert_eq!(check(Act::Stun, &h, &v, Relation::Pursuer, &MP, 1.0), Err(Reject::Stance));
+        // running kill: its own situation
+        let r = Actor { speed: RUN_SPEED, ..k };
+        assert_eq!(check(Act::Kill, &r, &v, Relation::Target, &MP, 1.0).unwrap().situation, Situation::Run2Ground);
     }
 
     #[test]

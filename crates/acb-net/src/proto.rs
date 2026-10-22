@@ -19,8 +19,8 @@ pub const MAX_PLAYERS: usize = 16;
 
 // ---------------------------------------------------------------- inputs
 
-/// A [`PlayerInput`] as sent: 9 buttons and the camera yaw in 1/65536
-/// turns, 4 bytes.
+/// A [`PlayerInput`] as sent: 9 buttons, the view lag (7 bits, ticks,
+/// saturating) and the camera yaw in 1/65536 turns, 4 bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WireInput {
     pub buttons: u16,
@@ -36,6 +36,8 @@ const B_SPRINT: u16 = 32;
 const B_JUMP: u16 = 64;
 const B_KILL: u16 = 128;
 const B_STUN: u16 = 256;
+/// `PlayerInput::view_lag` lives in the top 7 bits.
+const LAG_SHIFT: u16 = 9;
 
 impl WireInput {
     pub fn from_input(i: &PlayerInput) -> WireInput {
@@ -55,6 +57,7 @@ impl WireInput {
                 b |= bit;
             }
         }
+        b |= (i.view_lag.min(127) as u16) << LAG_SHIFT;
         let turns = (i.cam_yaw / std::f32::consts::TAU).rem_euclid(1.0);
         WireInput { buttons: b, yaw: ((turns * 65536.0).round() as u32 & 0xffff) as u16 }
     }
@@ -72,6 +75,7 @@ impl WireInput {
             jump: b(B_JUMP),
             kill: b(B_KILL),
             stun: b(B_STUN),
+            view_lag: (self.buttons >> LAG_SHIFT) as u8,
         }
     }
 
@@ -261,6 +265,10 @@ pub enum Reject {
     Angle = 5,
     /// Already in a kill.
     Busy = 6,
+    /// A player, but not the contract's target.
+    NotTarget = 7,
+    /// A stun on a player who is not hunting the stunner.
+    NotPursuer = 8,
 }
 
 impl Reject {
@@ -272,6 +280,8 @@ impl Reject {
             R::Range => Reject::Range,
             R::Height => Reject::Height,
             R::Angle => Reject::Angle,
+            R::NotTarget => Reject::NotTarget,
+            R::NotPursuer => Reject::NotPursuer,
         }
     }
 
@@ -283,6 +293,8 @@ impl Reject {
             4 => "height",
             5 => "angle",
             6 => "busy",
+            7 => "not your target",
+            8 => "not your pursuer",
             _ => "?",
         }
     }
@@ -759,6 +771,17 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_lag_rides_in_the_buttons() {
+        let i = PlayerInput { kill: true, forward: true, view_lag: 17, ..Default::default() };
+        let q = quantize_input(&i);
+        assert_eq!((q.kill, q.forward, q.stun, q.view_lag), (true, true, false, 17));
+        assert_eq!(quantize_input(&PlayerInput { view_lag: 200, ..Default::default() }).view_lag, 127);
+        let mut w = WireInput::from_input(&i);
+        w.clear_attacks();
+        assert_eq!(w.to_input().view_lag, 17);
+    }
 
     #[test]
     fn netpos_round_trip() {

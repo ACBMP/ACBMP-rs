@@ -15,9 +15,30 @@ use glam::{Mat4, Quat, Vec3};
 const REFERENCE: u32 = 0x2c52_cbb0;
 
 pub struct KillClips {
-    /// [kill front, kill back, stun front, stun back] x (assassin, victim)
+    /// (assassin, victim) pairs, front then back for each kind: see
+    /// [`WALK`], [`STUN`], [`RUN`], [`AIR`], [`DROP`], [`HAY_GRAB`],
+    /// [`TO_HAY`]. A kind the persona lacks falls back to the walking pair.
     pub sets: Vec<(Clip, Clip)>,
 }
+
+/// `{id}_G2G_{Front,Back}_Walk2All_Kill_ass` / `_Killed_Npc`.
+pub const WALK: usize = 0;
+/// `IDXX_G2G_Humil_{Front,Back}_Win_{ass,npc}`.
+pub const STUN: usize = 2;
+/// Running kill: `{id}_G2G_{Front,Back}_Run2All_Kill_ass` / `_Killed_Npc`.
+pub const RUN: usize = 4;
+/// Air kill (falling/jumping onto the victim):
+/// `{id}_Air2G_{Front,Back}_Kill_ass` / `_Killed_npc`.
+pub const AIR: usize = 6;
+/// Drop kill (letting go of a hold above the victim):
+/// `{id}_Drop2G_{Front,Back}_Kill_ass` / `_Killed_npc`.
+pub const DROP: usize = 8;
+/// From a hiding spot onto a passer-by:
+/// `{id}_Hayground2Walk_grab_{front,back}_kill_ass` / `_killed_npc`.
+pub const HAY_GRAB: usize = 10;
+/// Into a hiding spot: `{id}_Walk2Hayground_Kill_ass` (front and back
+/// alike) / `*_Walk2HayGround_Kill_Out_npc`.
+pub const TO_HAY: usize = 12;
 
 /// Victim offset of a stun: `IDXX_G2G_Humil_*_Win_{ass,npc}` are authored
 /// each around its own origin (assassin facing +Y, the victim's frame
@@ -55,16 +76,34 @@ impl KillClips {
                 .find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(&name)))
                 .and_then(|u| Clip::load_with(archive, u, builtins))
         };
-        let set = |side: &str| {
-            Some((
-                load(format!("{id}_G2G_{side}_Walk2All_Kill_ass"))?,
-                load(format!("{id}_G2G_{side}_Walk2All_Killed_Npc"))?,
-            ))
+        let pair = |ass: String, victim: String| Some((load(ass)?, load(victim)?));
+        let set = |side: &str| pair(format!("{id}_G2G_{side}_Walk2All_Kill_ass"), format!("{id}_G2G_{side}_Walk2All_Killed_Npc"));
+        let stun = |side: &str| pair(format!("IDXX_G2G_Humil_{side}_Win_ass"), format!("IDXX_G2G_Humil_{side}_Win_npc"));
+        let mut sets = vec![set("Front")?, set("Back")?, stun("Front")?, stun("Back")?];
+        // the other kinds, falling back to the walking pair of that side
+        let hay_victim = || {
+            uids.iter()
+                .copied()
+                .find(|u| archive.loc(*u).is_some_and(|l| l.name.to_ascii_lowercase().ends_with("_walk2hayground_kill_out_npc")))
+                .and_then(|u| Clip::load_with(archive, u, builtins))
         };
-        let stun = |side: &str| {
-            Some((load(format!("IDXX_G2G_Humil_{side}_Win_ass"))?, load(format!("IDXX_G2G_Humil_{side}_Win_npc"))?))
-        };
-        Some(KillClips { sets: vec![set("Front")?, set("Back")?, stun("Front")?, stun("Back")?] })
+        for (k, side) in ["Front", "Back"].into_iter().enumerate().cycle().take(10) {
+            let kind = sets.len() / 2;
+            let lower = side.to_ascii_lowercase();
+            let got = match kind {
+                2 => pair(format!("{id}_G2G_{side}_Run2All_Kill_ass"), format!("{id}_G2G_{side}_Run2All_Killed_Npc")),
+                3 => pair(format!("{id}_Air2G_{side}_Kill_ass"), format!("{id}_Air2G_{side}_Killed_npc")),
+                4 => pair(format!("{id}_Drop2G_{side}_Kill_ass"), format!("{id}_Drop2G_{side}_Killed_npc")),
+                5 => pair(format!("{id}_Hayground2Walk_grab_{lower}_kill_ass"), format!("{id}_Hayground2Walk_grab_{lower}_killed_npc")),
+                _ => load(format!("{id}_Walk2Hayground_Kill_ass")).zip(hay_victim()),
+            };
+            let got = match got {
+                Some(g) => g,
+                None => sets[k].clone(),
+            };
+            sets.push(got);
+        }
+        Some(KillClips { sets })
     }
 
     /// Pelvis spacing of the ground kills at their start (assassin
@@ -88,11 +127,12 @@ impl KillClips {
         }
     }
 
-    /// The set for an assassin at `from` attacking a victim at `victim`
-    /// facing `victim_yaw` (front when the assassin is ahead of the victim),
-    /// and the shared frame to play it in.
-    pub fn plan(&self, from: Vec3, victim: Vec3, victim_yaw: f32) -> Option<(usize, Mat4)> {
-        let side = side(from, victim, victim_yaw);
+    /// The set of kind `kind` ([`WALK`], [`RUN`], ...) for an assassin at
+    /// `from` attacking a victim at `victim` facing `victim_yaw` (front
+    /// when the assassin is ahead of the victim), and the shared frame to
+    /// play it in.
+    pub fn plan(&self, kind: usize, from: Vec3, victim: Vec3, victim_yaw: f32) -> Option<(usize, Mat4)> {
+        let side = kind + side(from, victim, victim_yaw);
         let to_ass = (from - victim).truncate();
         let (ass, _) = &self.sets[side];
         let (start, _) = reference(ass, 0.0)?;

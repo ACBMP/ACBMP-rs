@@ -73,6 +73,10 @@ pub struct PlayerInput {
     pub jump: bool,
     pub kill: bool,
     pub stun: bool,
+    /// Ticks between this input's tick and the tick the client drew the
+    /// other players at (lag compensation; the sim rewinds at most
+    /// [`rules::MAX_REWIND`]).
+    pub view_lag: u8,
 }
 
 /// A clip played once in a given frame and held at its end (--pair, kill
@@ -208,6 +212,10 @@ pub struct World {
     pub tick: u64,
     /// A running match (contracts, scores, respawns); `None`: free play.
     pub mode: Option<mode::Match>,
+    /// Every player as the rules saw it at the end of each of the last
+    /// [`rules::HISTORY`] ticks (oldest first): lag compensation checks a
+    /// kill against where the killer saw its victim.
+    pub seen: std::collections::VecDeque<Vec<rules::Actor>>,
 }
 
 /// An Entity or EntityBuilder by name.
@@ -238,6 +246,7 @@ impl World {
             time: 0.0,
             tick: 0,
             mode: None,
+            seen: Default::default(),
         };
         let characters = &setup.characters;
         if characters.is_empty() {
@@ -396,32 +405,37 @@ impl World {
             None => (rules::Rules::default(), None, vec![true; self.players.len()]),
         };
         let mut actions = Vec::new();
+        let stances: Vec<rules::Stance> = self.players.iter().map(|p| p.actor().stance).collect();
         for (i, p) in self.players.iter_mut().enumerate() {
             let input = if in_control[i] { inputs.get(i).copied().unwrap_or_default() } else { PlayerInput { cam_yaw: inputs.get(i).map_or(0.0, |x| x.cam_yaw), ..Default::default() } };
             let relation = |j: usize| relations.as_ref().map_or(rules::Relation::Npc, |r| r[i][j]);
+            let rewind = rules::rewind(input.view_lag, self.seen.len());
+            let past = self.seen.len().checked_sub(rewind).filter(|_| rewind > 0).and_then(|k| self.seen.get(k));
+            let seen = |j: usize, b: &Body| player::seen_actor(b, past.and_then(|h| h.get(j)), stances.get(j).copied());
             let was_scripted: Vec<bool> = if relations.is_some() { self.bodies.iter().map(|b| b.scripted.is_some()).collect() } else { Vec::new() };
             let was_attacking = p.kill.is_some();
             // ACBMP_TRACE=pose: per-tick pose change of the player (summed
             // bone rotation, radians), to spot clips that snap or reset
             let before = trace_pose().then(|| p.loco.last_pose().clone());
-            player::drive(p, &mut self.bodies, &self.clips, self.ground.as_ref(), &input, &act_rules, &relation, t, DT);
+            player::drive(p, &mut self.bodies, &self.clips, self.ground.as_ref(), &input, &act_rules, &relation, &seen, t, DT);
             if relations.is_some() && p.kill.is_some() && !was_attacking {
                 if let Some(v) = (0..n_players).find(|&j| j != p.body && !was_scripted[j] && self.bodies[j].scripted.is_some()) {
-                    actions.push((i, v, input.stun));
+                    actions.push((i, v, p.kill.as_ref().map_or(kill::WALK, |k| k.set())));
                 }
             }
             if let Some(before) = before {
                 let jump: f32 = before.iter().zip(p.loco.last_pose()).map(|((_, a), (_, b))| a.angle_between(*b)).sum();
                 eprintln!("pose t {t:.3} speed {:.2} change {jump:.2}{}", p.loco.speed, if p.loco.on_beam() { " beam" } else { "" });
             }
+            p.moved = (p.pos - p.prev_pos).truncate().length() / DT;
             // where others see it (crowd separation, targeting)
             if let Some(b) = self.bodies.get_mut(p.body) {
                 b.entity = p.entity();
             }
         }
         if let Some(m) = &mut self.mode {
-            for (k, v, stun) in actions {
-                m.on_action(k, v, stun);
+            for (k, v, set) in actions {
+                m.on_action(k, v, set);
             }
             let pos: Vec<Vec3> = self.players.iter().map(|p| p.pos).collect();
             let back: Vec<(usize, Vec3, f32)> =
@@ -430,6 +444,10 @@ impl World {
                 respawn(&mut self.players[p], &mut self.bodies);
                 self.place_player(p, at, yaw);
             }
+        }
+        self.seen.push_back(self.players.iter().map(|p| p.actor()).collect());
+        while self.seen.len() > rules::HISTORY {
+            self.seen.pop_front();
         }
         let wander = self.wander;
         let skip = self.players.len();

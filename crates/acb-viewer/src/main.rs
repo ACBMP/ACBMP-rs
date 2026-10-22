@@ -296,6 +296,7 @@ fn input_from(keys: &HashSet<KeyCode>, tapped: &HashSet<KeyCode>, cam_yaw: f32) 
         jump: k(KeyCode::KeyF),
         kill: k(KeyCode::KeyE),
         stun: k(KeyCode::KeyQ),
+        view_lag: 0,
     }
 }
 

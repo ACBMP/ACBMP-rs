@@ -28,6 +28,7 @@ pub struct Saved {
     players: Vec<Player>,
     bodies: Vec<BodyState>,
     mode: Option<crate::mode::Match>,
+    seen: std::collections::VecDeque<Vec<crate::rules::Actor>>,
 }
 
 #[derive(Clone)]
@@ -53,6 +54,7 @@ impl World {
             time: self.time,
             players: self.players.clone(),
             mode: self.mode.clone(),
+            seen: self.seen.clone(),
             bodies: self
                 .bodies
                 .iter()
@@ -81,6 +83,7 @@ impl World {
         self.time = saved.time;
         self.players.clone_from(&saved.players);
         self.mode.clone_from(&saved.mode);
+        self.seen.clone_from(&saved.seen);
         for (b, s) in self.bodies.iter_mut().zip(&saved.bodies) {
             b.entity = s.entity;
             b.model = s.model;

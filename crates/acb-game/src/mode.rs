@@ -13,13 +13,20 @@ use crate::rules::{Contracts, ContractEvent, Relation, Rules};
 
 /// `GBrick_ScoreKill` XML default `TargetKilled` (Mac 0x0103832c).
 pub const KILL_POINTS: u32 = 100;
-/// Placeholder: the stun bonus of the Wanted XML is not shipped; retail
-/// shows it in the same range as a plain kill.
-pub const STUN_POINTS: u32 = 100;
-/// Placeholder: seconds from the kill to the victim's respawn (the kill
-/// clips run ~3 s; retail fades out and picks a spawn after it).
+/// Stunning a pursuer: `GBrick_ScoreChase` XML default `ScoreHumiliation`
+/// 200 (Mac 0x010381ec; the mode XMLs are not shipped, so the brick
+/// defaults are the best data there is).
+pub const STUN_POINTS: u32 = 200;
+/// Air and drop kills: `GBrick_ScoreKill` default `BonusAcrobatic` 100.
+pub const BONUS_ACROBATIC: u32 = 100;
+/// Out of a hiding spot: `GBrick_ScoreKill` default `BonusHidden` 200.
+pub const BONUS_HIDDEN: u32 = 200;
+/// Placeholder: seconds from the kill to the victim's respawn. Only the
+/// mode XML has it (`GBrick_Respawn::ReadFromXML` 0x00ec1870 reads
+/// `RespawnTime`, whole seconds, default 0); the kill clips run ~3 s.
 pub const RESPAWN_DELAY: f32 = 5.0;
-/// Placeholder: no contracts during the first seconds (retail's intro).
+/// Placeholder: no contracts during the first seconds (retail's intro;
+/// `GBrick_Delay` `DelayDuration` 0x00d3d70a, XML only, default 0).
 pub const START_DELAY: f32 = 3.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,8 +122,16 @@ impl Match {
         ticks(self.config.time_limit).saturating_sub(self.ticks)
     }
 
-    /// Player `killer` started a kill (or stun) of player `victim`.
-    pub(crate) fn on_action(&mut self, killer: usize, victim: usize, stun: bool) {
+    /// Player `killer` started a kill (or stun) of player `victim` with
+    /// kill set `set` ([`crate::kill::KillClips::sets`]).
+    pub(crate) fn on_action(&mut self, killer: usize, victim: usize, set: usize) {
+        use crate::kill;
+        let stun = (kill::STUN..kill::STUN + 2).contains(&set);
+        let bonus = match set & !1 {
+            kill::AIR | kill::DROP => BONUS_ACROBATIC,
+            kill::HAY_GRAB => BONUS_HIDDEN,
+            _ => 0,
+        };
         let rel = self.contracts.relation(killer, victim);
         if stun {
             // a stunned hunter loses its contract on the stunner
@@ -130,8 +145,8 @@ impl Match {
             return;
         }
         if matches!(rel, Relation::Target | Relation::Mutual) {
-            self.score[killer] += KILL_POINTS;
-            self.events.push(MatchEvent::Score { player: killer, points: KILL_POINTS, reason: ScoreReason::Kill });
+            self.score[killer] += KILL_POINTS + bonus;
+            self.events.push(MatchEvent::Score { player: killer, points: KILL_POINTS + bonus, reason: ScoreReason::Kill });
         }
         for e in self.contracts.on_death(victim, Some(killer)) {
             self.events.push(MatchEvent::Contract(e));
@@ -206,7 +221,7 @@ mod tests {
         assert_eq!(m.contracts.hunters[0].target, None, "no contracts before the start delay");
         run(&mut m, 1, &pos);
         assert_eq!(m.contracts.relation(0, 1), Relation::Mutual);
-        m.on_action(0, 1, false);
+        m.on_action(0, 1, crate::kill::WALK);
         assert_eq!(m.score, vec![100, 0]);
         assert!(!m.alive(1));
         assert_eq!(m.contracts.hunters[0].target, None);
@@ -218,8 +233,8 @@ mod tests {
         // both cool down MinWaitTime, then hunt each other again
         run(&mut m, ticks(crate::rules::MIN_WAIT_TIME) + 1, &pos);
         assert_eq!(m.contracts.relation(0, 1), Relation::Mutual);
-        m.on_action(1, 0, false);
-        m.on_action(0, 1, true); // no contract any more: no points
+        m.on_action(1, 0, crate::kill::WALK);
+        m.on_action(0, 1, crate::kill::STUN); // no contract any more: no points
         assert_eq!(m.score, vec![100, 100]);
     }
 
@@ -236,7 +251,7 @@ mod tests {
         }
         let h = 0;
         let t = targets[0].unwrap();
-        m.on_action(h, t, false);
+        m.on_action(h, t, crate::kill::WALK);
         m.score[h] = 200;
         let _ = m.tick(&pos);
         assert!(m.over);

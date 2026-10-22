@@ -677,8 +677,7 @@ with a server-authoritative sim.
   back. Viewer gate (fps 60 with delay 120 ms + fps 144): 201/207 checked
   ticks exact, the two clients' confirmed positions identical on all 26
   traced ticks and equal to the server log.
-- Open: hooking `Contracts` (relations) into the validation hook; no lag
-  compensation (the server checks the present, not what the killer saw).
+- Lag compensation: see "Kill variants" below (`view_lag` in the input).
 
 ## Climbing
 
@@ -785,7 +784,7 @@ Pure, deterministic functions the server and client prediction share (no clock, 
 - `World.mode: Option<Match>` (in `Saved`, so prediction/replay step it): `Contracts`
   decide relations for `validate_action` (kills only on your target, stuns only on your
   pursuer, crowd kills allowed without points). Kill = `KILL_POINTS` 100
-  (`GBrick_ScoreKill.TargetKilled`); stun 100, respawn delay 5 s, start delay 3 s are
+  (`GBrick_ScoreKill.TargetKilled`); stun 200 (see below); respawn delay 5 s, start delay 3 s are
   placeholders. Respawn on the player spawn furthest from the nearest living player,
   exactly `respawn_delay` ticks after the death tick; contract cooldown `MIN_WAIT_TIME`
   counts from the death tick too. Ends on `--time-limit` / `--score-limit`; server prints
@@ -805,3 +804,41 @@ Pure, deterministic functions the server and client prediction share (no clock, 
   loss 2% 40 ms): reject tick 30, contracts 180, kill 427, respawn 727, A reassigned 727,
   B 1026, over 1200 "a 100, b 0"; events/final positions identical with A/B at 60/144
   and 144/60 fps, 589/589 snapshots exact.
+
+## Kill variants, stun scoring, lag compensation
+- `KillClips.sets` (kill.rs): WALK 0/1, STUN 2/3, RUN 4/5 (`{id}_G2G_*_Run2All_Kill_ass`/`_Killed_Npc`),
+  AIR 6/7 (`{id}_Air2G_*_Kill_ass`/`_Killed_npc`), DROP 8/9 (`{id}_Drop2G_*`), HAY_GRAB 10/11
+  (`{id}_Hayground2Walk_grab_{front,back}_kill_ass`/`_killed_npc`), TO_HAY 12/13 (`{id}_Walk2Hayground_Kill_ass`
+  + `*_Walk2HayGround_Kill_Out_npc`, only ID10 has it). Missing kinds fall back to the walking pair.
+  Air2G/Drop2G are authored with both References at the origin (the assassin lands on the victim,
+  pelvis z 0.6-0.8); Run2All starts 0.4 m apart; the hay grab 0.6 m.
+- Situations (rules.rs): Run2Ground (moving >= 3 m/s, `Player::moved` = real horizontal m/s; before,
+  the rules got the gait level 0..3, so only sprinting counted as running), AirDrop2Ground (airborne or
+  in a freerun flight), Drop2Ground (climbing/hanging), both from >= 0.5 m above within Dist_kill_droptech
+  8 m (3D); Ground2Haystack (hidden victim), Haystack2Ground (hidden killer, 2.5 m; no stun from hiding).
+  `Player::hidden` exists but nothing sets it: hiding spots are not modelled. Ledge kills: only
+  `idxx_roof2ledge_*_ass` / `Narrow2Ledge_Kick*` assassin clips found, no victim pair: not wired.
+- Non-walking kinds close the gap first (`player::Lead`, whole ticks): air/drop a ballistic leap
+  (g 9.81, t = max(sqrt(2h/g), gap/8) in 0.2..1 s), run/haystack a straight lunge (gap/max(speed,3)
+  in 0.1..0.4 s), pose blending into the clip's first frame; the victim holds its clip's first frame
+  until then (`Scripted.start` = now + lead). Gate `tools/kills.sh` (expected lines in its header,
+  identical at 60/144 fps): air kill from 5 m onto the NPC at 38,20, running kill from 31,20.4.
+- Scoring (mode.rs, brick XML defaults since the mode XMLs are not shipped): kill 100
+  (`ScoreTargetKilled`), + `BonusAcrobatic` 100 for air/drop, + `BonusHidden` 200 from hiding
+  (GBrick_ScoreKill 0x0103832c); stun 200 = `GBrick_ScoreChase.ScoreHumiliation` (0x010381ec;
+  `GBrick_Escape.ScoreOnHumiliation` enables it). Respawn/start delay stay placeholders: `GBrick_Respawn`
+  `RespawnTime` (0x00ec1870) and `GBrick_Delay` `DelayDuration` (0x00d3d70a) default to 0 and come
+  only from the XML; GameParameters/Wanted2 have no such field (GlobalParameters: KOTimeAfterKick 1.0,
+  LowScoreKill 100, HighScoreKill 750).
+- Rejections: `not your target` (kill on a player without the contract), `not your pursuer` (stun),
+  wire reasons 7/8; "not a valid victim" is left for protected NPCs.
+- Lag compensation: `World.seen` (in `Saved`) keeps every player's rules actor for the last 60 ticks.
+  The client puts `view_lag` = input tick - the tick it draws remotes at (`interp`) into the top 7
+  bits of the input's button word (no size change); the sim (both server validation and the step
+  itself, so prediction/replay agree) checks player victims `min(view_lag, 12)` ticks back (200 ms),
+  NPCs and anyone being killed now at present; the kill itself starts on the present victim.
+  Test `acb-game/tests/kill_map.rs::rewound_kill`: a victim running away is out of range now but in
+  range 9 ticks ago: lag 0 refused (Range), lag 9 granted.
+- Stun test `acb-net/tests/stun_map.rs`: 3 clients (loss 3 %, 60 ms): the pursuer of player 0 walks
+  up, player 0 stuns it at tick 350: StunStarted + Stunned + Score 200 + pursuer's ContractLost in the
+  same tick, all clients exact (0 desync).
