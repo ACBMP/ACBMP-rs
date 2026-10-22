@@ -32,12 +32,17 @@ pub struct Player {
     /// Seconds left in which a fall does not grab holds (after a back
     /// eject, so the wall just left is not caught again).
     pub catch_block: f32,
-    /// The last touchdown after a fall: height (m), damage (% of max
-    /// life, retail `HealthSettings`) and landing type. Fatal = dead.
+    /// This tick's touchdown after a fall: height (m), damage (% of max
+    /// life, retail `HealthSettings`) and landing type (reset every tick;
+    /// the match takes the damage off its health, fatal = dead).
     pub landing: Option<(f32, u32, jump::LandingType)>,
-    /// In a hiding spot (haystack): the rules' [`rules::Stance::Hidden`].
-    /// Nothing sets it yet (hiding spots are not modelled).
+    /// In a hiding spot (haystack): the rules' [`rules::Stance::Hidden`]
+    /// (set from `hide` while fully inside).
     pub hidden: bool,
+    /// Entering, inside or leaving a hiding spot (`hide.rs`).
+    pub hide: Option<crate::hide::Hiding>,
+    /// Blended in a crowd group ([`rules::blended`], set by the world step).
+    pub blended: bool,
     /// Horizontal speed over the last tick, m/s (the rules' running test).
     pub moved: f32,
 }
@@ -52,7 +57,7 @@ pub const LEDGE_STOP: f32 = 2.0;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, moved: 0.0 }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0 }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -196,6 +201,7 @@ fn start_paired(p: &mut Player, bodies: &mut [Body], kills: &kill::KillClips, id
     p.flight = None;
     p.climb = None;
     p.hidden = false;
+    p.hide = None;
     p.vel = Vec3::ZERO;
     p.kill = Some(PlayerKill { side, frame, t: 0.0, from_pose, from_world: p.entity(), lead });
 }
@@ -299,6 +305,8 @@ pub(crate) fn drive(
         p.approach = None;
         p.climb = None;
         p.flight = None;
+        p.hide = None;
+        p.hidden = false;
         p.vel = Vec3::ZERO;
         if free {
             bodies[me].scripted = None;
@@ -426,6 +434,33 @@ pub(crate) fn drive(
         bodies[me].show(world, pose);
         return;
     }
+    // in a hiding spot: its clips, any move input leaves
+    if let (Some(h), Some(hide)) = (&mut p.hide, &clipset.hide) {
+        let fwd = Vec2::new(input.cam_yaw.cos(), input.cam_yaw.sin());
+        let right = Vec2::new(fwd.y, -fwd.x);
+        let mut dir = Vec2::ZERO;
+        if input.forward { dir += fwd; }
+        if input.back { dir -= fwd; }
+        if input.right { dir += right; }
+        if input.left { dir -= right; }
+        let leave = (dir != Vec2::ZERO).then(|| dir.normalize());
+        let (pose, world, pos, yaw, out) = h.update(hide, sk, leave, dt);
+        p.pos = pos;
+        p.yaw = yaw;
+        p.hidden = h.hidden();
+        p.vel = Vec3::ZERO;
+        if out {
+            if crate::trace() {
+                eprintln!("hide: out of spot {} at {:.2} {:.2} {:.2}", h.spot, p.pos.x, p.pos.y, p.pos.z);
+            }
+            p.hide = None;
+            p.hidden = false;
+            p.fall_from = p.pos.z;
+            p.loco.resume(pose.clone());
+        }
+        bodies[me].show(world, pose);
+        return;
+    }
     // on a wall: climb
     if let (Some(cl), Some(cc), Some(ground)) = (&mut p.climb, &clipset.climbs, ground) {
         let want = if input.forward {
@@ -485,6 +520,24 @@ pub(crate) fn drive(
     } else {
         Gait::Walk
     };
+    // into a hiding spot: running into one, or falling onto it
+    if let Some(hide) = &clipset.hide {
+        let air = p.loco.airborne() && p.flight.is_none();
+        let high = input.run || input.sprint;
+        if let Some(i) = crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), high, air, p.vel.z) {
+            if crate::trace() {
+                eprintln!("hide: enter spot {i} from {:.2} {:.2} {:.2}{}", p.pos.x, p.pos.y, p.pos.z, if air { " (air)" } else { "" });
+            }
+            let pose = p.loco.last_pose().clone();
+            p.hide = Some(crate::hide::Hiding::enter(hide, i, p.pos, p.yaw, air, pose.clone(), bodies[me].world));
+            p.loco.resume(pose);
+            p.vel = Vec3::ZERO;
+            p.approach = None;
+            p.fall_from = p.pos.z;
+            let input = PlayerInput { kill: false, stun: false, ..*input };
+            return drive(p, bodies, clipset, ground, &input, rules, relation, seen, time, 0.0);
+        }
+    }
     // balancing on a beam (railing, narrow wall top): beam clip set, moves
     // kept on its centre line, no climb entry
     let beam = match ground {

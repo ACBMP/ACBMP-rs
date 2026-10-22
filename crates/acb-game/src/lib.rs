@@ -10,6 +10,7 @@
 pub mod climb;
 pub mod crowd;
 pub mod ground;
+pub mod hide;
 pub mod jump;
 pub mod kill;
 pub mod locomotion;
@@ -163,6 +164,8 @@ pub struct Clipset {
     pub loco: Option<Clips>,
     pub kills: Option<KillClips>,
     pub climbs: Option<ClimbClips>,
+    /// Hiding spots and their clips (`hide.rs`).
+    pub hide: Option<hide::Hide>,
 }
 
 /// The crowd: the navmesh and the clips wanderers blend.
@@ -238,7 +241,7 @@ impl World {
         let mut w = World {
             ground: None,
             crowd: None,
-            clips: Clipset { loco: None, kills: None, climbs: None },
+            clips: Clipset { loco: None, kills: None, climbs: None, hide: None },
             clip: None,
             wander: setup.wander,
             bodies: Vec::new(),
@@ -341,10 +344,19 @@ impl World {
             let (at, yaw) = match setup.at.as_deref() {
                 Some([x, y, z]) => (Vec3::new(*x, *y, *z), yaw),
                 // facing as a compass-free angle: 0 = +Y, 90 = -X
-                Some([x, y, z, deg]) => (Vec3::new(*x, *y, *z), deg.to_radians()),
+                Some([x, y, z, deg, ..]) => (Vec3::new(*x, *y, *z), deg.to_radians()),
                 _ => (m.w_axis.truncate(), yaw),
             };
             w.players.push(Player::new(0, at, yaw, Locomotion::new(clips, &body.character.skeleton)));
+        }
+        // further x,y,z,yaw groups place bodies 1, 2, ... (scripted scenes)
+        if let Some(rest) = setup.at.as_deref().filter(|a| a.len() > 4).map(|a| &a[4..]) {
+            for (k, c) in rest.chunks_exact(4).enumerate() {
+                if let Some(b) = w.bodies.get_mut(k + 1) {
+                    let m = Mat4::from_rotation_translation(glam::Quat::from_rotation_z(c[3].to_radians()), Vec3::new(c[0], c[1], c[2]));
+                    (b.spawn, b.entity) = (m, m);
+                }
+            }
         }
         if loco.is_some() {
             let t = std::time::Instant::now();
@@ -370,7 +382,28 @@ impl World {
             }
         }
         w.clip = clip;
-        w.clips = Clipset { loco, kills, climbs };
+        let hide = if setup.play {
+            let spots = hide::spots(archive);
+            match hide::HideClips::load(archive, builtins) {
+                Some(clips) => {
+                    eprintln!("hide: {} haystacks", spots.len());
+                    if trace() {
+                        for (i, s) in spots.iter().enumerate() {
+                            let c = s.center();
+                            eprintln!("hide spot {i} at {:.2} {:.2} {:.2} kind {}", c.x, c.y, c.z, s.kind);
+                        }
+                    }
+                    Some(hide::Hide { spots, clips })
+                }
+                None => {
+                    eprintln!("hide: haystack clips not found");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        w.clips = Clipset { loco, kills, climbs, hide };
         Ok(w)
     }
 
@@ -417,6 +450,7 @@ impl World {
             // ACBMP_TRACE=pose: per-tick pose change of the player (summed
             // bone rotation, radians), to spot clips that snap or reset
             let before = trace_pose().then(|| p.loco.last_pose().clone());
+            p.landing = None;
             player::drive(p, &mut self.bodies, &self.clips, self.ground.as_ref(), &input, &act_rules, &relation, &seen, t, DT);
             if relations.is_some() && p.kill.is_some() && !was_attacking {
                 if let Some(v) = (0..n_players).find(|&j| j != p.body && !was_scripted[j] && self.bodies[j].scripted.is_some()) {
@@ -433,13 +467,34 @@ impl World {
                 b.entity = p.entity();
             }
         }
+        // blending: walking among a crowd group (NPCs, persona lookalikes)
+        let npcs: Vec<Vec3> = self.bodies.iter().skip(n_players).filter(|b| b.scripted.is_none()).map(|b| b.entity.w_axis.truncate()).collect();
+        for p in &mut self.players {
+            p.blended = p.hide.is_none() && rules::blended(&p.actor(), npcs.iter().copied());
+        }
         if let Some(m) = &mut self.mode {
             for (k, v, set) in actions {
                 m.on_action(k, v, set);
             }
+            for (i, p) in self.players.iter().enumerate() {
+                if let Some((_, damage, _)) = p.landing {
+                    m.on_fall(i, damage);
+                }
+            }
             let pos: Vec<Vec3> = self.players.iter().map(|p| p.pos).collect();
+            let who: Vec<mode::Presence> = self
+                .players
+                .iter()
+                .map(|p| mode::Presence { pos: p.pos, hidden: p.hidden, blended: p.blended, running: p.moved >= rules::RUN_SPEED && p.kill.is_none() })
+                .collect();
+            let ground = self.ground.as_ref();
+            // head to head (retail GameBrick::CanSee); no collision: clear
+            let los = |a: usize, b: usize| {
+                let (o, t) = (pos[a] + Vec3::Z * rules::TARGET_HEIGHT, pos[b] + Vec3::Z * rules::TARGET_HEIGHT);
+                ground.is_none_or(|g| g.ray(o, t - o).is_none())
+            };
             let back: Vec<(usize, Vec3, f32)> =
-                m.tick(&pos).into_iter().map(|(p, s)| { let (at, yaw) = m.spawns.get(s).copied().unwrap_or((pos[p], 0.0)); (p, at, yaw) }).collect();
+                m.tick(&who, &los).into_iter().map(|(p, s)| { let (at, yaw) = m.spawns.get(s).copied().unwrap_or((pos[p], 0.0)); (p, at, yaw) }).collect();
             for (p, at, yaw) in back {
                 respawn(&mut self.players[p], &mut self.bodies);
                 self.place_player(p, at, yaw);
@@ -518,6 +573,8 @@ fn respawn(p: &mut player::Player, bodies: &mut [Body]) {
     p.approach = None;
     p.climb = None;
     p.flight = None;
+    p.hide = None;
+    p.hidden = false;
     p.vel = Vec3::ZERO;
     p.loco.resume(b.pose.clone());
 }

@@ -12,7 +12,7 @@ use acb_game::{Setup, World};
 use acb_world::Archive;
 use glam::Vec3;
 
-use crate::proto::{Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_CLIMBING, F_VICTIM, NONE};
+use crate::proto::{Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_VICTIM, NONE};
 
 /// Builds a match world: slot `i` is player `i` on the map's player spawn
 /// `i` (or its `at`), no crowd; with `rules` a match on the map's player
@@ -85,6 +85,9 @@ pub fn game_state(m: &Match) -> GameState {
                 score: m.score[i].min(u16::MAX as u32) as u16,
                 respawn: m.respawn[i].map_or(0, |r| r.min(u16::MAX as u32) as u16),
                 cooldown: t(h.cooldown),
+                health: m.health[i].min(255) as u8,
+                chase: m.chases[i].map_or(NONE, |c| c.phase as u8),
+                escape: m.chases[i].map_or(0, |c| (c.coef.clamp(0.0, 1.0) * 65535.0).round() as u16),
             })
             .collect(),
     }
@@ -101,6 +104,11 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) {
         h.active = p.respawn == 0;
         m.score[i] = p.score as u32;
         m.respawn[i] = (p.respawn > 0).then_some(p.respawn as u32);
+        m.health[i] = p.health as u32;
+        m.chases[i] = match (acb_game::mode::ChasePhase::from_u8(p.chase), h.target) {
+            (Some(phase), Some(target)) => Some(acb_game::mode::Chase { target, coef: p.escape as f32 / 65535.0, phase }),
+            _ => None,
+        };
     }
 }
 
@@ -115,6 +123,9 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
             MatchEvent::Contract(ContractEvent::Lost { hunter, target }) => Some(ev(EventKind::ContractLost, hunter, target)),
             MatchEvent::Contract(ContractEvent::Fulfilled { hunter, target }) => Some(ev(EventKind::ContractFulfilled, hunter, target)),
             MatchEvent::Over { winner } => Some(ev(EventKind::MatchOver, winner.map_or(255, |w| w), 0)),
+            MatchEvent::ChaseStarted { hunter, target } => Some(ev(EventKind::ChaseStarted, hunter, target)),
+            MatchEvent::Escaped { hunter, target } => Some(ev(EventKind::Escaped, hunter, target)),
+            MatchEvent::Fall { player, damage, fatal } => Some(ev(if fatal { EventKind::FatalFall } else { EventKind::Fall }, player, damage as usize)),
             // reported by detect_events
             MatchEvent::Respawn { .. } => None,
         })
@@ -136,6 +147,12 @@ pub fn flags(world: &World, i: usize) -> u8 {
     }
     if world.bodies.get(p.body).is_some_and(|b| b.scripted.is_some()) {
         f |= F_VICTIM;
+    }
+    if p.hidden {
+        f |= F_HIDDEN;
+    }
+    if p.blended {
+        f |= F_BLENDED;
     }
     f
 }

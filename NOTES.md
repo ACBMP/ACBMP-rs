@@ -867,3 +867,33 @@ Pure, deterministic functions the server and client prediction share (no clock, 
   height 1.8, mass 65 (we sweep radius 0.3). Max slope / step height:
   Havok `CharacterController::MaxSlopeAngle` exists but no data object
   found; still ours (|nz| >= 0.6 floor, 0.6 m step).
+
+## Wanted mechanics: hiding, blending, escape, falls (proto v3)
+- Hiding spots (`hide.rs`): map Entities with a `HayStackComponent` (top-level or inside EntityGroups; San
+  Donato 20: `HayStackType` 0, `DetectionBoxMin/Max` ~+-1.4 x +-0.9 x 0..1.6 m in entity space). Benches
+  (`RestObjectAttributeComponent`, 3 `RestSpot`s, 34 on San Donato) are not modelled. Clips: in
+  `xx_h_freestep_footr_to_haystack_01` (1.0 m fwd), from a fall `xx_h_air_to_haystack` (no fall damage),
+  loop `xx_l_haystack_wait`, out `xx_l_haystack_hop_out` + `_tr_l_wait` (2 m). Entry (our reading): high
+  profile moving into the box from <= 1.2 m outside, or descending over it <= 1.5 m above the top; any move
+  key leaves (camera relative). `Player::hidden` only while fully in. A hidden killer has no aim cone
+  (our reading); kill from hiding = HAY_GRAB set + BonusHidden 200.
+- `--at` takes further x,y,z,yaw groups for bodies 1, 2, ... (scripted scenes). kills.sh `hay`: run into
+  haystack 13 (24.62,7), NPC at 24.62,9.4, E: Haystack2Ground, identical at 60/144 fps.
+- Blending (`rules::blended`, our reading; retail uses crowd group polygons, `GSrvGroupPolygon`, not traced):
+  on the ground, <= 2 m/s, >= 2 NPCs within 2 m (|dz| <= 1.8). Crowd NPCs are the persona characters
+  (round-robin over `--character`), i.e. lookalikes. `locate_concealed`: a hidden/blended target still fills
+  the compass but is only `in_view` within Dist_gap 3.5 m (our reading). Net matches run without crowd.
+- Escape (`Match::chase`, `GBrick_Escape` 0x00c17d32/0x00c0f710/0x00c0f794/0x00c5f4fc): phases in sight /
+  in sight hidden / out of sight / out of sight hidden with TimeToEscape 0/0/12/7 s (0 = meter resets);
+  meter += dt/time, > 1 = escaped: target +100 (`ScoreEscape`), hunter loses the contract, redrawn after
+  MinWait. Hidden = haystack or blended. In sight = head-to-head `Ground::ray` within 30 m. Chase start (our
+  reading of the untraced ChaseRequestEvent): hunter running (>= 3 m/s) within DistanceInExtremis 10 m and
+  seen by its target.
+- Falls: `Player::landing` is now this tick's touchdown; `Match::on_fall` takes the `HealthSettings` damage %
+  off `health` (100); 0 = death without killer (pursuers lose the contract, nobody scores: no suicide penalty
+  in data, `NetPlayer::M2All_Suicide` 0x0112125c only applies the death); full life on respawn.
+- Wire v3: `PlayerGame` + health u8, chase phase u8 (NONE), escape u16 (coef*65535); flags F_HIDDEN 16,
+  F_BLENDED 32; events ChaseStarted 12, Escaped 13, Fall 14, FatalFall 15. HUD: "(concealed)", "chased,
+  escape N%", hidden/blended, health.
+- Tests: `acb-game/tests/hide_map.rs` (enter/exit, haystack kill, blend, fatal fall), mode tests
+  `escape_scores_and_reassigns`, `falls_hurt_and_kill`, rules `blend_rules`, `hidden_killer_all_around`.

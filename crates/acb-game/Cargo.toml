@@ -9,5 +9,6 @@ publish.workspace = true
 [dependencies]
 acb-world.workspace = true
 acb-anim.workspace = true
+anvil-fastload.workspace = true
 anyhow.workspace = true
 glam.workspace = true
