@@ -545,6 +545,7 @@ impl Client {
             EventKind::ContractLost if e.a == me => format!("contract on player {} lost", e.b),
             EventKind::ContractLost => format!("player {} lost you", e.a),
             EventKind::ContractFulfilled if e.a == me => format!("contract on player {} fulfilled", e.b),
+            EventKind::ContractFulfilled => format!("killed by player {} (its target)", e.a),
             EventKind::MatchOver if e.a == crate::proto::NONE => "match over: draw".into(),
             EventKind::MatchOver if e.a == me => "match over: you win".into(),
             EventKind::MatchOver => format!("match over: player {} wins", e.a),
