@@ -558,7 +558,8 @@ impl Contracts {
         h.cooldown = MIN_WAIT_TIME;
     }
 
-    /// `p` was stunned by its target: the contract is lost (Wanted).
+    /// `p` was stunned by its target, or its target escaped it: the
+    /// contract is lost (Wanted); a new one after the cooldown.
     pub fn on_stunned(&mut self, p: usize) -> Vec<ContractEvent> {
         let h = &mut self.hunters[p];
         match h.target.take() {
@@ -603,6 +604,40 @@ pub fn locate(hunter: Vec3, target: Vec3, was_near: bool, los: bool) -> Locate {
     Locate { dir: d.normalize_or_zero(), dist, fill, near, in_view }
 }
 
+/// Like [`locate`] for a target that is hidden (hiding spot) or blended:
+/// the compass still fills, but it can only be picked out from within
+/// [`DIST_GAP`] (our reading: retail greys the portrait of a concealed
+/// target until the hunter is on top of it).
+pub fn locate_concealed(hunter: Vec3, target: Vec3, was_near: bool, los: bool, concealed: bool) -> Locate {
+    let mut l = locate(hunter, target, was_near, los);
+    if concealed && l.dist > DIST_GAP {
+        l.in_view = false;
+    }
+    l
+}
+
+// ---------------------------------------------------------------------------
+// blending
+
+/// Blend group reach around the player, metres (our reading: retail blends
+/// inside a crowd group's polygon, `GSrvGroupPolygon`; we use a circle of
+/// about the group spacing).
+pub const BLEND_RADIUS: f32 = 2.0;
+/// People needed within [`BLEND_RADIUS`] (a group: two or more).
+pub const BLEND_MIN_GROUP: usize = 2;
+/// Blending is low profile: walking speed at most, m/s.
+pub const BLEND_MAX_SPEED: f32 = 2.0;
+
+/// Whether `me` blends among `others` (crowd NPCs, persona lookalikes
+/// included): on the ground, walking or standing, with a group around.
+pub fn blended(me: &Actor, others: impl IntoIterator<Item = Vec3>) -> bool {
+    if me.stance != Stance::Ground || me.speed > BLEND_MAX_SPEED {
+        return false;
+    }
+    let near = others.into_iter().filter(|o| (*o - me.pos).truncate().length() <= BLEND_RADIUS && (o.z - me.pos.z).abs() <= DIST_HEIGHT_GAP).count();
+    near >= BLEND_MIN_GROUP
+}
+
 /// Threat state of a target with a pursuer at `pursuer` (hysteresis 15 / 70 m).
 pub fn threatened(target: Vec3, pursuer: Vec3, was: bool) -> bool {
     let dist = (pursuer - target).truncate().length();
@@ -621,6 +656,33 @@ mod tests {
         Actor { pos: Vec3::new(x, y, 0.0), yaw, stance: Stance::Ground, speed: 0.0 }
     }
     const MP: Rules = Rules { free_play: false, allow_killing_npcs: true };
+
+    #[test]
+    fn blend_rules() {
+        let me = at(0.0, 0.0, 0.0);
+        let group = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(-0.5, 1.2, 0.0), Vec3::new(9.0, 0.0, 0.0)];
+        assert!(blended(&me, group));
+        // one person is not a group; running or climbing breaks it
+        assert!(!blended(&me, group[1..].iter().copied()));
+        assert!(!blended(&Actor { speed: 3.5, ..me }, group));
+        assert!(!blended(&Actor { stance: Stance::Climb, ..me }, group));
+        // concealed targets: compass fills, picked out only up close
+        let h = Vec3::ZERO;
+        let l = locate_concealed(h, Vec3::new(8.0, 0.0, 0.0), false, true, true);
+        assert!(!l.in_view && l.fill == 1.0);
+        assert!(locate_concealed(h, Vec3::new(3.0, 0.0, 0.0), false, true, true).in_view);
+        assert!(locate_concealed(h, Vec3::new(8.0, 0.0, 0.0), false, true, false).in_view);
+    }
+
+    #[test]
+    fn hidden_killer_all_around() {
+        let k = Actor { stance: Stance::Hidden, ..at(0.0, 0.0, 0.0) };
+        // behind the hidden killer (facing +Y): granted from the haystack
+        let g = check(Act::Kill, &k, &at(0.0, -2.0, 0.0), Relation::Target, &MP, PAIR_SPACING).unwrap();
+        assert_eq!(g.situation, Situation::Haystack2Ground);
+        assert_eq!(check(Act::Kill, &k, &at(0.0, -2.6, 0.0), Relation::Target, &MP, PAIR_SPACING), Err(Reject::Range));
+        assert_eq!(check(Act::Stun, &k, &at(0.0, 2.0, 0.0), Relation::Pursuer, &MP, PAIR_SPACING), Err(Reject::Stance));
+    }
 
     #[test]
     fn kill_range_and_walk_in() {

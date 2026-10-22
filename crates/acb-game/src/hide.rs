@@ -24,7 +24,6 @@ use acb_anim::pose::Clip;
 use acb_world::Archive;
 use glam::{Mat4, Quat, Vec2, Vec3};
 
-use crate::kill;
 
 /// A hiding spot.
 #[derive(Clone, Debug)]
@@ -208,7 +207,7 @@ impl Hiding {
     /// One tick. `leave`: a move direction (world, unit) to leave towards.
     /// Returns the pose, its world placement, the logical position / yaw,
     /// and whether the player is out (the exit finished).
-    pub fn update(&mut self, hide: &Hide, sk: &acb_anim::pose::Skeleton, idle: &Clip, leave: Option<Vec2>, dt: f32) -> (Vec<(Vec3, Quat)>, Mat4, Vec3, f32, bool) {
+    pub fn update(&mut self, hide: &Hide, sk: &acb_anim::pose::Skeleton, leave: Option<Vec2>, dt: f32) -> (Vec<(Vec3, Quat)>, Mat4, Vec3, f32, bool) {
         self.t += dt;
         let spot = &hide.spots[self.spot];
         let floor = spot.center().z;
@@ -243,14 +242,9 @@ impl Hiding {
             let (_, r1, t1) = world.to_scale_rotation_translation();
             world = Mat4::from_rotation_translation(r0.slerp(r1, w), t0.lerp(t1, w));
         }
-        let neutral = kill::reference(idle, 0.0).unwrap_or((Vec3::Z * 0.96, 66f32.to_radians()));
-        let (pos, yaw) = match kill::reference(clip, ct) {
-            Some((rp, ry)) => kill::reroot(self.frame, rp, ry, neutral),
-            None => {
-                let (_, r, t) = world.to_scale_rotation_translation();
-                (t, r.to_euler(glam::EulerRot::ZXY).0)
-            }
-        };
+        // the logical position follows the root (these clips move it)
+        let (_, r, at) = (self.frame * clip.root_motion(ct)).to_scale_rotation_translation();
+        let (pos, yaw) = (at, r.to_euler(glam::EulerRot::ZXY).0);
         let out = self.phase == Phase::Exit && self.t >= clip.length;
         (pose, world, pos.with_z(floor), yaw, out)
     }

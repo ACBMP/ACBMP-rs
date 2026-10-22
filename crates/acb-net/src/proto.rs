@@ -9,7 +9,7 @@ use glam::Vec3;
 
 pub const MAGIC: [u8; 2] = *b"AB";
 /// 2: match rules in `Start`, match state in `Snapshot`, match events.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -125,6 +125,10 @@ pub const F_ATTACKING: u8 = 2;
 pub const F_CLIMBING: u8 = 4;
 /// The body plays a scripted clip (a kill or stun victim).
 pub const F_VICTIM: u8 = 8;
+/// In a hiding spot (fully inside).
+pub const F_HIDDEN: u8 = 16;
+/// Blended in a crowd group.
+pub const F_BLENDED: u8 = 32;
 
 fn cm(v: f32) -> i16 {
     (v * 100.0).trunc().clamp(i16::MIN as f32, i16::MAX as f32) as i16
@@ -228,6 +232,14 @@ pub enum EventKind {
     ContractFulfilled = 10,
     /// a = winner (0xff: draw).
     MatchOver = 11,
+    /// a = hunter, b = the target it chases.
+    ChaseStarted = 12,
+    /// a = hunter, b = the target that escaped it.
+    Escaped = 13,
+    /// a = player, b = fall damage % (survived).
+    Fall = 14,
+    /// a = player, b = fall damage %: died.
+    FatalFall = 15,
 }
 
 impl EventKind {
@@ -245,6 +257,10 @@ impl EventKind {
             9 => ContractLost,
             10 => ContractFulfilled,
             11 => MatchOver,
+            12 => ChaseStarted,
+            13 => Escaped,
+            14 => Fall,
+            15 => FatalFall,
             _ => return None,
         })
     }
@@ -334,6 +350,10 @@ impl Event {
             EventKind::ContractFulfilled => format!("tick {} player {} fulfilled its contract on player {}", self.tick, self.a, self.b),
             EventKind::MatchOver if self.a == u8::MAX => format!("tick {} match over: draw", self.tick),
             EventKind::MatchOver => format!("tick {} match over: player {} wins", self.tick, self.a),
+            EventKind::ChaseStarted => format!("tick {} player {} chases player {}", self.tick, self.a, self.b),
+            EventKind::Escaped => format!("tick {} player {} escaped player {}", self.tick, self.b, self.a),
+            EventKind::Fall => format!("tick {} player {} fell: {} % damage", self.tick, self.a, self.b),
+            EventKind::FatalFall => format!("tick {} player {} fell to its death ({} %)", self.tick, self.a, self.b),
         }
     }
 }
@@ -343,7 +363,7 @@ impl Event {
 /// No target / not dead.
 pub const NONE: u8 = u8::MAX;
 
-/// One player's match state as a snapshot carries it (7 bytes).
+/// One player's match state as a snapshot carries it (11 bytes).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PlayerGame {
     /// Player it holds a contract on ([`NONE`]).
@@ -353,9 +373,15 @@ pub struct PlayerGame {
     pub respawn: u16,
     /// Ticks until it may get a new contract.
     pub cooldown: u16,
+    /// Life left, % of max.
+    pub health: u8,
+    /// Its chase of its target: phase ([`NONE`]: not chasing) and escape
+    /// meter (coef * 65535, rounded).
+    pub chase: u8,
+    pub escape: u16,
 }
 
-/// The match part of a snapshot (5 + 7 per player bytes).
+/// The match part of a snapshot (5 + 11 per player bytes).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GameState {
     pub ticks_left: u32,
@@ -372,13 +398,16 @@ impl GameState {
             w.u16(p.score);
             w.u16(p.respawn);
             w.u16(p.cooldown);
+            w.u8(p.health);
+            w.u8(p.chase);
+            w.u16(p.escape);
         }
     }
 
     fn read(r: &mut Reader, players: u8) -> Option<GameState> {
         let ticks_left = r.u32()?;
         let over = r.u8()? != 0;
-        let players = (0..players).map(|_| Some(PlayerGame { target: r.u8()?, score: r.u16()?, respawn: r.u16()?, cooldown: r.u16()? })).collect::<Option<_>>()?;
+        let players = (0..players).map(|_| Some(PlayerGame { target: r.u8()?, score: r.u16()?, respawn: r.u16()?, cooldown: r.u16()?, health: r.u8()?, chase: r.u8()?, escape: r.u16()? })).collect::<Option<_>>()?;
         Some(GameState { ticks_left, over, players })
     }
 }
@@ -865,14 +894,18 @@ mod tests {
                 Event { tick: 120, kind: EventKind::Score, a: 0, b: 10 },
                 Event { tick: 120, kind: EventKind::ContractFulfilled, a: 0, b: 2 },
                 Event { tick: 120, kind: EventKind::MatchOver, a: NONE, b: 0 },
+                Event { tick: 121, kind: EventKind::ChaseStarted, a: 1, b: 0 },
+                Event { tick: 122, kind: EventKind::Escaped, a: 1, b: 0 },
+                Event { tick: 122, kind: EventKind::Fall, a: 2, b: 30 },
+                Event { tick: 123, kind: EventKind::FatalFall, a: 2, b: 200 },
             ],
             game: Some(GameState {
                 ticks_left: 17_999,
                 over: false,
                 players: vec![
-                    PlayerGame { target: 2, score: 100, respawn: 0, cooldown: 0 },
-                    PlayerGame { target: NONE, score: 0, respawn: 0, cooldown: 300 },
-                    PlayerGame { target: 0, score: 1200, respawn: 299, cooldown: 0 },
+                    PlayerGame { target: 2, score: 100, respawn: 0, cooldown: 0, health: 70, chase: 3, escape: 40_000 },
+                    PlayerGame { target: NONE, score: 0, respawn: 0, cooldown: 300, health: 100, chase: NONE, escape: 0 },
+                    PlayerGame { target: 0, score: 1200, respawn: 299, cooldown: 0, health: 0, chase: NONE, escape: 0 },
                 ],
             }),
         }

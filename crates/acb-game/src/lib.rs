@@ -450,6 +450,7 @@ impl World {
             // ACBMP_TRACE=pose: per-tick pose change of the player (summed
             // bone rotation, radians), to spot clips that snap or reset
             let before = trace_pose().then(|| p.loco.last_pose().clone());
+            p.landing = None;
             player::drive(p, &mut self.bodies, &self.clips, self.ground.as_ref(), &input, &act_rules, &relation, &seen, t, DT);
             if relations.is_some() && p.kill.is_some() && !was_attacking {
                 if let Some(v) = (0..n_players).find(|&j| j != p.body && !was_scripted[j] && self.bodies[j].scripted.is_some()) {
@@ -466,13 +467,34 @@ impl World {
                 b.entity = p.entity();
             }
         }
+        // blending: walking among a crowd group (NPCs, persona lookalikes)
+        let npcs: Vec<Vec3> = self.bodies.iter().skip(n_players).filter(|b| b.scripted.is_none()).map(|b| b.entity.w_axis.truncate()).collect();
+        for p in &mut self.players {
+            p.blended = p.hide.is_none() && rules::blended(&p.actor(), npcs.iter().copied());
+        }
         if let Some(m) = &mut self.mode {
             for (k, v, set) in actions {
                 m.on_action(k, v, set);
             }
+            for (i, p) in self.players.iter().enumerate() {
+                if let Some((_, damage, _)) = p.landing {
+                    m.on_fall(i, damage);
+                }
+            }
             let pos: Vec<Vec3> = self.players.iter().map(|p| p.pos).collect();
+            let who: Vec<mode::Presence> = self
+                .players
+                .iter()
+                .map(|p| mode::Presence { pos: p.pos, hidden: p.hidden, blended: p.blended, running: p.moved >= rules::RUN_SPEED && p.kill.is_none() })
+                .collect();
+            let ground = self.ground.as_ref();
+            // head to head (retail GameBrick::CanSee); no collision: clear
+            let los = |a: usize, b: usize| {
+                let (o, t) = (pos[a] + Vec3::Z * rules::TARGET_HEIGHT, pos[b] + Vec3::Z * rules::TARGET_HEIGHT);
+                ground.is_none_or(|g| g.ray(o, t - o).is_none())
+            };
             let back: Vec<(usize, Vec3, f32)> =
-                m.tick(&pos).into_iter().map(|(p, s)| { let (at, yaw) = m.spawns.get(s).copied().unwrap_or((pos[p], 0.0)); (p, at, yaw) }).collect();
+                m.tick(&who, &los).into_iter().map(|(p, s)| { let (at, yaw) = m.spawns.get(s).copied().unwrap_or((pos[p], 0.0)); (p, at, yaw) }).collect();
             for (p, at, yaw) in back {
                 respawn(&mut self.players[p], &mut self.bodies);
                 self.place_player(p, at, yaw);

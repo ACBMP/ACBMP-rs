@@ -32,14 +32,17 @@ pub struct Player {
     /// Seconds left in which a fall does not grab holds (after a back
     /// eject, so the wall just left is not caught again).
     pub catch_block: f32,
-    /// The last touchdown after a fall: height (m), damage (% of max
-    /// life, retail `HealthSettings`) and landing type. Fatal = dead.
+    /// This tick's touchdown after a fall: height (m), damage (% of max
+    /// life, retail `HealthSettings`) and landing type (reset every tick;
+    /// the match takes the damage off its health, fatal = dead).
     pub landing: Option<(f32, u32, jump::LandingType)>,
     /// In a hiding spot (haystack): the rules' [`rules::Stance::Hidden`]
     /// (set from `hide` while fully inside).
     pub hidden: bool,
     /// Entering, inside or leaving a hiding spot (`hide.rs`).
     pub hide: Option<crate::hide::Hiding>,
+    /// Blended in a crowd group ([`rules::blended`], set by the world step).
+    pub blended: bool,
     /// Horizontal speed over the last tick, m/s (the rules' running test).
     pub moved: f32,
 }
@@ -52,7 +55,7 @@ pub const LEDGE_STOP: f32 = 1.5;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, moved: 0.0 }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0 }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -439,7 +442,7 @@ pub(crate) fn drive(
         if input.right { dir += right; }
         if input.left { dir -= right; }
         let leave = (dir != Vec2::ZERO).then(|| dir.normalize());
-        let (pose, world, pos, yaw, out) = h.update(hide, sk, clips.idle(), leave, dt);
+        let (pose, world, pos, yaw, out) = h.update(hide, sk, leave, dt);
         p.pos = pos;
         p.yaw = yaw;
         p.hidden = h.hidden();
