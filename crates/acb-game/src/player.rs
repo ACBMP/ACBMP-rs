@@ -257,8 +257,9 @@ impl PlayerKill {
 /// Blend-in time of a kill from wherever the player was.
 const KILL_BLEND: f32 = 0.25;
 
-/// How close the player gets to other people, metres.
-const PERSONAL: f32 = 0.6;
+/// How close the player gets to other people, metres: two retail body
+/// capsules side by side.
+const PERSONAL: f32 = 2.0 * crate::ground::BODY_RADIUS;
 
 /// Seconds a back eject keeps the fall from grabbing holds: the length of
 /// retail's untargeted push-off (`xx_h_rebound_footl_tr_fall`, 0.467 s).
