@@ -520,17 +520,22 @@ impl Ground {
     /// line (retail's walk-on-beam); a move across it (or any move on a
     /// post) is left alone, stepping or jumping off.
     pub fn balance(&self, p: Vec3, delta: Vec2) -> Vec2 {
-        let len = delta.length();
-        if len < 1e-6 {
+        if delta.length() < 1e-6 {
             return delta;
         }
-        match self.beam(p) {
-            Some(b) if b.axis != Vec2::ZERO && delta.dot(b.axis).abs() >= 0.5 * len => {
-                // centre line, closing the offset at most at the move's pace
-                b.axis * delta.dot(b.axis) + b.centre.clamp_length_max(len)
-            }
-            _ => delta,
+        balance_on(self.beam(p), delta)
+    }
+}
+
+/// [`Ground::balance`] with the beam under the feet already looked up.
+pub fn balance_on(beam: Option<Beam>, delta: Vec2) -> Vec2 {
+    let len = delta.length();
+    match beam {
+        Some(b) if len >= 1e-6 && b.axis != Vec2::ZERO && delta.dot(b.axis).abs() >= 0.5 * len => {
+            // centre line, closing the offset at most at the move's pace
+            b.axis * delta.dot(b.axis) + b.centre.clamp_length_max(len)
         }
+        _ => delta,
     }
 }
 

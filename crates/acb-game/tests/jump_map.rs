@@ -171,3 +171,23 @@ fn thin_railings_sweep() {
     // the rest have an arch lintel or clutter over the body's path
     assert!(tried >= 12 && landed * 10 >= tried * 7, "{landed}/{tried}");
 }
+
+/// The beam set (retail `HumanNarrowObjectBeam` clips) loads; its cycles'
+/// root speeds are the retail speeds on a beam.
+#[test]
+fn beam_clips() {
+    let Some(d) = data() else { return };
+    let clips = Clips::load(&d.archive, d.builtins.as_ref()).unwrap();
+    let b = clips.beam().expect("beam clips");
+    let speed = |c: &acb_anim::pose::Clip| c.root_motion(c.length).w_axis.truncate().length() / c.length;
+    let yaw = |c: &acb_anim::pose::Clip| {
+        let (_, r, _) = c.root_motion(c.length).to_scale_rotation_translation();
+        r.to_euler(glam::EulerRot::ZXY).0.to_degrees()
+    };
+    println!("beam walk {:.2} m/s ({:.3} s), jog {:.2} ({:.3} s), sprint {:.2} ({:.3} s)", speed(&b.walk), b.walk.length, speed(&b.run), b.run.length, speed(&b.sprint), b.sprint.length);
+    for (n, c) in [("start walk", &b.start[0][0]), ("start jog", &b.start[0][1]), ("stop l", &b.stop[0]), ("settle l", &b.stop_settle[0]), ("land", &b.land), ("turn l", &b.turn[0]), ("turn settle l", &b.turn_settle[0])] {
+        let m = c.root_motion(c.length).w_axis;
+        println!("{n}: {:.3} s, root {:+.2} {:+.2} {:+.2}, yaw {:+.0}", c.length, m.x, m.y, m.z, yaw(c));
+    }
+    assert!(speed(&b.walk) < speed(&b.run) && speed(&b.run) < speed(&b.sprint));
+}
