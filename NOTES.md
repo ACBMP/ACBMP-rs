@@ -485,9 +485,12 @@ its exact byte length and by key continuity (`acbmp animstats`).
   fall with the locomotion velocity; gravity 10 m/s^2, walls still slide.
   Pose `xx_l_walklowfall_footl_tr_fall` / `xx_h_runlowfall_footl_tr_fall`
   held on its last frame (its root track, 3-3.3 m down, is ignored). On
-  touchdown `xx_h_landing_forward_{soft,hard}_footl_tr_h_{wait_footl,
-  jog_footr}_a` (< 3 m, < 6 m) or `xx_h_landing_damage_footl_tr_h_{wait_footr,
-  jog_footl}`, by whether input is held. Thresholds are guesses.
+  touchdown by retail landing type (`jump::landing`, see Freerun moves):
+  safe `xx_h_landing_forward_{soft,hard}_footl_tr_h_{wait_footl,jog_footr}_a`
+  (hard from 5.25 m, our reading), damage `xx_h_landing_damage_footl_tr_h_
+  wait_footr` or with input held `xx_h_landing_damage_footl_roll` (2.74 m
+  forward), fatal `xx_h_landing_death_back`. Fall height counts from the
+  highest point of the fall (retail ComputeFallHeight).
   `--at x,y,z` starts the player elsewhere; `ACBMP_TRACE=1` prints its
   state four times a simulated second. Roof at (-31.3, 42.0, 7.5) next to
   the San Donato spawn plaza drops 4.5 m.
@@ -715,6 +718,42 @@ moves advance by `dt` of simulated time; same end states at `--fps 60` and
   2 m+ edges): 28/354 had a reachable next piece, now 24 left, all real
   hold-graph gaps (next piece 0.75 m on, or 0.22 m out and 0.3 m down).
 - Viewer orbit camera backs off 1.75 m while climbing (eased, 0.4 s).
+
+### Freerun moves (wall jumps, ledges, falls)
+- Jump button: `PlayerInput.jump`, viewer key F. On the wall (in hold
+  wait): F (+S) back eject = `xx_h_hangwall_tr_rebound_footl` (0.2 s in
+  place) then a fall at 1.71 m/s off the wall (`xx_h_rebound_footl_tr_fall`
+  moves the root 0.80 m back in 0.467 s), no hold grabbing for 0.467 s;
+  F+W leap to a hold 0.9-2.6 m up (`xx_h_climbing_{hangwall,climb1m}_jump_
+  straight_{120,180,240}cm_jump_targeted[_start|_tr_hangwall]`, root rises
+  exactly 1.2/1.8/2.4 m; the nearest size is used); F+A/D, or Shift+A/D at a
+  shimmy dead end, side jump to a hold 0.5-2.6 m along the wall
+  (`xx_h_climbing_{hangwall,hangfree,climb1m}_tr_hangwall_{left,right}_
+  {2,3}_{a,b,c}`: the b clip moves the root 1.50 / 2.25 m sideways). Target
+  search `Ground::jump_hold` (same wall plane, |out| < 0.35 m, hands 0.25 m
+  in from the target's ends). San Donato (`examples/walljumps.rs`): 248 dead
+  ends on 2 m+ hang edges, 50 bridged by a side jump; 12 holds only a leap
+  reaches. Retail's targeted rebound sets (`xx_h_rebound_{dir}_{front,up,
+  down}_{050,300,550}cm_*_to_air`) are not used yet.
+- Low profile (no Shift) walking at a drop deeper than 1.5 m (our choice),
+  or off a beam end at any drop: stops at the edge (retail `xx_l_ledge_
+  lookdown_*`, `xx_l_beam_edge_stop`; clips not played yet). F there lowers
+  onto the wall below (`Ground::ledge_hold`, `Climb::pulldown`: `xx_l_ledge_
+  pulldown_soft_to_climbing_2m_{a,b}` + `_tr_climbing_2m`, turning to face
+  the wall) or, with no hold, steps off. High profile runs off / jumps as
+  before. Dropping from a hang onto a lower hold = drop + catch while falling.
+- Fall damage, retail data: DataPC.forge `HealthSettings` 0x16bc5031
+  `PlayerDamageFall` (Height, Damage % of max life, LandingType): 8 m 30 %
+  SmallDamage, 12 m 50 % HeavyDamage, 16 m 75 % HeavyDamage, 20 m 200 %
+  Fatal (NPCs: 7 m 200 %). `HealthSettings::LookupFallDamage` (0x00b9304e)
+  takes the highest row <= the fall height; without settings
+  `HumanInAir::LookupFallDamageWithoutHealthSettings` (0x012ccdcc) uses the
+  same 8/12/16/20 m. `HumanInAir::CheckForLanding` (0x01310742): fatal ->
+  ApplyDeath; ragdoll hurt landing from 5.25 m. `Player.landing` keeps
+  (height, damage %, type) of the last touchdown; ACBMP_TRACE prints `land:`.
+  Health/death are not applied to the match yet (mode.rs).
+- Gates (tools/gates.sh, identical at 60/144 fps): eject, sidejump, leap,
+  pulldown, beamend, roll (end positions in its header).
 
 ## MP rules (`acb-game/src/rules.rs`)
 Pure, deterministic functions the server and client prediction share (no clock, no RNG; ties by index).

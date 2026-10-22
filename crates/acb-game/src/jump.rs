@@ -592,6 +592,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fall_damage_follows_the_retail_health_settings() {
+        assert_eq!(landing(7.99), (0, LandingType::Safe));
+        assert_eq!(landing(8.0), (30, LandingType::SmallDamage));
+        assert_eq!(landing(12.5), (50, LandingType::HeavyDamage));
+        assert_eq!(landing(16.0), (75, LandingType::HeavyDamage));
+        assert_eq!(landing(20.0), (200, LandingType::Fatal));
+    }
+
+    #[test]
     fn a_launch_lands_on_the_target() {
         let d = Vec3::new(1.0, 2.5, 1.1);
         let t = 0.5;
