@@ -74,8 +74,9 @@ are best: `--input "0=w,shift 1.5= 2=d"` (keys from each time in seconds) plus
 Known gaps (Phase 2): no on-screen HUD; respawn (5 s) and start (3 s) delays
 are placeholders; blending uses retail's group polygons but our crowd forms
 its groups by distance (retail groups not traced); bench kill placement is
-our stand-in (clips lack a Reference track), ledge kills and beam-end edge animations are missing; chase start is
-our reading; walkable slope and step height are still ours (retail values not
+our stand-in (clips lack a Reference track), ledge kills and beam-end edge animations are missing; chase start uses
+the retail threat-meter rates but our awareness (distance ramp only, no facing cones or speed ramp, no
+lock-on 0.99) and the meter is not replicated; walkable slope and step height are still ours (retail values not
 found).
 
 Crates:
