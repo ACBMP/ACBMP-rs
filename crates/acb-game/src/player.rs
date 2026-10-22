@@ -85,6 +85,8 @@ impl Player {
             rules::Stance::Air
         } else if self.hidden {
             rules::Stance::Hidden
+        } else if self.hide.as_ref().is_some_and(|h| h.seated()) {
+            rules::Stance::Seated
         } else {
             rules::Stance::Ground
         };
@@ -142,6 +144,8 @@ pub fn kill_kind(situation: rules::Situation, act: rules::Act) -> usize {
         (_, S::Drop2Ground) => kill::DROP,
         (_, S::Ground2Haystack) => kill::TO_HAY,
         (_, S::Haystack2Ground) => kill::HAY_GRAB,
+        (_, S::Ground2Bench) => kill::TO_BENCH,
+        (_, S::Bench2Ground) => kill::FROM_BENCH,
     }
 }
 

@@ -28,7 +28,7 @@ fn data() -> Option<Data> {
 fn kill_sets_load() {
     let Some(d) = data() else { return };
     let k = KillClips::load(&d.archive, d.builtins.as_ref(), "AC2MP_ID07_MainTemplate_Player").unwrap();
-    assert_eq!(k.sets.len(), 14);
+    assert_eq!(k.sets.len(), 18);
     for (i, (a, v)) in k.sets.iter().enumerate() {
         let r = |c: &acb_anim::pose::Clip, t: f32| kill::reference(c, t).map(|(p, y)| format!("({:.2},{:.2},{:.2}) {:.0}", p.x, p.y, p.z, y.to_degrees()));
         eprintln!(

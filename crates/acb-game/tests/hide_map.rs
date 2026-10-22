@@ -199,7 +199,7 @@ fn bench_sit_blend_stand() {
     let t = seated.expect("never seated");
     let p = &w.players[0];
     assert!(!p.hidden);
-    assert_eq!(p.actor().stance, rules::Stance::Ground);
+    assert_eq!(p.actor().stance, rules::Stance::Seated);
     assert!((p.pos - seat).truncate().length() < 0.05, "{:?} vs {seat}", p.pos);
     // the sit-down (0.67 s) and the settle (0.53 s)
     assert!((60..=90).contains(&(t - 11)), "seated after {} ticks", t - 11);
@@ -221,4 +221,37 @@ fn bench_sit_blend_stand() {
     let p = &w.players[0];
     assert!(!p.blended);
     assert!((p.pos - seat).dot(out) > 0.15, "stood up in front: {:?}", p.pos);
+}
+
+/// Seated on bench seat 0 (the first seat), the NPC (body 1) 1.4 m in
+/// front: the kill button kills from the bench (`Bench2Walk`).
+#[test]
+fn bench_kill() {
+    let Some(d) = data() else { return };
+    let probe = world(&d, 1, &[0.0, 0.0, 0.0, 0.0]);
+    let spots = probe.clips.hide.as_ref().expect("hide").spots.clone();
+    let k = spots.iter().position(|s| s.seat.is_some()).unwrap();
+    let s = &spots[k];
+    let seat = s.frame.w_axis.truncate();
+    let out = s.frame.x_axis.truncate().normalize();
+    let at = seat + out * 0.4;
+    let npc = seat + out * 1.4;
+    let yaw = acb_game::hide::seat_yaw(s).to_degrees();
+    eprintln!("seat {k} at {seat} yaw {yaw:.1}: player {at} yaw {:.1}, npc {npc}", yaw + 180.0);
+    let mut w = world(&d, 2, &[at.x, at.y, at.z, yaw + 180.0, npc.x, npc.y, npc.z, yaw + 180.0]);
+    w.step(&[PlayerInput { jump: true, ..PlayerInput::default() }]);
+    for _ in 0..90 {
+        w.step(&[PlayerInput::default()]);
+    }
+    assert_eq!(w.players[0].actor().stance, rules::Stance::Seated);
+    w.step(&[PlayerInput { kill: true, ..PlayerInput::default() }]);
+    let p = &w.players[0];
+    let set = p.kill.as_ref().expect("kill from the bench").set();
+    assert_eq!(set & !1, kill::FROM_BENCH);
+    assert!(p.hide.is_none() && !p.blended);
+    assert!(w.bodies[1].scripted.is_some());
+    for _ in 0..240 {
+        w.step(&[PlayerInput::default()]);
+    }
+    assert!(w.players[0].kill.is_none(), "the bench kill ends");
 }

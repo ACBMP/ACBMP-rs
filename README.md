@@ -52,7 +52,9 @@ On a wall: W/S/A/D climb up/down/left/right (fixed directions, not camera
 relative); F + S or F alone jumps back off the wall, F + A/D jumps sideways
 across a gap, F + W leaps to a hold above; Shift + A/D at the end of an edge
 also side-jumps. Walk into a haystack in high profile (or drop onto it) to
-hide; any move key leaves. Walking slowly among the crowd blends you.
+hide; any move key leaves. Walking slowly among the crowd blends you. Stand
+or walk (low profile) next to a bench seat and press F to sit (blended);
+E kills a passer-by from the bench, a fresh move key stands up.
 
 HUD: there is no on-screen text yet. Target, distance, compass fill, who is
 hunting you, score, time and the last event are in the window title.
@@ -71,8 +73,8 @@ are best: `--input "0=w,shift 1.5= 2=d"` (keys from each time in seconds) plus
 
 Known gaps (Phase 2): no on-screen HUD; respawn (5 s) and start (3 s) delays
 are placeholders; blending uses retail's group polygons but our crowd forms
-its groups by distance (retail groups not traced); benches (sitting, bench
-kills), ledge kills and beam-end edge animations are missing; chase start is
+its groups by distance (retail groups not traced); bench kill placement is
+our stand-in (clips lack a Reference track), ledge kills and beam-end edge animations are missing; chase start is
 our reading; walkable slope and step height are still ours (retail values not
 found).
 
