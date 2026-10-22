@@ -29,7 +29,9 @@ Two-player duel (Wanted rules: contracts, kills score, respawns, 5 min):
         --connect HOST:7777 --name alice
 
 The server waits for `--players` clients, then starts. `--time-limit S`
-changes the match length, `--mode free` drops the match rules.
+changes the match length, `--mode free` drops the match rules, `--crowd N`
+(and `--crowd-seed S`) adds N wandering NPCs that every client simulates
+too (blending works online; clients need no flag, the server sends it).
 
 Controls (on foot):
 
@@ -68,8 +70,10 @@ are best: `--input "0=w,shift 1.5= 2=d"` (keys from each time in seconds) plus
 `--at` replays exactly, at any frame rate.
 
 Known gaps (Phase 2): no on-screen HUD; respawn (5 s) and start (3 s) delays
-are placeholders; blending rules are partly our reading; online matches have
-no crowd yet; benches, ledge kills and beam-end edge animations are missing;
+are placeholders; blending uses retail's group polygons but our crowd forms
+its groups by distance (retail groups not traced); benches (sitting, bench
+kills), ledge kills and beam-end edge animations are missing; chase start is
+our reading;
 the stand-in collision body is narrower than retail's.
 
 Crates:
