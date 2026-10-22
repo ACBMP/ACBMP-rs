@@ -28,6 +28,21 @@ pub const RESPAWN_DELAY: f32 = 5.0;
 /// Placeholder: no contracts during the first seconds (retail's intro;
 /// `GBrick_Delay` `DelayDuration` 0x00d3d70a, XML only, default 0).
 pub const START_DELAY: f32 = 3.0;
+/// Escaping a chase: `GBrick_ScoreChase` XML default `ScoreEscape` 100.
+pub const ESCAPE_POINTS: u32 = 100;
+/// `GBrick_Escape::ReadFromXML` (Mac 0x00c17d32) defaults, seconds to fill
+/// the escape meter per [`ChasePhase`]; 0 = the meter resets (in sight).
+pub const TIME_TO_ESCAPE: [f32; 4] = [0.0, 0.0, 12.0, 7.0];
+/// `GBrick_Escape` `DistanceInExtremis` default: our chase start range
+/// (a running pursuer this close and in sight starts the chase; the
+/// retail trigger is a `ChaseRequestEvent`, sender not traced).
+pub const DISTANCE_IN_EXTREMIS: f32 = 10.0;
+/// In sight for the escape meter: line of sight within this range (our
+/// reading: retail `GameBrick::CanSee` is a head-to-head ray; we bound it by
+/// the compass `DetectionRange`).
+pub const SIGHT_RANGE: f32 = crate::rules::DETECTION_RANGE;
+/// Full life, percent (`HealthSettings` fall damage is % of max life).
+pub const FULL_HEALTH: u32 = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MatchConfig {
@@ -50,6 +65,60 @@ impl Default for MatchConfig {
 pub enum ScoreReason {
     Kill,
     Stun,
+    Escape,
+}
+
+/// `GBrick_Escape` chase phases (`GetNewPhase` 0x00c0f710): in sight or
+/// not, target hidden (hiding spot or blended) or not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChasePhase {
+    InSight = 0,
+    InSightHidden = 1,
+    OutOfSight = 2,
+    OutOfSightHidden = 3,
+}
+
+impl ChasePhase {
+    pub fn new(in_sight: bool, hidden: bool) -> ChasePhase {
+        match (in_sight, hidden) {
+            (true, false) => ChasePhase::InSight,
+            (true, true) => ChasePhase::InSightHidden,
+            (false, false) => ChasePhase::OutOfSight,
+            (false, true) => ChasePhase::OutOfSightHidden,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Option<ChasePhase> {
+        [ChasePhase::InSight, ChasePhase::InSightHidden, ChasePhase::OutOfSight, ChasePhase::OutOfSightHidden].get(v as usize).copied()
+    }
+}
+
+/// A hunter chasing its target: the target escapes when `coef` passes 1
+/// (`TickEscapingCoef` 0x00c0f794: += dt / time of the phase, reset in
+/// sight).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chase {
+    pub target: usize,
+    pub coef: f32,
+    pub phase: ChasePhase,
+}
+
+/// A player as the match sees it this tick.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Presence {
+    pub pos: Vec3,
+    /// In a hiding spot.
+    pub hidden: bool,
+    /// Blended in a crowd group ([`crate::rules::blended`]).
+    pub blended: bool,
+    /// High profile on foot (running): starts a chase when seen.
+    pub running: bool,
+}
+
+impl Presence {
+    pub fn at(pos: Vec3) -> Presence {
+        Presence { pos, ..Default::default() }
+    }
 }
 
 /// What the match decided during the last tick.
@@ -59,6 +128,13 @@ pub enum MatchEvent {
     Score { player: usize, points: u32, reason: ScoreReason },
     /// Back in the game at spawn `spawn`.
     Respawn { player: usize, spawn: usize },
+    /// `hunter` was seen running at its target: the escape meter runs.
+    ChaseStarted { hunter: usize, target: usize },
+    /// `target` escaped `hunter` (who loses the contract).
+    Escaped { hunter: usize, target: usize },
+    /// `player` lost `damage` % of its life in a fall (`fatal`: died; no
+    /// killer, nobody scores).
+    Fall { player: usize, damage: u32, fatal: bool },
     /// The match ended; `winner` is `None` on a draw.
     Over { winner: Option<usize> },
 }
@@ -74,6 +150,10 @@ pub struct Match {
     pub spawns: Vec<(Vec3, f32)>,
     /// Ticks played.
     pub ticks: u32,
+    /// Per player: life left, % (falls; full again on respawn).
+    pub health: Vec<u32>,
+    /// Per hunter: its chase of its target.
+    pub chases: Vec<Option<Chase>>,
     pub over: bool,
     /// This tick's decisions (cleared at every step).
     pub events: Vec<MatchEvent>,
@@ -93,6 +173,8 @@ impl Match {
             respawn: vec![None; players],
             spawns,
             ticks: 0,
+            health: vec![FULL_HEALTH; players],
+            chases: vec![None; players],
             over: false,
             events: Vec::new(),
         }
@@ -155,6 +237,71 @@ impl Match {
         self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1) + 1);
     }
 
+    /// Player `p` touched down after a fall with `damage` % of max life
+    /// (`jump::landing`, retail `HealthSettings`): a fatal fall (life at
+    /// 0) is a death without a killer. Retail has no suicide penalty in the
+    /// data or in `NetPlayer::M2All_Suicide` (0x0112125c just applies the
+    /// death), so nobody scores; the pursuers lose the contract.
+    pub(crate) fn on_fall(&mut self, p: usize, damage: u32) {
+        if damage == 0 || !self.alive(p) || self.over {
+            return;
+        }
+        self.health[p] = self.health[p].saturating_sub(damage);
+        let fatal = self.health[p] == 0;
+        self.events.push(MatchEvent::Fall { player: p, damage, fatal });
+        if fatal {
+            for e in self.contracts.on_death(p, None) {
+                self.events.push(MatchEvent::Contract(e));
+            }
+            self.respawn[p] = Some(ticks(self.config.respawn_delay).max(1) + 1);
+        }
+    }
+
+    /// Chases and escapes (`GBrick_Escape::Update` 0x00c5f4fc): a chase
+    /// ends with the contract; it starts when the hunter, running, is in
+    /// sight of its target within [`DISTANCE_IN_EXTREMIS`]; the meter fills
+    /// out of sight (faster with the target hidden or blended), resets in
+    /// sight, and past 1 the target escapes: it scores [`ESCAPE_POINTS`],
+    /// the hunter loses the contract (`EVENT_ENDCONTRACT_TARGET_ESCAPED_PLAYER`)
+    /// and is reassigned after the cooldown.
+    fn chase(&mut self, who: &[Presence], los: &dyn Fn(usize, usize) -> bool) {
+        for h in 0..self.chases.len() {
+            let target = self.contracts.hunters[h].target.filter(|_| self.alive(h));
+            let Some(t) = target.filter(|&t| t < who.len() && self.alive(t)) else {
+                self.chases[h] = None;
+                continue;
+            };
+            if self.chases[h].is_some_and(|c| c.target != t) {
+                self.chases[h] = None;
+            }
+            let dist = (who[t].pos - who[h].pos).truncate().length();
+            let concealed = who[t].hidden || who[t].blended;
+            match &mut self.chases[h] {
+                None => {
+                    if who[h].running && dist <= DISTANCE_IN_EXTREMIS && los(t, h) {
+                        self.chases[h] = Some(Chase { target: t, coef: 0.0, phase: ChasePhase::new(true, concealed) });
+                        self.events.push(MatchEvent::ChaseStarted { hunter: h, target: t });
+                    }
+                }
+                Some(c) => {
+                    let in_sight = dist <= SIGHT_RANGE && los(h, t);
+                    c.phase = ChasePhase::new(in_sight, concealed);
+                    let time = TIME_TO_ESCAPE[c.phase as usize];
+                    c.coef = if time > 0.0 { c.coef + crate::DT / time } else { 0.0 };
+                    if c.coef > 1.0 {
+                        self.chases[h] = None;
+                        self.score[t] += ESCAPE_POINTS;
+                        self.events.push(MatchEvent::Escaped { hunter: h, target: t });
+                        self.events.push(MatchEvent::Score { player: t, points: ESCAPE_POINTS, reason: ScoreReason::Escape });
+                        for e in self.contracts.on_stunned(h) {
+                            self.events.push(MatchEvent::Contract(e));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// The spawn for `p`: the one furthest from the nearest other living
     /// player (ties: lowest index).
     pub fn pick_spawn(&self, p: usize, pos: &[Vec3]) -> usize {
@@ -165,12 +312,16 @@ impl Match {
 
     /// The clock part of a tick (after the players moved): respawn
     /// countdowns (returns who respawns where), contracts, limits.
-    pub(crate) fn tick(&mut self, pos: &[Vec3]) -> Vec<(usize, usize)> {
+    /// `los(a, b)`: line of sight from player `a`'s head to `b`'s.
+    pub(crate) fn tick(&mut self, who: &[Presence], los: &dyn Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
+        let pos: Vec<Vec3> = who.iter().map(|w| w.pos).collect();
+        let pos = &pos[..];
         let mut back = Vec::new();
         if self.over {
             return back;
         }
         self.ticks += 1;
+        self.chase(who, los);
         for p in 0..self.respawn.len() {
             if let Some(r) = &mut self.respawn[p] {
                 *r -= 1;
@@ -178,6 +329,7 @@ impl Match {
                     self.respawn[p] = None;
                     let s = self.pick_spawn(p, pos);
                     self.contracts.respawn(p);
+                    self.health[p] = FULL_HEALTH;
                     self.events.push(MatchEvent::Respawn { player: p, spawn: s });
                     back.push((p, s));
                 }
@@ -210,7 +362,8 @@ mod tests {
     }
 
     fn run(m: &mut Match, n: u32, pos: &[Vec3]) -> Vec<(usize, usize)> {
-        (0..n).flat_map(|_| m.tick(pos)).collect()
+        let who: Vec<Presence> = pos.iter().map(|&p| Presence::at(p)).collect();
+        (0..n).flat_map(|_| m.tick(&who, &|_, _| true)).collect()
     }
 
     #[test]
@@ -239,6 +392,77 @@ mod tests {
     }
 
     #[test]
+    fn escape_scores_and_reassigns() {
+        let mut m = m(3);
+        m.config.time_limit = 100.0;
+        let mut who = vec![Presence::at(Vec3::ZERO), Presence::at(Vec3::new(20.0, 0.0, 0.0)), Presence::at(Vec3::new(0.0, 30.0, 0.0))];
+        let see = std::cell::Cell::new(true);
+        let los = |_: usize, _: usize| see.get();
+        for _ in 0..30 {
+            m.tick(&who, &los);
+        }
+        let h = 0;
+        let t = m.contracts.hunters[h].target.unwrap();
+        // the hunter runs up within 10 m in sight: chase
+        who[h].pos = who[t].pos - Vec3::new(8.0, 0.0, 0.0);
+        who[h].running = true;
+        m.tick(&who, &los);
+        assert!(m.events.contains(&MatchEvent::ChaseStarted { hunter: h, target: t }), "{:?}", m.events);
+        // out of sight, not hidden: 12 s to escape; back in sight resets
+        see.set(false);
+        for _ in 0..ticks(6.0) {
+            m.tick(&who, &los);
+        }
+        assert!((m.chases[h].unwrap().coef - 0.5).abs() < 0.01);
+        see.set(true);
+        m.tick(&who, &los);
+        assert_eq!(m.chases[h].unwrap().coef, 0.0);
+        assert_eq!(m.chases[h].unwrap().phase, ChasePhase::InSight);
+        // out of sight and hidden: 7 s
+        see.set(false);
+        who[t].hidden = true;
+        let mut n = 0;
+        while m.chases[h].is_some() {
+            m.tick(&who, &los);
+            n += 1;
+            assert!(n < 1000, "{:?} {:?}", m.chases[h], m.contracts.hunters[h]);
+        }
+        assert!((ticks(7.0)..=ticks(7.0) + 1).contains(&n), "{n}");
+        assert!(m.events.contains(&MatchEvent::Escaped { hunter: h, target: t }));
+        assert_eq!(m.score[t], ESCAPE_POINTS);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: h, target: t })));
+        assert_eq!(m.contracts.hunters[h].target, None);
+        // a new contract after the cooldown
+        for _ in 0..ticks(crate::rules::MIN_WAIT_TIME) + 1 {
+            m.tick(&who, &los);
+        }
+        assert!(m.contracts.hunters[h].target.is_some());
+    }
+
+    #[test]
+    fn falls_hurt_and_kill() {
+        let mut m = m(2);
+        let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0)];
+        run(&mut m, 30, &pos);
+        assert_eq!(m.contracts.relation(0, 1), Relation::Mutual);
+        m.on_fall(1, 30);
+        assert_eq!(m.health[1], 70);
+        assert!(m.alive(1));
+        m.on_fall(1, 75);
+        assert!(!m.alive(1));
+        assert!(m.events.contains(&MatchEvent::Fall { player: 1, damage: 75, fatal: true }));
+        // no killer: nobody scores, the pursuer loses its contract
+        assert_eq!(m.score, vec![0, 0]);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: 0, target: 1 })));
+        run(&mut m, ticks(1.0) + 1, &pos);
+        assert!(m.alive(1));
+        assert_eq!(m.health[1], FULL_HEALTH);
+        // a fatal fall (200 %) from full life
+        m.on_fall(0, 200);
+        assert!(!m.alive(0));
+    }
+
+    #[test]
     fn three_players_and_limits() {
         let mut m = m(3);
         let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0), Vec3::new(0.0, 30.0, 0.0)];
@@ -253,7 +477,7 @@ mod tests {
         let t = targets[0].unwrap();
         m.on_action(h, t, crate::kill::WALK);
         m.score[h] = 200;
-        let _ = m.tick(&pos);
+        let _ = run(&mut m, 1, &pos);
         assert!(m.over);
         assert_eq!(m.events.last(), Some(&MatchEvent::Over { winner: Some(h) }));
     }

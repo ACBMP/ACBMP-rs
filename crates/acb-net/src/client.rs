@@ -568,14 +568,30 @@ impl Client {
         let mut s = match (m.respawn.get(me).copied().flatten(), m.contracts.hunters.get(me).and_then(|h| h.target)) {
             (Some(r), _) => format!("respawn in {:.1} s", r as f32 / TICK_HZ as f32),
             (None, Some(t)) => {
-                let l = acb_game::rules::locate(pos(me), pos(t), false, false);
-                format!("target p{t} {:.1} m compass {:.0}%", l.dist, l.fill * 100.0)
+                let concealed = world.players.get(t).is_some_and(|p| p.hidden || p.blended);
+                let l = acb_game::rules::locate_concealed(pos(me), pos(t), false, false, concealed);
+                format!("target p{t} {:.1} m compass {:.0}%{}", l.dist, l.fill * 100.0, if concealed { " (concealed)" } else { "" })
             }
             (None, None) => "no target".into(),
         };
         let pursued = (0..m.contracts.hunters.len()).filter(|&h| h != me && m.contracts.hunters[h].target == Some(me)).count();
         if pursued > 0 {
             s += &format!(" | pursued x{pursued}");
+        }
+        // being chased: the escape meter of the chase closest to done
+        let escape = m.chases.iter().flatten().filter(|c| c.target == me).map(|c| c.coef).fold(None, |a: Option<f32>, c| Some(a.map_or(c, |a| a.max(c))));
+        if let Some(e) = escape {
+            s += &format!(" | chased, escape {:.0}%", e * 100.0);
+        }
+        if let Some(p) = world.players.get(me) {
+            if p.hidden {
+                s += " | hidden";
+            } else if p.blended {
+                s += " | blended";
+            }
+        }
+        if m.health.get(me).is_some_and(|&h| h < acb_game::mode::FULL_HEALTH) {
+            s += &format!(" | health {}%", m.health[me]);
         }
         let scores: Vec<String> = m.score.iter().enumerate().map(|(i, v)| if i == me { format!("[p{i} {v}]") } else { format!("p{i} {v}") }).collect();
         let left = m.ticks_left() / TICK_HZ;
