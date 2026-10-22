@@ -410,7 +410,7 @@ impl World {
             }
             if let Some(before) = before {
                 let jump: f32 = before.iter().zip(p.loco.last_pose()).map(|((_, a), (_, b))| a.angle_between(*b)).sum();
-                eprintln!("pose t {t:.3} speed {:.2} change {jump:.2}", p.loco.speed);
+                eprintln!("pose t {t:.3} speed {:.2} change {jump:.2}{}", p.loco.speed, if p.loco.on_beam() { " beam" } else { "" });
             }
             // where others see it (crowd separation, targeting)
             if let Some(b) = self.bodies.get_mut(p.body) {

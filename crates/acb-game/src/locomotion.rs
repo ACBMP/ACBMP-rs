@@ -61,6 +61,36 @@ enum Id {
     JumpLand(usize, usize),
     /// soft/hard/damage x (to wait, to jog)
     Land(usize),
+    /// Balancing on a beam (retail `HumanNarrowObjectBeam`): the crouched
+    /// wait and walk/jog/sprint cycles, setting off (walk, jog), the jog
+    /// stop and its settle per foot, the landing onto it and the 180 turn
+    /// on the spot (footl, footr) with its settle. The wait and the starts
+    /// come per foot (the landing and the right-foot stop end on the right).
+    BeamIdle(usize),
+    BeamWalk,
+    BeamRun,
+    BeamSprint,
+    /// foot, jog
+    BeamStart(usize, usize),
+    BeamStop(usize),
+    BeamStopSettle(usize),
+    BeamLand,
+    BeamTurn(usize),
+    BeamTurnSettle(usize),
+}
+
+/// The clips of retail's beam state (`xx_l_beam_*` / `xx_h_beam_*`).
+pub struct BeamClips {
+    pub idle: [Clip; 2],
+    pub walk: Clip,
+    pub run: Clip,
+    pub sprint: Clip,
+    pub start: [[Clip; 2]; 2],
+    pub stop: [Clip; 2],
+    pub stop_settle: [Clip; 2],
+    pub land: Clip,
+    pub turn: [Clip; 2],
+    pub turn_settle: [Clip; 2],
 }
 
 pub struct Clips {
@@ -80,6 +110,8 @@ pub struct Clips {
     run_turn_out: [Clip; 2],
     takeoff: Vec<[Clip; 2]>,
     jump_land: Vec<[Clip; 2]>,
+    /// None when the archive lacks them: beams use the ground set.
+    beam: Option<BeamClips>,
 }
 
 /// Jump kinds: direction and distance class of `xx_h_run_{dir}_{dist}_foot*_to_air`
@@ -117,7 +149,34 @@ impl Clips {
         };
         // a cycle is two half strides: `_footl` ends where `_footr` starts
         let stride = |stem: &str| -> anyhow::Result<Clip> { Ok(load(&format!("{stem}_footl"))?.then(&load(&format!("{stem}_footr"))?)) };
+        let beam = (|| -> anyhow::Result<BeamClips> {
+            Ok(BeamClips {
+                idle: pair(&|f| format!("xx_l_beam_crouchwait_foot{f}"))?,
+                walk: stride("xx_l_beam_crouchwalk")?,
+                run: stride("xx_h_beam_crouchjog")?,
+                sprint: stride("xx_h_beam_crouchsprint")?,
+                start: [
+                    [load("xx_l_beam_crouchwait_footl_tr_crouchwalk_footr")?, load("xx_h_beam_crouchwait_footl_tr_crouchjog_footr")?],
+                    [load("xx_l_beam_crouchwait_footr_tr_crouchwalk_footl")?, load("xx_h_beam_crouchwait_footr_tr_crouchjog_footl")?],
+                ],
+                stop: pair(&|f| format!("xx_h_beam_crouchjog_stop_foot{f}"))?,
+                // (sic: retail's right-foot settle is spelt "couchwait")
+                stop_settle: [
+                    load("xx_h_beam_crouchjog_stop_footl_tr_crouchwait_footl")?,
+                    load("xx_h_beam_crouchjog_stop_footr_tr_couchwait_footr")?,
+                ],
+                land: load("xx_h_beam_landing_straight_soft_tr_crouchwait_footr_a")?,
+                turn: pair(&|f| format!("xx_l_beam_crouchwait_foot{f}_turn180"))?,
+                turn_settle: [load("xx_l_beam_crouchwait_footl_turn180_tr_footr")?, load("xx_l_beam_crouchwait_footr_turn180_tr_footl")?],
+            })
+        })();
+        if let Err(e) = &beam {
+            if crate::trace() {
+                eprintln!("beam clips: {e}");
+            }
+        }
         Ok(Clips {
+            beam: beam.ok(),
             idle: load("xx_l_wait_hipm_footl")?,
             walk: stride("xx_l_walk_hipm")?,
             run: stride("xx_h_run_hipm")?,
@@ -156,6 +215,11 @@ impl Clips {
         })
     }
 
+    /// The beam set, if loaded.
+    pub fn beam(&self) -> Option<&BeamClips> {
+        self.beam.as_ref()
+    }
+
     pub fn idle(&self) -> &Clip {
         &self.idle
     }
@@ -183,6 +247,25 @@ impl Clips {
             Id::Takeoff(k, f) => &self.takeoff[k][f],
             Id::JumpLand(k, f) => &self.jump_land[k][f],
             Id::Land(i) => &self.land[i],
+            beam => {
+                let Some(b) = &self.beam else {
+                    // unreachable: beam ids are only used with the set loaded
+                    return &self.idle;
+                };
+                match beam {
+                    Id::BeamIdle(f) => &b.idle[f],
+                    Id::BeamWalk => &b.walk,
+                    Id::BeamRun => &b.run,
+                    Id::BeamSprint => &b.sprint,
+                    Id::BeamStart(f, j) => &b.start[f][j],
+                    Id::BeamStop(f) => &b.stop[f],
+                    Id::BeamStopSettle(f) => &b.stop_settle[f],
+                    Id::BeamLand => &b.land,
+                    Id::BeamTurn(f) => &b.turn[f],
+                    Id::BeamTurnSettle(f) => &b.turn_settle[f],
+                    _ => &self.idle,
+                }
+            }
         }
     }
 }
@@ -231,6 +314,12 @@ pub struct Locomotion {
     air: Option<(Id, f32)>,
     /// The landing a jump in progress ends with.
     jump_land: Option<Id>,
+    /// Standing on a beam (and the beam set is loaded): the cycles,
+    /// starts, stops and turns come from [`BeamClips`].
+    beam: bool,
+    /// Foot of the beam wait (0 left): the one nearest the pose an action
+    /// ended in.
+    beam_foot: usize,
     last: Pose,
 }
 
@@ -257,7 +346,7 @@ fn pose_distance(a: &[(Vec3, Quat)], b: &[(Vec3, Quat)]) -> f32 {
 
 impl Locomotion {
     pub fn new(clips: &Clips, skeleton: &Skeleton) -> Self {
-        Locomotion { speed: 0.0, phase: 0.0, idle_time: 0.0, action: None, fade: None, air: None, jump_land: None, last: clips.idle.sample(skeleton, 0.0) }
+        Locomotion { speed: 0.0, phase: 0.0, idle_time: 0.0, action: None, fade: None, air: None, jump_land: None, beam: false, beam_foot: 0, last: clips.idle.sample(skeleton, 0.0) }
     }
 
     fn start(&mut self, action: Action) {
@@ -272,6 +361,44 @@ impl Locomotion {
         self.speed = 0.0;
         self.fade = Some((pose.clone(), FADE));
         self.last = pose;
+    }
+
+    /// On a beam or off it (called every grounded tick before
+    /// [`Locomotion::update`], and before [`Locomotion::land`]). A change
+    /// cross-fades between the ground and beam sets at the same phase and
+    /// drops a start or stop in progress.
+    pub fn set_beam(&mut self, clips: &Clips, sk: &Skeleton, on: bool) {
+        let on = on && clips.beam.is_some();
+        if on == self.beam {
+            return;
+        }
+        self.beam = on;
+        if self.air.is_some() {
+            return;
+        }
+        if self.action.as_ref().is_some_and(|a| a.cancel != Cancel::Never) {
+            let a = self.action.take().unwrap();
+            if a.end.0 > 0.0 {
+                self.speed = self.speed.max(a.end.0.min(1.0));
+            }
+        }
+        if on {
+            self.beam_foot = nearest_foot(clips, sk, &self.last);
+        }
+        self.fade = Some((self.last.clone(), FADE));
+    }
+
+    pub fn on_beam(&self) -> bool {
+        self.beam
+    }
+
+    /// Cycle clips of the current set: idle, walk, run, sprint.
+    fn cycles(&self) -> [Id; 4] {
+        if self.beam {
+            [Id::BeamIdle(self.beam_foot), Id::BeamWalk, Id::BeamRun, Id::BeamSprint]
+        } else {
+            [Id::Idle, Id::Walk, Id::Run, Id::Sprint]
+        }
     }
 
     /// The pose shown last frame.
@@ -313,6 +440,14 @@ impl Locomotion {
     /// Touched down after falling `height` metres; `moving`: input held.
     pub fn land(&mut self, height: f32, moving: bool) {
         if self.air.take().is_none() {
+            return;
+        }
+        if self.beam && !moving {
+            // onto the beam crouch (from a jump or a fall alike)
+            self.jump_land = None;
+            self.speed = 0.0;
+            self.idle_time = 0.0;
+            self.start(Action::new(vec![Id::BeamLand], Cancel::OnInput));
             return;
         }
         if self.jump_land.take().is_some() {
@@ -405,21 +540,31 @@ impl Locomotion {
         match want {
             // released while running: brake on the foot the pose is on
             None if self.speed >= 1.5 => {
-                let sprint = self.speed >= 2.5;
-                let first = |f| if sprint { Id::SprintStop(f) } else { Id::RunStop(f) };
+                let sprint = self.speed >= 2.5 && !self.beam;
+                let beam = self.beam;
+                let first = |f| match (beam, sprint) {
+                    (true, _) => Id::BeamStop(f),
+                    (false, true) => Id::SprintStop(f),
+                    (false, false) => Id::RunStop(f),
+                };
                 let f = (0..2)
                     .min_by(|&a, &b| {
                         let d = |f| pose_distance(&self.last, &clips.get(first(f)).sample(sk, 0.0));
                         d(a).total_cmp(&d(b))
                     })
                     .unwrap();
-                let queue = if sprint { vec![first(f)] } else { vec![first(f), Id::RunStopSettle(f)] };
+                let queue = match (beam, sprint) {
+                    (true, _) => vec![first(f), Id::BeamStopSettle(f)],
+                    (false, true) => vec![first(f)],
+                    (false, false) => vec![first(f), Id::RunStopSettle(f)],
+                };
                 self.speed = 0.0;
                 self.idle_time = 0.0;
                 self.start(Action::new(queue, Cancel::OnInput));
             }
             // running and asked to go back the way we came: run turn
-            Some(w) if self.speed >= 1.5 && wrap_angle(w - yaw).abs() > 135f32.to_radians() => {
+            // (no running turn on a beam: the move steers round)
+            Some(w) if self.speed >= 1.5 && !self.beam && wrap_angle(w - yaw).abs() > 135f32.to_radians() => {
                 let f = (0..2)
                     .min_by(|&a, &b| {
                         let d = |f| pose_distance(&self.last, &clips.get(Id::RunTurn(f)).sample(sk, 0.0));
@@ -433,7 +578,16 @@ impl Locomotion {
             // standing and asked to face well away: turn on the spot
             Some(w) if self.speed < 0.1 => {
                 let d = wrap_angle(w - yaw);
-                if d.abs() > 60f32.to_radians() {
+                if self.beam && d.abs() > 135f32.to_radians() {
+                    // about turn in the crouch, on the foot the pose is on
+                    let f = (0..2)
+                        .min_by(|&a, &b| {
+                            let d = |f| pose_distance(&self.last, &clips.get(Id::BeamTurn(f)).sample(sk, 0.0));
+                            d(a).total_cmp(&d(b))
+                        })
+                        .unwrap();
+                    self.start(Action::new(vec![Id::BeamTurn(f), Id::BeamTurnSettle(f)], Cancel::Never));
+                } else if !self.beam && d.abs() > 60f32.to_radians() {
                     let i = match (d > 0.0, d.abs() > 135f32.to_radians()) {
                         (true, false) => 0,
                         (false, false) => 1,
@@ -444,7 +598,8 @@ impl Locomotion {
                 } else {
                     // set off: into the walk, or a jog that blends into the run
                     let jog = gait != Gait::Walk;
-                    let mut a = Action::new(vec![Id::Start(usize::from(jog))], Cancel::OnRelease);
+                    let id = if self.beam { Id::BeamStart(self.beam_foot, usize::from(jog)) } else { Id::Start(usize::from(jog)) };
+                    let mut a = Action::new(vec![id], Cancel::OnRelease);
                     a.steer = true;
                     a.end = (if jog { 1.6 } else { 1.0 }, 0.5);
                     self.start(a);
@@ -489,7 +644,10 @@ impl Locomotion {
         let pose = clip.sample(sk, a.t);
         if a.t >= clip.length {
             self.speed = a.end.0;
-            self.phase = if self.speed > 0.0 { matching_phase(clips, sk, self.speed, &pose) } else { 0.0 };
+            if self.beam {
+                self.beam_foot = nearest_foot(clips, sk, &pose);
+            }
+            self.phase = if self.speed > 0.0 { matching_phase(clips, sk, self.cycles(), self.speed, &pose) } else { 0.0 };
             self.action = None;
             self.fade = Some((pose.clone(), FADE));
         }
@@ -505,38 +663,36 @@ impl Locomotion {
             *yaw = wrap_angle(*yaw + wrap_angle(w - *yaw).clamp(-turn, turn));
         }
         let s = self.speed;
-        let cycles = [(Id::Walk, w_of(s, 1.0)), (Id::Run, w_of(s, 2.0)), (Id::Sprint, w_of(s, 3.0))];
+        let ids = self.cycles();
+        let cycles = [(ids[1], w_of(s, 1.0)), (ids[2], w_of(s, 2.0)), (ids[3], w_of(s, 3.0))];
         let moving: f32 = cycles.iter().map(|c| c.1).sum();
         let p0 = self.phase;
         if moving > 1e-3 {
             let rate: f32 = cycles.iter().map(|&(id, w)| w / clips.get(id).length).sum::<f32>() / moving;
             self.phase = (self.phase + dt * rate).fract();
         }
-        self.idle_time = (self.idle_time + dt) % clips.idle.length.max(1e-3);
+        self.idle_time = (self.idle_time + dt) % clips.get(ids[0]).length.max(1e-3);
         let mut step = Vec3::ZERO;
         for (id, w) in cycles.into_iter().filter(|c| c.1 > 0.0) {
             let c = clips.get(id);
             step += c.root_step(p0 * c.length, self.phase * c.length) * w;
         }
-        let pose = cycle_pose(clips, sk, s, self.phase, self.idle_time);
+        let pose = cycle_pose(clips, sk, ids, s, self.phase, self.idle_time);
         ((Quat::from_rotation_z(*yaw) * step).truncate(), pose)
     }
 }
 
 /// The cycle blend at `speed` and normalized `phase`: neighbouring cycles
 /// by weight (idle|walk|run, walk|run|sprint).
-fn cycle_pose(clips: &Clips, sk: &Skeleton, speed: f32, phase: f32, idle_time: f32) -> Pose {
+fn cycle_pose(clips: &Clips, sk: &Skeleton, ids: [Id; 4], speed: f32, phase: f32, idle_time: f32) -> Pose {
     let (lo, hi, w) = match speed {
-        s if s <= 1.0 => (Id::Idle, Id::Walk, s),
-        s if s <= 2.0 => (Id::Walk, Id::Run, s - 1.0),
-        s => (Id::Run, Id::Sprint, s - 2.0),
+        s if s <= 1.0 => (0, 1, s),
+        s if s <= 2.0 => (1, 2, s - 1.0),
+        s => (2, 3, s - 2.0),
     };
-    let sample = |id: Id| match id {
-        Id::Idle => clips.idle.sample(sk, idle_time),
-        id => {
-            let c = clips.get(id);
-            c.sample(sk, phase * c.length)
-        }
+    let sample = |i: usize| {
+        let c = clips.get(ids[i]);
+        c.sample(sk, if i == 0 { idle_time } else { phase * c.length })
     };
     let mut pose = sample(lo);
     if w > 0.0 {
@@ -547,16 +703,23 @@ fn cycle_pose(clips: &Clips, sk: &Skeleton, speed: f32, phase: f32, idle_time: f
 
 /// Cycle phase whose pose at `speed` is nearest `pose` (64 samples over the
 /// full two-foot stride).
-fn matching_phase(clips: &Clips, sk: &Skeleton, speed: f32, pose: &[(Vec3, Quat)]) -> f32 {
+fn matching_phase(clips: &Clips, sk: &Skeleton, ids: [Id; 4], speed: f32, pose: &[(Vec3, Quat)]) -> f32 {
     (0..64)
         .map(|i| i as f32 / 64.0)
         .min_by(|&a, &b| {
-            let d = |ph| pose_distance(pose, &cycle_pose(clips, sk, speed, ph, 0.0));
+            let d = |ph| pose_distance(pose, &cycle_pose(clips, sk, ids, speed, ph, 0.0));
             d(a).total_cmp(&d(b))
         })
         .unwrap_or(0.0)
 }
 
+
+/// The beam wait (left or right foot) nearest `pose` (0 without the set).
+fn nearest_foot(clips: &Clips, sk: &Skeleton, pose: &[(Vec3, Quat)]) -> usize {
+    let Some(b) = &clips.beam else { return 0 };
+    let d = |f: usize| pose_distance(pose, &b.idle[f].sample(sk, 0.0));
+    usize::from(d(1) < d(0))
+}
 
 /// Tent weight of the cycle centred on speed `at`.
 fn w_of(s: f32, at: f32) -> f32 {

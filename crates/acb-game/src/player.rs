@@ -334,6 +334,13 @@ pub(crate) fn drive(
     } else {
         Gait::Walk
     };
+    // balancing on a beam (railing, narrow wall top): beam clip set, moves
+    // kept on its centre line, no climb entry
+    let beam = match ground {
+        Some(g) if p.flight.is_none() && !p.loco.airborne() => g.beam(p.pos),
+        _ => None,
+    };
+    p.loco.set_beam(clips, sk, beam.is_some());
     let step = p.loco.update(clips, sk, dir.normalize_or_zero(), gait, &mut p.yaw, dt);
     let delta = step.delta;
     if let Some(ground) = ground {
@@ -346,6 +353,7 @@ pub(crate) fn drive(
                     eprintln!("landed at {:.2?} after {:.3} s", at.to_array(), f.t);
                 }
                 p.flight = None;
+                p.loco.set_beam(clips, sk, ground.beam(at).is_some());
                 p.loco.land(0.0, dir != Vec2::ZERO);
             }
         } else if p.loco.airborne() {
@@ -367,6 +375,7 @@ pub(crate) fn drive(
                 Some(f) if f >= z => {
                     at.z = f;
                     p.vel = Vec3::ZERO;
+                    p.loco.set_beam(clips, sk, ground.beam(at).is_some());
                     p.loco.land(p.fall_from - f, dir != Vec2::ZERO);
                 }
                 _ => at.z = z,
@@ -377,7 +386,7 @@ pub(crate) fn drive(
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
             // freerun: up onto a ledge ahead
             let up = running.then(|| jump::target(ground, clips, p.pos, fwd, false)).flatten();
-            let (to, ledge) = ground.move_on(p.pos, ground.balance(p.pos, delta));
+            let (to, ledge) = ground.move_on(p.pos, jump::balance_on(beam, delta));
             // pressing into a wall: ease out of the cycle instead of
             // running on the spot (the run lean would put the head through)
             let len = delta.length();
@@ -390,7 +399,9 @@ pub(crate) fn drive(
             // hold when pushing into it. Neither needs the move to be
             // blocked this tick: the easing out of a blocked cycle stops the
             // feet, so a blocked test never fires again after first contact.
-            if clipset.climbs.is_some() && up.is_none() && dir != Vec2::ZERO {
+            // Retail's beam state (HumanNarrowObjectBeam) has no wall-run or
+            // vertical-stance climb transition: off the beam first.
+            if clipset.climbs.is_some() && up.is_none() && dir != Vec2::ZERO && beam.is_none() {
                 let pushing = dir.normalize_or_zero().dot(fwd) > 0.7;
                 let vel = delta / dt.max(1e-4);
                 let start = if input.run && p.loco.speed >= 1.5 && pushing {

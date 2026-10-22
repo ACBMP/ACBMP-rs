@@ -492,13 +492,19 @@ impl Ground {
         if (z - p.z).abs() > 0.05 {
             return None;
         }
-        let on = |q: Vec2| self.floor_below(q.extend(z + 0.15)).is_some_and(|f| (f - z).abs() <= 0.12);
+        // floor `e` m out along `d` still counts as the same top: within
+        // 12 cm plus a walkable slope's rise (stairs and ramps are not
+        // beams; a railing or wall top drops away by far more)
+        let on = |d: Vec2, e: f32| {
+            let tol = 0.12 + SLOPE * e;
+            self.floor_below((p.truncate() + d * e).extend(z + 0.05 + tol)).is_some_and(|f| (f - z).abs() <= tol)
+        };
         let half = NARROW * 0.5;
-        if [Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y].iter().all(|&d| on(p.truncate() + d * half)) {
+        if [Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y].iter().all(|&d| on(d, half)) {
             return None;
         }
         // width across each of 8 directions, 2 cm probes
-        let ext = |d: Vec2| (1..=50).map(|i| i as f32 * 0.02).find(|&e| !on(p.truncate() + d * e)).unwrap_or(1.0);
+        let ext = |d: Vec2| (1..=50).map(|i| i as f32 * 0.02).find(|&e| !on(d, e)).unwrap_or(1.0);
         let widths: Vec<(Vec2, f32, f32)> = (0..8)
             .map(|i| {
                 let a = i as f32 * std::f32::consts::PI / 8.0;
@@ -520,22 +526,31 @@ impl Ground {
     /// line (retail's walk-on-beam); a move across it (or any move on a
     /// post) is left alone, stepping or jumping off.
     pub fn balance(&self, p: Vec3, delta: Vec2) -> Vec2 {
-        let len = delta.length();
-        if len < 1e-6 {
+        if delta.length() < 1e-6 {
             return delta;
         }
-        match self.beam(p) {
-            Some(b) if b.axis != Vec2::ZERO && delta.dot(b.axis).abs() >= 0.5 * len => {
-                // centre line, closing the offset at most at the move's pace
-                b.axis * delta.dot(b.axis) + b.centre.clamp_length_max(len)
-            }
-            _ => delta,
+        balance_on(self.beam(p), delta)
+    }
+}
+
+/// [`Ground::balance`] with the beam under the feet already looked up.
+pub fn balance_on(beam: Option<Beam>, delta: Vec2) -> Vec2 {
+    let len = delta.length();
+    match beam {
+        Some(b) if len >= 1e-6 && b.axis != Vec2::ZERO && delta.dot(b.axis).abs() >= 0.5 * len => {
+            // centre line, closing the offset at most at the move's pace
+            b.axis * delta.dot(b.axis) + b.centre.clamp_length_max(len)
         }
+        _ => delta,
     }
 }
 
 /// Tops narrower than this are balanced on (centred), metres.
 pub const NARROW: f32 = 0.6;
+
+/// Rise per metre the beam probe still treats as the same floor (about
+/// 40 degrees: San Donato's ramps and stair runs).
+const SLOPE: f32 = 0.85;
 /// Resolution of [`Ground::settle_top`]'s width probes (railings are 5-9 cm).
 const SETTLE_STEP: f32 = 0.01;
 

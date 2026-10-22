@@ -535,7 +535,14 @@ its exact byte length and by key continuity (`acbmp animstats`).
     and `Ground::balance` (player.rs hook before move_on): a move within
     60 deg of the beam axis is projected on it and pulled to the centre
     line; across it, or on a post, the move is untouched (step/jump off).
-    No balance clips yet (locomotion.rs; retail has narrow/balance sets).
+    Beam clip set (locomotion.rs `BeamClips`, retail HumanNarrowObjectBeam
+    `xx_l/h_beam_*`): crouchwait per foot, crouchwalk/jog/sprint cycles
+    (root 1.38 / 3.72 / 5.79 m/s), wait->walk/jog starts, jog stop + settle
+    per foot, landing onto the beam, 180 turn on the spot (no run turns).
+    `Locomotion::set_beam` cross-fades sets; `ACBMP_TRACE=pose` tags beam
+    ticks. No climb entry (wall run / mount) from a beam. The probe allows
+    floor rise 0.85 m/m (ramps read as beams before: -11.3,48 next to a
+    mount spot, which also blocked the climb entry there).
   - Gate (San Donato, viewer camera now follows --at yaw): 5 cm stairwell
     balustrade (38.60,-54.4, top 1.01, 2.36 m clear) via
     `--at=34.5,-54.38,0.1,-90 --input "0=w,shift 1.1="`: up 300cm 2.03 m
@@ -700,6 +707,14 @@ moves advance by `dt` of simulated time; same end states at `--fps 60` and
   hang to climb -> climb down to hang -> shimmy -> drop; `--at
   -11.31,46.8,6.5,0 --input "0=a 2.5= 4=s 4.2="` walk-in mount -> climb ->
   down to hang. In-climb keys are W/S/A/D (not camera relative).
+- A standing mount waits 0.3 s in the hold wait before a held stick
+  starts the first move (`MOUNT_SETTLE`). Shimmy: the next piece of a
+  split edge is searched along the line ahead (wall dot > 0.9, -0.3..0.6 m
+  on, < 0.25 m in/out, < 0.3 m up/down), and a dead end finishes the last
+  < 0.3 m to the 0.25 m margin. San Donato survey (dead-end shimmies off
+  2 m+ edges): 28/354 had a reachable next piece, now 24 left, all real
+  hold-graph gaps (next piece 0.75 m on, or 0.22 m out and 0.3 m down).
+- Viewer orbit camera backs off 1.75 m while climbing (eased, 0.4 s).
 
 ## MP rules (`acb-game/src/rules.rs`)
 Pure, deterministic functions the server and client prediction share (no clock, no RNG; ties by index).
