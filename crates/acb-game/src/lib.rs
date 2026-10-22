@@ -485,9 +485,19 @@ impl World {
             }
         }
         // blending: walking among a crowd group (NPCs, persona lookalikes)
-        let npcs: Vec<Vec3> = self.bodies.iter().skip(n_players).filter(|b| b.scripted.is_none()).map(|b| b.entity.w_axis.truncate()).collect();
+        let npcs: Vec<rules::Member> = self
+            .bodies
+            .iter()
+            .skip(n_players)
+            .filter(|b| b.scripted.is_none())
+            .map(|b| {
+                let f = b.entity.y_axis;
+                rules::Member { pos: b.entity.w_axis.truncate(), yaw: (-f.x).atan2(f.y) }
+            })
+            .collect();
+        let polygons = if npcs.len() >= rules::BLEND_MIN_GROUP { rules::blend_polygons(&npcs) } else { Vec::new() };
         for p in &mut self.players {
-            p.blended = p.hide.is_none() && rules::blended(&p.actor(), npcs.iter().copied());
+            p.blended = p.hide.is_none() && rules::blended(&p.actor(), &polygons);
         }
         if let Some(m) = &mut self.mode {
             for (k, v, set) in actions {
