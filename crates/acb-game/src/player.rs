@@ -538,6 +538,21 @@ pub(crate) fn drive(
             let input = PlayerInput { kill: false, stun: false, ..*input };
             return drive(p, bodies, clipset, ground, &input, rules, relation, seen, time, 0.0);
         }
+        // onto a bench seat: the jump button at low profile next to one
+        let seat = if input.jump && !high && !air && hide.clips.sit.is_some() { crate::hide::seat(&hide.spots, p.pos) } else { None };
+        if let Some(i) = seat {
+            if crate::trace() {
+                eprintln!("hide: sit on seat {i} from {:.2} {:.2} {:.2}", p.pos.x, p.pos.y, p.pos.z);
+            }
+            let pose = p.loco.last_pose().clone();
+            p.hide = Some(crate::hide::Hiding::sit(hide, i, p.yaw, pose.clone(), bodies[me].world));
+            p.loco.resume(pose);
+            p.vel = Vec3::ZERO;
+            p.approach = None;
+            p.fall_from = p.pos.z;
+            let input = PlayerInput { kill: false, stun: false, jump: false, ..*input };
+            return drive(p, bodies, clipset, ground, &input, rules, relation, seen, time, 0.0);
+        }
     }
     // balancing on a beam (railing, narrow wall top): beam clip set, moves
     // kept on its centre line, no climb entry
