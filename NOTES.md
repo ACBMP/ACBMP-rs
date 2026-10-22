@@ -900,12 +900,12 @@ Pure, deterministic functions the server and client prediction share (no clock, 
   in sight hidden / out of sight / out of sight hidden with TimeToEscape 0/0/12/7 s (0 = meter resets);
   meter += dt/time, > 1 = escaped: target +100 (`ScoreEscape`), hunter loses the contract, redrawn after
   MinWait. Hidden = haystack or blended. In sight = head-to-head `Ground::ray` within 30 m. Chase start: per-hunter
-  threat meter (`Match::threat`, server only, not replicated), `GameInfo::UpdateLocalPlayerThreatMeter`
+  threat meter (`Match::threat`, on the wire since proto v6), `GameInfo::UpdateLocalPlayerThreatMeter`
   0x011857d0 with the `GamemodeParameters` data rates (Wanted2): seen running +0.1/s x awareness, walking
   -0.1, concealed -0.132; out of sight -0.0495/-0.1155/-0.165; seen beyond 35 m -0.25; falling rates x
-  max(1, 2 - awareness). Awareness = ours: 1 up to ThreatCloseDistance 10 m, 0 at ThreatFarDistance 35 m
-  (retail adds facing cones 45.57/154.16, 25.84/134.43 deg and a 2..4 m/s speed ramp). Full meter (1.0)
-  starts the chase (StartChaseAtFullThreat). Missing: InAir rates (0.65 fast / 0.25 slow), lock-on 0.99.
+  max(1, 2 - awareness). Awareness, facing cones, speed ramp and InAir rates: see "Threat meter" at the
+  end of this file (superseding the first version here). Full meter (1.0) starts the chase
+  (StartChaseAtFullThreat). Missing: lock-on 0.99 (we have no target lock).
 - Falls: `Player::landing` is now this tick's touchdown; `Match::on_fall` takes the `HealthSettings` damage %
   off `health` (100); 0 = death without killer (pursuers lose the contract, nobody scores: no suicide penalty
   in data, `NetPlayer::M2All_Suicide` 0x0112125c only applies the death); full life on respawn.
