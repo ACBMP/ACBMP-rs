@@ -8,12 +8,24 @@ fn main() -> anyhow::Result<()> {
     let archive = acb_world::open_map(std::path::Path::new(&a[1]), &schema)?;
     let g = Ground::load(&archive)?;
     if a[2] == "line" {
-        // floor heights (from 60 m down) along a segment, every 0.1 m
+        // floor heights (from 60 m, or arg 8, down) along a segment, every 0.1 m
         let v: Vec<f32> = a[3..7].iter().map(|x| x.parse().unwrap()).collect();
+        let from: f32 = a.get(7).map_or(60.0, |z| z.parse().unwrap());
         let (p0, p1) = (Vec2::new(v[0], v[1]), Vec2::new(v[2], v[3]));
         let n = ((p1 - p0).length() / 0.1) as usize;
-        let zs: Vec<String> = (0..=n).map(|i| g.floor_below(p0.lerp(p1, i as f32 / n as f32).extend(60.0)).map_or("-".into(), |z| format!("{z:.2}"))).collect();
+        let zs: Vec<String> = (0..=n).map(|i| g.floor_below(p0.lerp(p1, i as f32 / n as f32).extend(from)).map_or("-".into(), |z| format!("{z:.2}"))).collect();
         println!("{}", zs.join(" "));
+        return Ok(());
+    }
+    if a[2] == "stack" {
+        // every floor under x y (top down) and the free height above each
+        let (x, y): (f32, f32) = (a[3].parse()?, a[4].parse()?);
+        let mut z = 60.0;
+        while let Some(f) = g.floor_below(Vec3::new(x, y, z)) {
+            let up = g.ray(Vec3::new(x, y, f + 0.05), Vec3::Z * 5.0).map_or(5.0, |t| t * 5.0 + 0.05);
+            println!("floor {f:.2} free {up:.2}");
+            z = f - 0.02;
+        }
         return Ok(());
     }
     if a[2] == "tris" {
