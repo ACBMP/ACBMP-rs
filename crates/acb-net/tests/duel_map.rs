@@ -34,39 +34,27 @@ fn env() -> Option<(PathBuf, PathBuf, PathBuf)> {
     Some((schemas, multi.join(MAP), exe))
 }
 
-/// What a script sees of the match before a frame.
-#[derive(Clone, Copy)]
-struct View {
-    me: Vec3,
-    other: Vec3,
-    /// A's contract on B is fulfilled.
-    killed: bool,
-}
-
 /// A (slot 0) stands facing +X, presses kill at 0.5 s (no contracts yet)
-/// and at 3.5 s (B dodging); from 6 s it runs at B and kills it once
-/// within 3 m. B (slot 1) starts 10 m ahead facing A, runs at it from 2 s
-/// and turns back at 3.27 s.
-fn script(slot: usize, tick: u32, v: View) -> PlayerInput {
+/// and at 3.5 s (B dodging); from 6 s it runs at B, walks the last metres
+/// and kills it at ~8.6 s. B (slot 1) starts 10 m ahead facing A, runs at
+/// it from 2 s and turns back at 3.4 s (A cannot have its input by 3.5 s at 150 ms
+/// delay, so A always predicts the kill), resting from 5 s.
+/// Purely a function of the sim tick (never of what arrived over the
+/// network yet), so every run plays out the same.
+fn script(slot: usize, tick: u32) -> PlayerInput {
     let t = tick as f32 / 60.0;
     let mut i = PlayerInput { cam_yaw: if slot == 0 { 0.0 } else { std::f32::consts::PI }, ..Default::default() };
     if slot == 0 {
-        if (0.5..0.75).contains(&t) || (3.5..3.75).contains(&t) {
+        if (0.5..0.75).contains(&t) || (3.5..3.75).contains(&t) || (8.6..9.1).contains(&t) {
             i.kill = true;
-        } else if t >= 6.0 && !v.killed {
-            let d = (v.other - v.me).truncate();
-            i.cam_yaw = d.y.atan2(d.x);
-            if d.length() > 3.0 {
-                i.forward = true;
-                i.run = d.length() > 6.0;
-            } else {
-                i.kill = true;
-            }
+        } else if (6.0..8.6).contains(&t) {
+            i.forward = true;
+            i.run = t < 7.6;
         }
-    } else if (2.0..3.27).contains(&t) {
+    } else if (2.0..3.4).contains(&t) {
         i.forward = true;
         i.run = true;
-    } else if (3.27..5.0).contains(&t) {
+    } else if (3.4..5.0).contains(&t) {
         i.back = true;
         i.run = true;
     }
@@ -75,6 +63,7 @@ fn script(slot: usize, tick: u32, v: View) -> PlayerInput {
 
 struct Seen {
     slot: usize,
+    name: String,
     stats: ClientStats,
     events: Vec<Event>,
     game: Option<GameState>,
@@ -100,20 +89,14 @@ fn play(schemas: PathBuf, map: PathBuf, exe: PathBuf, name: &str) -> Seen {
     let slot = start.slot;
     let other = 1 - slot;
     let t0 = Instant::now();
-    let view = |client: &Client, world: &acb_game::World| View {
-        me: world.players[slot].pos,
-        other: client.remote_view(other).map(|v| v.0.w_axis.truncate()).unwrap_or(world.players[other].pos),
-        killed: client.events.iter().any(|e| e.kind == EventKind::ContractFulfilled && e.a == 0),
-    };
     while client.over.is_none() && t0.elapsed() < Duration::from_secs(60) {
-        let v = view(&client, &world);
-        client.advance(&mut world, |t| script(slot, t, v));
+        client.advance(&mut world, |t| script(slot, t));
         std::thread::sleep(Duration::from_millis(4));
     }
     let other_to = client.remote_view(other).map(|v| v.0.w_axis.truncate()).unwrap_or_default();
     let own_to = world.players[slot].pos;
     client.leave();
-    Seen { slot, stats: client.stats, events: client.events.clone(), game: client.game.clone().map(|g| g.1), own_to, other_to, over: client.over.clone() }
+    Seen { slot, name: name.into(), stats: client.stats, events: client.events.clone(), game: client.game.clone().map(|g| g.1), own_to, other_to, over: client.over.clone() }
 }
 
 #[test]
@@ -157,7 +140,10 @@ fn duel_over_lossy_localhost() {
         assert_eq!(s.stats.exact, s.stats.checked, "slot {} desynced", s.slot);
         assert!(s.stats.game_checked > 200);
         assert_eq!(s.stats.game_desyncs, 0, "slot {} match state desynced", s.slot);
-        assert!(s.over.as_deref().is_some_and(|o| o.contains("a wins")), "{:?}", s.over);
+        // slot 0 runs A's script and wins, whichever client's join reached
+        // the server first (5% loss can delay "a"'s join past "b"'s)
+        let win = format!("100, {} 0 ({} wins)", seen[1].name, seen[0].name);
+        assert!(s.over.as_deref().is_some_and(|o| o.ends_with(&win)), "{:?}", s.over);
     }
     let a = &seen[0];
     let ev = |kind: EventKind, x: u8, y: u8| a.events.iter().find(|e| e.kind == kind && e.a == x && e.b == y).map(|e| e.tick);
