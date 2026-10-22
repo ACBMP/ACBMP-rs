@@ -3,7 +3,8 @@
 # ~38,20) at 60 and 144 fps; prints the grant, the kill start and the final
 # player line of each run. Expected (both rates):
 #   air  AirDrop2Ground, start set 6 at 36.50 20.20 5.00, lead 1.00, player at 38.01 19.65 0.02
-#   run  Run2Ground, start set 5 at 35.58 20.40 0.02, lead 0.30, player at 37.21 20.19 0.02
+#   run  Run2Ground, start set 5 at 35.57 20.40 0.02, lead 0.30, player at 37.21 20.19 0.02
+#        (35.57: retail anim-speed ramp reaches the grant 1 cm earlier)
 #   hay  runs into haystack 13 (24.62,7), body 1 placed at 24.62,9.4: Haystack2Ground Front,
 #        start set 10 at 24.62 7.00 0.00, lead 0.40, player at 24.48 9.35 0.05
 set -u
