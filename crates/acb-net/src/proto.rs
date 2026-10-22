@@ -19,8 +19,8 @@ pub const MAX_PLAYERS: usize = 16;
 
 // ---------------------------------------------------------------- inputs
 
-/// A [`PlayerInput`] as sent: 9 buttons and the camera yaw in 1/65536
-/// turns, 4 bytes.
+/// A [`PlayerInput`] as sent: 9 buttons, the view lag (7 bits, ticks,
+/// saturating) and the camera yaw in 1/65536 turns, 4 bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WireInput {
     pub buttons: u16,
@@ -36,6 +36,8 @@ const B_SPRINT: u16 = 32;
 const B_JUMP: u16 = 64;
 const B_KILL: u16 = 128;
 const B_STUN: u16 = 256;
+/// `PlayerInput::view_lag` lives in the top 7 bits.
+const LAG_SHIFT: u16 = 9;
 
 impl WireInput {
     pub fn from_input(i: &PlayerInput) -> WireInput {
@@ -55,6 +57,7 @@ impl WireInput {
                 b |= bit;
             }
         }
+        b |= (i.view_lag.min(127) as u16) << LAG_SHIFT;
         let turns = (i.cam_yaw / std::f32::consts::TAU).rem_euclid(1.0);
         WireInput { buttons: b, yaw: ((turns * 65536.0).round() as u32 & 0xffff) as u16 }
     }
@@ -72,6 +75,7 @@ impl WireInput {
             jump: b(B_JUMP),
             kill: b(B_KILL),
             stun: b(B_STUN),
+            view_lag: (self.buttons >> LAG_SHIFT) as u8,
         }
     }
 

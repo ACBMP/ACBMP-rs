@@ -29,11 +29,16 @@ pub struct Player {
     pub approach: Option<PlayerApproach>,
     /// `pos` before the last tick, for render interpolation.
     pub prev_pos: Vec3,
+    /// In a hiding spot (haystack): the rules' [`rules::Stance::Hidden`].
+    /// Nothing sets it yet (hiding spots are not modelled).
+    pub hidden: bool,
+    /// Horizontal speed over the last tick, m/s (the rules' running test).
+    pub moved: f32,
 }
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, hidden: false, moved: 0.0 }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -57,12 +62,14 @@ impl Player {
             rules::Stance::Down
         } else if self.climb.is_some() {
             rules::Stance::Climb
-        } else if self.loco.airborne() {
+        } else if self.loco.airborne() || self.flight.is_some() {
             rules::Stance::Air
+        } else if self.hidden {
+            rules::Stance::Hidden
         } else {
             rules::Stance::Ground
         };
-        rules::Actor { pos: self.pos, yaw: self.yaw, stance, speed: self.loco.speed }
+        rules::Actor { pos: self.pos, yaw: self.yaw, stance, speed: self.moved }
     }
 }
 
@@ -75,6 +82,27 @@ pub fn body_actor(b: &Body) -> rules::Actor {
     rules::Actor { pos, yaw, stance, speed: 0.0 }
 }
 
+/// Body `b` as player-side rules see it: `past` (a player's actor from
+/// the lag-compensation history) when given, else its present placement
+/// with the player's `stance`; anyone being killed or stunned now is
+/// [`rules::Stance::Down`] either way.
+pub fn seen_actor(b: &Body, past: Option<&rules::Actor>, stance: Option<rules::Stance>) -> rules::Actor {
+    let mut a = match past {
+        Some(a) => *a,
+        None => {
+            let mut a = body_actor(b);
+            if let Some(s) = stance {
+                a.stance = s;
+            }
+            a
+        }
+    };
+    if b.scripted.is_some() {
+        a.stance = rules::Stance::Down;
+    }
+    a
+}
+
 /// A walk-in towards a kill's start point.
 #[derive(Clone)]
 pub struct PlayerApproach {
@@ -84,28 +112,106 @@ pub struct PlayerApproach {
     pub t: f32,
 }
 
-/// Start the paired kill (or stun) of body `vi`: the victim plays its
-/// clip in the shared frame, the player blends into the assassin's.
-fn start_paired(p: &mut Player, bodies: &mut [Body], kills: &kill::KillClips, vi: usize, stun: bool, dies: bool, time: f32) {
+/// The kill set ([`kill::WALK`], ...) for a granted situation.
+pub fn kill_kind(situation: rules::Situation, act: rules::Act) -> usize {
+    use rules::Situation as S;
+    match (act, situation) {
+        (rules::Act::Stun, _) => kill::STUN,
+        (_, S::Ground2Ground) => kill::WALK,
+        (_, S::Run2Ground) => kill::RUN,
+        (_, S::AirDrop2Ground) => kill::AIR,
+        (_, S::Drop2Ground) => kill::DROP,
+        (_, S::Ground2Haystack) => kill::TO_HAY,
+        (_, S::Haystack2Ground) => kill::HAY_GRAB,
+    }
+}
+
+/// Gravity of the closing leap of air and drop kills, m/s^2.
+const LEAP_GRAVITY: f32 = 9.81;
+
+/// Start the paired kill (or stun) of body `vi` with set `kind`: the
+/// victim plays its clip in the shared frame, the player blends into the
+/// assassin's. Kinds that start away from the clip's start point (run,
+/// air, drop, haystack) first close the gap: the player leaps (air, drop:
+/// ballistic) or lunges there during a lead time while the victim holds
+/// its clip's first frame.
+#[allow(clippy::too_many_arguments)]
+fn start_paired(p: &mut Player, bodies: &mut [Body], kills: &kill::KillClips, idle: &acb_anim::pose::Clip, vi: usize, kind: usize, dies: bool, time: f32) {
     let victim = body_actor(&bodies[vi]);
+    let stun = kind == kill::STUN;
     // a kill plays in the victim's frame; a stun in the player's, with the
     // victim's frame ahead of it
     let plan = if stun {
-        let side = 2 + kill::side(p.pos, victim.pos, victim.yaw);
+        let side = kill::STUN + kill::side(p.pos, victim.pos, victim.yaw);
         let (at, yaw) = rules::stun_placement(&p.actor(), kill::STUN_SPACING);
         Some((side, p.entity(), Mat4::from_rotation_translation(Quat::from_rotation_z(yaw), at)))
     } else {
-        kills.plan(p.pos, victim.pos, victim.yaw).map(|(side, frame)| (side, frame, frame))
+        kills.plan(kind, p.pos, victim.pos, victim.yaw).map(|(side, frame)| (side, frame, frame))
     };
     let Some((side, frame, victim_frame)) = plan else { return };
+    let lead = if matches!(kind, kill::WALK | kill::STUN) {
+        None
+    } else {
+        let (goal, goal_yaw) = kills.start_point(side, frame, idle);
+        let gap = (goal - p.pos).truncate().length();
+        let drop = (p.pos.z - goal.z).max(0.0);
+        let leap = matches!(kind, kill::AIR | kill::DROP);
+        let t = if leap {
+            (2.0 * drop / LEAP_GRAVITY).sqrt().max(gap / 8.0).clamp(0.2, 1.0)
+        } else {
+            (gap / p.moved.max(rules::RUN_SPEED)).clamp(0.1, 0.4)
+        };
+        let t = (t * crate::TICK_HZ as f32).round() / crate::TICK_HZ as f32;
+        Some(Lead { time: t, from: p.pos, from_yaw: p.yaw, to: goal, to_yaw: goal_yaw, leap })
+    };
     if crate::trace() {
-        eprintln!("kill: start set {side} body {vi} at {:.2} {:.2} victim d {:.2}", p.pos.x, p.pos.y, (victim.pos - p.pos).truncate().length());
+        eprintln!(
+            "kill: start set {side} body {vi} at {:.2} {:.2} {:.2} victim d {:.2} lead {:.2}",
+            p.pos.x,
+            p.pos.y,
+            p.pos.z,
+            (victim.pos - p.pos).truncate().length(),
+            lead.as_ref().map_or(0.0, |l| l.time)
+        );
     }
     let v = &mut bodies[vi];
     v.agent = None;
-    v.scripted = Some(Scripted { clip: kills.sets[side].1.clone(), frame: victim_frame, start: time, dies });
+    let start = time + lead.as_ref().map_or(0.0, |l| l.time);
+    v.scripted = Some(Scripted { clip: kills.sets[side].1.clone(), frame: victim_frame, start, dies });
     let from_pose = p.loco.last_pose().clone();
-    p.kill = Some(PlayerKill { side, frame, t: 0.0, from_pose, from_world: p.entity() });
+    p.flight = None;
+    p.climb = None;
+    p.hidden = false;
+    p.vel = Vec3::ZERO;
+    p.kill = Some(PlayerKill { side, frame, t: 0.0, from_pose, from_world: p.entity(), lead });
+}
+
+/// The closing move before a kill clip starts.
+#[derive(Clone)]
+pub struct Lead {
+    /// Seconds (whole ticks).
+    pub time: f32,
+    from: Vec3,
+    from_yaw: f32,
+    to: Vec3,
+    to_yaw: f32,
+    /// Ballistic (air and drop kills) rather than a straight lunge.
+    leap: bool,
+}
+
+impl Lead {
+    /// Position and yaw at `t` seconds in.
+    fn at(&self, t: f32) -> (Vec3, f32) {
+        let s = (t / self.time).clamp(0.0, 1.0);
+        let mut pos = self.from.lerp(self.to, s);
+        if self.leap {
+            let tt = t.clamp(0.0, self.time);
+            let v0 = (self.to.z - self.from.z + 0.5 * LEAP_GRAVITY * self.time * self.time) / self.time;
+            pos.z = self.from.z + v0 * tt - 0.5 * LEAP_GRAVITY * tt * tt;
+        }
+        let dy = (self.to_yaw - self.from_yaw + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+        (pos, self.from_yaw + dy * s)
+    }
 }
 
 /// The player's kill in progress.
@@ -117,6 +223,15 @@ pub struct PlayerKill {
     /// Pose and placement it blends in from.
     from_pose: Vec<(Vec3, Quat)>,
     from_world: Mat4,
+    /// Closing move first (run, air, drop, haystack kills).
+    lead: Option<Lead>,
+}
+
+impl PlayerKill {
+    /// Index into [`kill::KillClips::sets`].
+    pub fn set(&self) -> usize {
+        self.side
+    }
 }
 
 /// Blend-in time of a kill from wherever the player was.
@@ -136,6 +251,7 @@ pub(crate) fn drive(
     input: &PlayerInput,
     rules: &rules::Rules,
     relation: &dyn Fn(usize) -> rules::Relation,
+    seen: &dyn Fn(usize, &Body) -> rules::Actor,
     time: f32,
     dt: f32,
 ) {
@@ -184,18 +300,17 @@ pub(crate) fn drive(
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i != me)
-                .map(|(i, b)| (i, body_actor(b), relation(i)));
+                .map(|(i, b)| (i, seen(i, b), relation(i)));
             match rules::best_victim(act, &me_actor, candidates, rules, kills.spacing()) {
                 Some((vi, grant)) => {
                     if crate::trace() {
                         eprintln!("kill: {act:?} body {vi} granted {grant:?}");
                     }
-                    if grant.situation != rules::Situation::Ground2Ground {
-                        // only the ground pairs are loaded so far
-                    } else if grant.approach {
+                    if grant.approach {
                         p.approach = Some(PlayerApproach { victim: vi, t: 0.0 });
                     } else {
-                        start_paired(p, bodies, kills, vi, act == rules::Act::Stun, act == rules::Act::Kill && !rules.free_play, time);
+                        let kind = kill_kind(grant.situation, act);
+                        start_paired(p, bodies, kills, clips.idle(), vi, kind, act == rules::Act::Kill && !rules.free_play, time);
                     }
                 }
                 None if crate::trace() => {
@@ -204,7 +319,7 @@ pub(crate) fn drive(
                         .iter()
                         .enumerate()
                         .filter(|(i, _)| *i != me)
-                        .map(|(i, b)| (i, body_actor(b)))
+                        .map(|(i, b)| (i, seen(i, b)))
                         .min_by(|a, b| a.1.pos.distance(p.pos).total_cmp(&b.1.pos.distance(p.pos)))
                         .map(|(i, v)| (i, rules::check(act, &me_actor, &v, relation(i), rules, kills.spacing())));
                     eprintln!("kill: {act:?} refused, nearest {why:?}");
@@ -218,7 +333,7 @@ pub(crate) fn drive(
         ap.t += dt;
         let vi = ap.victim;
         let victim = body_actor(&bodies[vi]);
-        let goal = kills.plan(p.pos, victim.pos, victim.yaw).map(|(side, frame)| kills.start_point(side, frame, clips.idle()));
+        let goal = kills.plan(kill::WALK, p.pos, victim.pos, victim.yaw).map(|(side, frame)| kills.start_point(side, frame, clips.idle()));
         let step = match goal {
             Some(_) if bodies[vi].scripted.is_some() || victim.stance != rules::Stance::Ground => rules::Approach::Abort,
             // the contract went away during the walk-in
@@ -244,7 +359,7 @@ pub(crate) fn drive(
             }
             rules::Approach::Arrived => {
                 p.approach = None;
-                start_paired(p, bodies, kills, vi, false, !rules.free_play, time);
+                start_paired(p, bodies, kills, clips.idle(), vi, kill::WALK, !rules.free_play, time);
             }
             rules::Approach::Abort => p.approach = None,
         }
@@ -253,9 +368,21 @@ pub(crate) fn drive(
     if let (Some(kill), Some(kills)) = (&mut p.kill, &clipset.kills) {
         let clip = &kills.sets[kill.side].0;
         kill.t += dt;
-        let t = kill.t.min(clip.length);
+        let lead_time = kill.lead.as_ref().map_or(0.0, |l| l.time);
+        if let Some(lead) = kill.lead.as_ref().filter(|l| kill.t < l.time - 1e-4) {
+            // closing in: pose eases into the clip's first frame
+            let (pos, yaw) = lead.at(kill.t);
+            p.pos = pos;
+            p.yaw = yaw;
+            let mut pose = kill.from_pose.clone();
+            acb_anim::pose::blend(&mut pose, &clip.sample(sk, 0.0), (kill.t / lead.time).min(1.0));
+            bodies[me].show(p.entity(), pose);
+            return;
+        }
+        let ct = kill.t - lead_time;
+        let t = ct.min(clip.length);
         let mut pose = clip.sample(sk, t);
-        let w = (kill.t / KILL_BLEND).min(1.0);
+        let w = if kill.lead.is_some() { 1.0 } else { (kill.t / KILL_BLEND).min(1.0) };
         if w < 1.0 {
             let mut from = kill.from_pose.clone();
             acb_anim::pose::blend(&mut from, &pose, w);
@@ -274,7 +401,7 @@ pub(crate) fn drive(
             let (_, r1, t1) = world.to_scale_rotation_translation();
             world = Mat4::from_rotation_translation(r0.slerp(r1, w), t0.lerp(t1, w));
         }
-        if kill.t >= clip.length {
+        if ct >= clip.length {
             p.kill = None;
             p.loco.resume(pose.clone());
         }

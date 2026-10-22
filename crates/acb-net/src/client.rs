@@ -294,7 +294,10 @@ impl Client {
         let mut stepped = false;
         while (world.tick as f64) + 1.0 <= clock {
             let t = world.tick as u32 + 1;
-            let w = WireInput::from_input(&input(t));
+            // lag compensation: how far behind this tick the others are drawn
+            let mut i = input(t);
+            i.view_lag = (t as f64 - self.interp.floor()).clamp(0.0, 127.0) as u8;
+            let w = WireInput::from_input(&i);
             self.own.insert(t, w);
             let inputs = self.predicted_inputs(t);
             world.step(&inputs);

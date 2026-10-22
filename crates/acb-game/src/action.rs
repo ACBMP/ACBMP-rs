@@ -5,7 +5,7 @@
 //! the input it applies (and relays), so clients replaying that input
 //! roll their predicted kill back.
 
-use crate::player::body_actor;
+use crate::player::seen_actor;
 use crate::rules::{self, Act, Relation, Reject, Rules};
 use crate::{PlayerInput, World};
 
@@ -36,7 +36,17 @@ impl World {
         }
         let act = if input.stun { Act::Stun } else { Act::Kill };
         let me = p.actor();
-        let candidates = || self.bodies.iter().enumerate().filter(|(j, _)| *j != p.body).map(|(j, b)| (j, body_actor(b), relation(i, j)));
+        // lag compensation: the others where this client drew them
+        let rewind = rules::rewind(input.view_lag, self.seen.len());
+        let past = self.seen.len().checked_sub(rewind).filter(|_| rewind > 0).and_then(|k| self.seen.get(k));
+        let stance = |j: usize| self.players.get(j).map(|q| q.actor().stance);
+        let candidates = || {
+            self.bodies
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != p.body)
+                .map(move |(j, b)| (j, seen_actor(b, past.and_then(|h| h.get(j)), stance(j)), relation(i, j)))
+        };
         if let Some((victim, _)) = rules::best_victim(act, &me, candidates(), rules, kills.spacing()) {
             return Ok(Request::Granted { act, victim });
         }

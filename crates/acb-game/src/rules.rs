@@ -317,6 +317,20 @@ pub fn stun_placement(stunner: &Actor, spacing: f32) -> (Vec3, f32) {
 }
 
 // ---------------------------------------------------------------------------
+// lag compensation
+
+/// Ticks of player positions the world keeps (1 s).
+pub const HISTORY: usize = 60;
+/// The furthest back a kill is checked: 200 ms.
+pub const MAX_REWIND: usize = 12;
+
+/// How many ticks back to check a kill whose input says the client drew
+/// the others `view_lag` ticks behind, with `kept` ticks of history.
+pub fn rewind(view_lag: u8, kept: usize) -> usize {
+    (view_lag as usize).min(MAX_REWIND).min(kept)
+}
+
+// ---------------------------------------------------------------------------
 // the walk-in
 
 /// One tick of the walk-in towards `goal` (the killer's entity position

@@ -127,11 +127,12 @@ impl KillClips {
         }
     }
 
-    /// The set for an assassin at `from` attacking a victim at `victim`
-    /// facing `victim_yaw` (front when the assassin is ahead of the victim),
-    /// and the shared frame to play it in.
-    pub fn plan(&self, from: Vec3, victim: Vec3, victim_yaw: f32) -> Option<(usize, Mat4)> {
-        let side = side(from, victim, victim_yaw);
+    /// The set of kind `kind` ([`WALK`], [`RUN`], ...) for an assassin at
+    /// `from` attacking a victim at `victim` facing `victim_yaw` (front
+    /// when the assassin is ahead of the victim), and the shared frame to
+    /// play it in.
+    pub fn plan(&self, kind: usize, from: Vec3, victim: Vec3, victim_yaw: f32) -> Option<(usize, Mat4)> {
+        let side = kind + side(from, victim, victim_yaw);
         let to_ass = (from - victim).truncate();
         let (ass, _) = &self.sets[side];
         let (start, _) = reference(ass, 0.0)?;
