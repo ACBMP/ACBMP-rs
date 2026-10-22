@@ -773,6 +773,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn view_lag_rides_in_the_buttons() {
+        let i = PlayerInput { kill: true, forward: true, view_lag: 17, ..Default::default() };
+        let q = quantize_input(&i);
+        assert_eq!((q.kill, q.forward, q.stun, q.view_lag), (true, true, false, 17));
+        assert_eq!(quantize_input(&PlayerInput { view_lag: 200, ..Default::default() }).view_lag, 127);
+        let mut w = WireInput::from_input(&i);
+        w.clear_attacks();
+        assert_eq!(w.to_input().view_lag, 17);
+    }
+
+    #[test]
     fn netpos_round_trip() {
         let mut worst = Vec3::ZERO;
         let mut worst_yaw: f32 = 0.0;
