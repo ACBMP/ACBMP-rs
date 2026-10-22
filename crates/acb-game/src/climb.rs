@@ -879,15 +879,24 @@ pub fn shimmy_on(hold: &Hold, hand: Vec3, sign: f32, near: &[Hold]) -> Option<Sh
         return Some(Shimmy::Along(*hold, hold.at(t + s * step)));
     }
     let end = if s > 0.0 { hold.b } else { hold.a };
-    // an edge continuing this one along the same wall
+    // an edge continuing this one along the same wall: the guidance data
+    // splits long edges into pieces that may bend slightly, step a few cm
+    // in or out of the wall, or leave a short gap, so the next piece is
+    // looked for along the line ahead rather than at one point
     let ahead = end + (dir * 0.4).extend(0.0);
-    if let Some((h, q)) = near
+    let next = near
         .iter()
-        .filter(|h| h.wall.dot(n) > 0.95 && !same(h, hold))
-        .map(|h| (h, h.nearest(ahead)))
-        .filter(|(_, q)| q.distance(ahead) < 0.3)
-        .min_by(|a, b| a.1.distance(ahead).total_cmp(&b.1.distance(ahead)))
-    {
+        .filter(|h| h.wall.dot(n) > 0.9 && !same(h, hold))
+        .filter_map(|h| {
+            let q = h.nearest(ahead);
+            let d = q - end;
+            let (along, out) = (d.truncate().dot(dir), d.truncate().dot(n));
+            // it must carry on past the end, not just touch it
+            let reach = (h.a - end).truncate().dot(dir).max((h.b - end).truncate().dot(dir));
+            ((-0.3..=0.6).contains(&along) && out.abs() < 0.25 && d.z.abs() < 0.3 && reach > 0.5).then_some((q.distance(ahead), h, q))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, h, q)) = next {
         return Some(Shimmy::Along(*h, q));
     }
     // a corner: an edge starting near this end on a wall turned 90 degrees
@@ -904,6 +913,8 @@ pub fn shimmy_on(hold: &Hold, hand: Vec3, sign: f32, near: &[Hold]) -> Option<Sh
         })
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|x| x.1)
+        // a dead end: the rest of the way to the margin
+        .or_else(|| (room >= 0.1).then(|| Shimmy::Along(*hold, hold.at(end_t))))
 }
 
 fn same(a: &Hold, b: &Hold) -> bool {
@@ -1018,6 +1029,29 @@ mod tests {
                 assert!(same(&c, &next));
                 assert!(p.x > 5.1);
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn shimmy_continues_onto_a_bent_or_stepped_piece() {
+        let h = south_wall();
+        // 10 cm out of the wall, bent 20 degrees, starting 0.3 m on
+        let d = Vec2::from_angle(20f32.to_radians()).rotate(Vec2::X);
+        let a = Vec3::new(5.3, -0.1, 4.05);
+        let next = Hold { a, b: a + (d * 3.0).extend(0.0), wall: Vec2::new(d.y, -d.x), top: true };
+        match shimmy_on(&h, Vec3::new(4.75, 0.0, 4.0), 1.0, &[h, next]) {
+            Some(Shimmy::Along(c, _)) => assert!(same(&c, &next)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn shimmy_finishes_the_way_to_a_dead_end() {
+        let h = south_wall();
+        // 0.2 m short of the margin: one last short step, then nothing
+        match shimmy_on(&h, Vec3::new(4.55, 0.0, 4.0), 1.0, &[h]) {
+            Some(Shimmy::Along(_, p)) => assert!((p.x - 4.75).abs() < 1e-4, "{p:?}"),
             other => panic!("{other:?}"),
         }
     }
