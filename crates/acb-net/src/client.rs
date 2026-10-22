@@ -61,6 +61,8 @@ pub struct Start {
     pub snapshot_every: u8,
     /// The match (`None`: free play); pass to [`game::load_world`].
     pub rules: Option<acb_game::mode::MatchConfig>,
+    /// The match's crowd; pass to [`game::load_world`].
+    pub crowd: CrowdConfig,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -182,7 +184,7 @@ impl Client {
                         eprintln!("net: lobby {joined}/{players}");
                     }
                 }
-                Some(Msg::Start { map, snapshot_every, slots, rules }) => {
+                Some(Msg::Start { map, snapshot_every, slots, rules, crowd }) => {
                     let Some(slot) = slot else { continue };
                     anyhow::ensure!(map.eq_ignore_ascii_case(&cfg.map), "server started {map}");
                     let n = slots.len();
@@ -222,7 +224,7 @@ impl Client {
                         stats: ClientStats::default(),
                         over: None,
                     };
-                    return Ok((client, Start { slot, slots, snapshot_every, rules }));
+                    return Ok((client, Start { slot, slots, snapshot_every, rules, crowd }));
                 }
                 _ => {}
             }

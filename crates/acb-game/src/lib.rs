@@ -235,6 +235,23 @@ fn by_name(archive: &Archive, ty: &str, name: &str) -> Option<u32> {
 }
 
 impl World {
+    /// Restarts every crowd NPC from `seed` (NPC `i` from `seed + i + 1`;
+    /// seed 0 is what [`World::load`] builds). Server and clients of a
+    /// match call this with the same seed, so they build the same crowd.
+    pub fn seed_crowd(&mut self, seed: u64) {
+        let Some(crowd) = &self.crowd else { return };
+        let mut i = 0u64;
+        for b in self.bodies.iter_mut().filter(|b| b.agent.is_some()) {
+            let agent = Agent::new(&crowd.nav, seed.wrapping_add(i + 1));
+            i += 1;
+            b.entity = agent.entity();
+            b.spawn = b.entity;
+            let world = b.entity * b.model;
+            (b.world, b.prev_world) = (world, world);
+            b.agent = Some(agent);
+        }
+    }
+
     /// Places the characters (and with `play` loads the player's clips and
     /// the map collision).
     pub fn load(archive: &Archive, setup: &Setup) -> anyhow::Result<World> {
