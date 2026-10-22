@@ -33,10 +33,23 @@ pub const ESCAPE_POINTS: u32 = 100;
 /// `GBrick_Escape::ReadFromXML` (Mac 0x00c17d32) defaults, seconds to fill
 /// the escape meter per [`ChasePhase`]; 0 = the meter resets (in sight).
 pub const TIME_TO_ESCAPE: [f32; 4] = [0.0, 0.0, 12.0, 7.0];
-/// `GBrick_Escape` `DistanceInExtremis` default: our chase start range
-/// (a running pursuer this close and in sight starts the chase; the
-/// retail trigger is a `ChaseRequestEvent`, sender not traced).
+/// `GBrick_Escape` `DistanceInExtremis` default (unused: the chase starts
+/// on a full threat meter, see [`THREAT_RATE`]).
 pub const DISTANCE_IN_EXTREMIS: f32 = 10.0;
+/// Threat meter fill per second (`GamemodeParameters` data, Wanted2 /
+/// TeamVIP `ThreatmeterFastSpeed`, `NeutralSpeed`, `HiddenSpeed`) indexed
+/// [running, walking, concealed], seen by the target; the meter is
+/// integrated in `GameInfo::UpdateLocalPlayerThreatMeter` (Mac 0x011857d0):
+/// rising rates scale with the awareness, falling ones with max(1, 2 - it).
+pub const THREAT_RATE: [f32; 3] = [0.1, -0.1, -0.132];
+/// The same out of the target's sight (`Threatmeter*SpeedOOS`).
+pub const THREAT_RATE_OOS: [f32; 3] = [-0.0495, -0.1155, -0.165];
+/// `ThreatmeterFarSpeed`: seen, but beyond [`THREAT_FAR`].
+pub const THREAT_RATE_FAR: f32 = -0.25;
+/// `ThreatCloseDistance` / `ThreatFarDistance`: awareness distance ramp
+/// (`GameInfo::GetTargetAwearness` 0x011850aa), full up to close, 0 at far.
+pub const THREAT_CLOSE: f32 = 10.0;
+pub const THREAT_FAR: f32 = 35.0;
 /// In sight for the escape meter: line of sight within this range (our
 /// reading: retail `GameBrick::CanSee` is a head-to-head ray; we bound it by
 /// the compass `DetectionRange`).
@@ -154,6 +167,9 @@ pub struct Match {
     pub health: Vec<u32>,
     /// Per hunter: its chase of its target.
     pub chases: Vec<Option<Chase>>,
+    /// Per hunter: threat meter 0..=1 toward its target; a full meter
+    /// starts the chase (`GBrick_Escape::Update`, StartChaseAtFullThreat).
+    pub threat: Vec<f32>,
     pub over: bool,
     /// This tick's decisions (cleared at every step).
     pub events: Vec<MatchEvent>,
@@ -175,6 +191,7 @@ impl Match {
             ticks: 0,
             health: vec![FULL_HEALTH; players],
             chases: vec![None; players],
+            threat: vec![0.0; players],
             over: false,
             events: Vec::new(),
         }
@@ -258,8 +275,8 @@ impl Match {
     }
 
     /// Chases and escapes (`GBrick_Escape::Update` 0x00c5f4fc): a chase
-    /// ends with the contract; it starts when the hunter, running, is in
-    /// sight of its target within [`DISTANCE_IN_EXTREMIS`]; the meter fills
+    /// ends with the contract; it starts when the hunter's threat meter
+    /// is full ([`THREAT_RATE`]); the escape meter fills
     /// out of sight (faster with the target hidden or blended), resets in
     /// sight, and past 1 the target escapes: it scores [`ESCAPE_POINTS`],
     /// the hunter loses the contract (`EVENT_ENDCONTRACT_TARGET_ESCAPED_PLAYER`)
@@ -269,6 +286,7 @@ impl Match {
             let target = self.contracts.hunters[h].target.filter(|_| self.alive(h));
             let Some(t) = target.filter(|&t| t < who.len() && self.alive(t)) else {
                 self.chases[h] = None;
+                self.threat[h] = 0.0;
                 continue;
             };
             if self.chases[h].is_some_and(|c| c.target != t) {
@@ -278,7 +296,18 @@ impl Match {
             let concealed = who[t].hidden || who[t].blended;
             match &mut self.chases[h] {
                 None => {
-                    if who[h].running && dist <= DISTANCE_IN_EXTREMIS && los(t, h) {
+                    let seen = dist <= SIGHT_RANGE && los(t, h);
+                    let state = if who[h].running { 0 } else if who[h].hidden || who[h].blended { 2 } else { 1 };
+                    let aware = if seen { ((THREAT_FAR - dist) / (THREAT_FAR - THREAT_CLOSE)).clamp(0.0, 1.0) } else { 0.0 };
+                    let rate = match (seen, aware > 0.0) {
+                        (false, _) => THREAT_RATE_OOS[state],
+                        (true, false) => THREAT_RATE_FAR,
+                        (true, true) => THREAT_RATE[state],
+                    };
+                    let step = if rate > 0.0 { rate * aware } else { rate * (2.0 - aware).max(1.0) };
+                    self.threat[h] = (self.threat[h] + step * crate::DT).clamp(0.0, 1.0);
+                    if self.threat[h] >= 1.0 - 1e-4 {
+                        self.threat[h] = 0.0;
                         self.chases[h] = Some(Chase { target: t, coef: 0.0, phase: ChasePhase::new(true, concealed) });
                         self.events.push(MatchEvent::ChaseStarted { hunter: h, target: t });
                     }
@@ -403,11 +432,17 @@ mod tests {
         }
         let h = 0;
         let t = m.contracts.hunters[h].target.unwrap();
-        // the hunter runs up within 10 m in sight: chase
+        // the hunter runs within 10 m in sight: the threat meter fills at
+        // 0.1/s, the chase starts when it is full (10 s)
         who[h].pos = who[t].pos - Vec3::new(8.0, 0.0, 0.0);
         who[h].running = true;
-        m.tick(&who, &los);
-        assert!(m.events.contains(&MatchEvent::ChaseStarted { hunter: h, target: t }), "{:?}", m.events);
+        let mut n = 0;
+        while !m.events.contains(&MatchEvent::ChaseStarted { hunter: h, target: t }) {
+            m.tick(&who, &los);
+            n += 1;
+            assert!(n <= 601, "threat {}", m.threat[h]);
+        }
+        assert!(n >= 599, "{n}");
         // out of sight, not hidden: 12 s to escape; back in sight resets
         see.set(false);
         for _ in 0..ticks(6.0) {
