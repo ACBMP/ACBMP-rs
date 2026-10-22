@@ -175,6 +175,11 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
                 peers[i].ready = true;
             }
             Some(Msg::Ping { client_ms }) => link.send(&Msg::Lobby { joined: peers.len() as u8, players: cfg.players as u8, echo_ms: client_ms }.encode(), addr),
+            // its Welcome was lost: without a slot it ignores Start
+            Some(Msg::Hello { .. }) => {
+                link.send(&Msg::Welcome { slot: i as u8, players: cfg.players as u8 }.encode(), addr);
+                link.send(&start, addr);
+            }
             _ => {}
         }
     }
@@ -203,7 +208,8 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
             let wait = due.saturating_duration_since(now);
             let Some((data, addr)) = link.recv(wait) else { break };
             let Some(i) = peers.iter().position(|p| p.addr == addr) else { continue };
-            handle(&mut peers[i], &data, world.tick as u32, &mut link, &start);
+            let welcome = Msg::Welcome { slot: i as u8, players: cfg.players as u8 }.encode();
+            handle(&mut peers[i], &data, world.tick as u32, &mut link, &start, &welcome);
             if Instant::now() >= due {
                 break;
             }
@@ -301,7 +307,7 @@ fn match_result(world: &World, peers: &[Peer]) -> String {
     format!("result after {secs:.1} s: {} ({verdict})", scores.join(", "))
 }
 
-fn handle(p: &mut Peer, data: &[u8], played: u32, link: &mut Link, start: &[u8]) {
+fn handle(p: &mut Peer, data: &[u8], played: u32, link: &mut Link, start: &[u8], welcome: &[u8]) {
     let Some(msg) = Msg::decode(data) else { return };
     p.heard = Instant::now();
     match msg {
@@ -324,7 +330,12 @@ fn handle(p: &mut Peer, data: &[u8], played: u32, link: &mut Link, start: &[u8])
         }
         Msg::Ping { client_ms } => link.send(&Msg::Lobby { joined: 0, players: 0, echo_ms: client_ms }.encode(), p.addr),
         // still loading: it did not see the match start
-        Msg::Hello { .. } | Msg::Ready => link.send(start, p.addr),
+        // a lost Welcome leaves the client without a slot, and it ignores Start
+        Msg::Hello { .. } => {
+            link.send(welcome, p.addr);
+            link.send(start, p.addr);
+        }
+        Msg::Ready => link.send(start, p.addr),
         _ => {}
     }
 }
