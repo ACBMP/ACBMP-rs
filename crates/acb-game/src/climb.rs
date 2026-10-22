@@ -212,9 +212,16 @@ pub struct Climb {
     fade: Option<(Pose, f32)>,
     /// What the last move was, for the trace.
     pub last: &'static str,
+    /// Time the next hold wait ignores the stick for (a mount settling
+    /// into the wall before the first move, as retail).
+    settle: f32,
 }
 
 const FADE: f32 = 0.15;
+
+/// How long the hold wait after a standing mount lets the pose settle
+/// before a held stick starts the first move.
+const MOUNT_SETTLE: f32 = 0.3;
 
 /// Facing into a wall with outward normal `n`.
 pub fn yaw_into(n: Vec2) -> f32 {
@@ -321,7 +328,7 @@ pub enum Outcome {
 
 impl Climb {
     fn new(hold: Hold, stance: Stance, pos: Vec3, yaw: f32, phase: Phase, fade: Option<Pose>) -> Climb {
-        Climb { hold, stance, pos, yaw, phase, from: pos, fade: fade.map(|p| (p, 0.0)), last: "enter" }
+        Climb { hold, stance, pos, yaw, phase, from: pos, fade: fade.map(|p| (p, 0.0)), last: "enter", settle: 0.0 }
     }
 
     /// Climbs straight onto the wall from standing at `pos` (retail
@@ -331,6 +338,7 @@ impl Climb {
         let seq = Seq::new(&["xx_h_wait_hipm_footl_tr_climbing_1m"], pos, to, yaw, yaw_into(hold.wall), Then::Hold(Stance::Climb, hold));
         let mut c = Climb::new(hold, Stance::Climb, pos, yaw, Phase::Seq(seq), Some(from));
         c.last = "mount";
+        c.settle = MOUNT_SETTLE;
         c
     }
 
@@ -421,9 +429,11 @@ impl Climb {
                 *t += dt;
                 let wait = clips.get(self.stance.wait());
                 let pose = wait.sample(sk, *t % wait.length.max(1e-3));
-                if let Some(dir) = want {
+                let settled = *t >= self.settle;
+                if let Some(dir) = want.filter(|_| settled) {
                     if let Some((seq, name)) = self.plan(ground, dir) {
                         self.last = name;
+                        self.settle = 0.0;
                         self.phase = Phase::Seq(seq);
                     }
                 }
