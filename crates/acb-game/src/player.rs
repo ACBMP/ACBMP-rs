@@ -29,11 +29,23 @@ pub struct Player {
     pub approach: Option<PlayerApproach>,
     /// `pos` before the last tick, for render interpolation.
     pub prev_pos: Vec3,
+    /// Seconds left in which a fall does not grab holds (after a back
+    /// eject, so the wall just left is not caught again).
+    pub catch_block: f32,
+    /// The last touchdown after a fall: height (m), damage (% of max
+    /// life, retail `HealthSettings`) and landing type. Fatal = dead.
+    pub landing: Option<(f32, u32, jump::LandingType)>,
 }
+
+/// Low profile stops at a drop deeper than this instead of walking off
+/// (retail `xx_l_ledge_lookdown_*`, `xx_l_beam_edge_stop`); the jump
+/// button then lowers onto the wall below (`Climb::pulldown`) or steps
+/// off. The depth is our choice: a few steps.
+pub const LEDGE_STOP: f32 = 1.5;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -124,6 +136,10 @@ const KILL_BLEND: f32 = 0.25;
 
 /// How close the player gets to other people, metres.
 const PERSONAL: f32 = 0.6;
+
+/// Seconds a back eject keeps the fall from grabbing holds: the length of
+/// retail's untargeted push-off (`xx_h_rebound_footl_tr_fall`, 0.467 s).
+const EJECT_NO_CATCH: f32 = 0.467;
 
 /// One tick of player control: kills, climbing, locomotion (input -> gait
 /// and facing, clip-driven pose and root motion with wall sliding, floor
@@ -294,7 +310,7 @@ pub(crate) fn drive(
         } else {
             None
         };
-        let (pose, outcome) = cl.update(cc, sk, ground, want, dt);
+        let (pose, outcome) = cl.update(cc, sk, ground, want, input.jump, input.run, dt);
         p.pos = cl.pos;
         p.yaw = cl.yaw;
         if crate::trace() && (time * 4.0).floor() != ((time - dt) * 4.0).floor() {
@@ -309,7 +325,13 @@ pub(crate) fn drive(
                 p.vel = Vec3::ZERO;
                 p.loco.resume(pose.clone());
             }
-            Outcome::Drop(v) => {
+            Outcome::Drop(v) | Outcome::Eject(v) => {
+                if matches!(outcome, Outcome::Eject(_)) {
+                    p.catch_block = EJECT_NO_CATCH;
+                    if crate::trace() {
+                        eprintln!("eject at {:.2?} v {:.2?}", p.pos.to_array(), v.to_array());
+                    }
+                }
                 p.climb = None;
                 p.loco.resume(pose.clone());
                 p.loco.start_fall();
@@ -358,9 +380,13 @@ pub(crate) fn drive(
             }
         } else if p.loco.airborne() {
             p.vel.z -= jump::GRAVITY * dt;
+            p.catch_block = (p.catch_block - dt).max(0.0);
+            // fall height counts from the highest point (retail
+            // ComputeFallHeight: InAirData start/peak z - z)
+            p.fall_from = p.fall_from.max(p.pos.z);
             // falling past a hold: grab it (not right after letting go)
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
-            if p.vel.z < -1.0 && clipset.climbs.is_some() && p.fall_from - p.pos.z > 0.3 {
+            if p.vel.z < -1.0 && clipset.climbs.is_some() && p.fall_from - p.pos.z > 0.3 && p.catch_block <= 0.0 {
                 if let Some(hold) = ground.catch_hold(p.pos, fwd) {
                     let stance = ground.hang_stance(hold.nearest(p.pos), hold.wall);
                     p.climb = Some(Climb::catch(hold, stance, p.pos, p.loco.last_pose().clone()));
@@ -376,7 +402,13 @@ pub(crate) fn drive(
                     at.z = f;
                     p.vel = Vec3::ZERO;
                     p.loco.set_beam(clips, sk, ground.beam(at).is_some());
-                    p.loco.land(p.fall_from - f, dir != Vec2::ZERO);
+                    let height = p.fall_from - f;
+                    let (damage, kind) = jump::landing(height);
+                    if crate::trace() {
+                        eprintln!("land: fall {height:.2} m {kind:?} damage {damage}% at {:.2?}", at.to_array());
+                    }
+                    p.landing = Some((height, damage, kind));
+                    p.loco.land(height, dir != Vec2::ZERO);
                 }
                 _ => at.z = z,
             }
@@ -430,6 +462,36 @@ pub(crate) fn drive(
             // freerun: over a gap instead of dropping into it
             let why = if up.is_some() { "up" } else { "gap" };
             let across = (ledge && running && up.is_none()).then(|| jump::target(ground, clips, p.pos, fwd, true)).flatten();
+            // low profile at a drop (a roof edge, a beam end): stop at the
+            // edge; the jump button lowers onto the wall below or steps off
+            let deep = |g: &Ground| match g.floor_below(to + Vec3::Z * 0.1) {
+                Some(f) => p.pos.z - f > LEDGE_STOP,
+                None => true,
+            };
+            if ledge && !input.run && up.is_none() && len > 1e-4 && deep(ground) {
+                let along = delta / len;
+                if input.jump {
+                    let hang = clipset.climbs.as_ref().and_then(|_| ground.ledge_hold(p.pos, along));
+                    if let Some((hold, point)) = hang {
+                        let stance = ground.hang_stance(point, hold.wall);
+                        let c = Climb::pulldown(hold, point, stance, p.pos, p.yaw, p.loco.last_pose().clone());
+                        if crate::trace() {
+                            eprintln!("climb: {} from {:.2} {:.2} {:.2}", c.describe(), p.pos.x, p.pos.y, p.pos.z);
+                        }
+                        p.climb = Some(c);
+                        p.vel = Vec3::ZERO;
+                        return;
+                    }
+                } else {
+                    p.loco.blocked(dt);
+                    if crate::trace() && (time * 4.0).floor() != ((time - dt) * 4.0).floor() {
+                        eprintln!("ledge stop at {:.2} {:.2} {:.2}", p.pos.x, p.pos.y, p.pos.z);
+                    }
+                    let world = p.entity() * bodies[me].model;
+                    bodies[me].show(world, step.pose);
+                    return;
+                }
+            }
             if let Some((target, flight, narrow)) = up.or(across) {
                 jump::take_off(p, clips, sk, target, flight, if narrow { "narrow top" } else { why });
             } else {

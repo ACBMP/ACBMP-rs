@@ -29,6 +29,39 @@ use acb_anim::pose::Skeleton;
 /// Free-fall gravity, m/s^2 (HumanInAir's drop time and in-air speed).
 pub const GRAVITY: f32 = 9.81;
 
+/// Retail `LandingType` (HealthSettings `FallDamageSetting.LandingType`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LandingType {
+    Safe,
+    SmallDamage,
+    HeavyDamage,
+    Fatal,
+}
+
+/// Player fall damage, retail data (DataPC.forge `HealthSettings`
+/// 0x16bc5031 `PlayerDamageFall`): from this fall height (m) on, this
+/// percentage of the maximum life is lost, with this landing. 200 % kills.
+/// `HealthSettings::LookupFallDamage` takes the highest row at or below
+/// the fall height (`HumanInAir::ComputeFallHeight`: start/peak height
+/// minus landing height).
+pub const FALL_DAMAGE: [(f32, u32, LandingType); 4] = [
+    (8.0, 30, LandingType::SmallDamage),
+    (12.0, 50, LandingType::HeavyDamage),
+    (16.0, 75, LandingType::HeavyDamage),
+    (20.0, 200, LandingType::Fatal),
+];
+
+/// Safe falls from this height on use the hard forward landing. Not a
+/// retail landing-type row: retail's only sub-damage height in
+/// `HumanInAir::CheckForLanding` is the 5.25 m hurt-landing cut (our
+/// reading of which landing the soft / hard animation pair splits at).
+pub const HARD_LANDING: f32 = 5.25;
+
+/// Damage percentage and landing type of a fall of `height` metres.
+pub fn landing(height: f32) -> (u32, LandingType) {
+    FALL_DAMAGE.iter().rev().find(|r| height >= r.0).map_or((0, LandingType::Safe), |r| (r.1, r.2))
+}
+
 /// Retail landing detection polygon for a running jump onto the feet
 /// (`HumanSharedData` jump detection curve set, the default source's
 /// first curve): (forward, up) metres from the feet at takeoff, along the
