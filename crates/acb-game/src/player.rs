@@ -525,9 +525,10 @@ pub(crate) fn drive(
     } else {
         Gait::Walk
     };
-    // into a hiding spot: running into one, or falling onto it
-    if let Some(hide) = &clipset.hide {
-        let air = p.loco.airborne() && p.flight.is_none();
+    // into a hiding spot: running into one, or falling onto it (not during
+    // a targeted jump: it lands first, else the flight resumes after the exit)
+    if let (Some(hide), None) = (&clipset.hide, &p.flight) {
+        let air = p.loco.airborne();
         let high = input.run || input.sprint;
         if let Some(i) = crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), high, air, p.vel.z) {
             if crate::trace() {
@@ -619,7 +620,9 @@ pub(crate) fn drive(
             let running = p.loco.speed >= 1.5 && dir != Vec2::ZERO;
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
             // freerun: up onto a ledge ahead
-            let up = running.then(|| jump::target(ground, clips, p.pos, fwd, false)).flatten();
+            // (never onto a haystack's top: running into one hides)
+            let haystack = |t: Vec3| clipset.hide.as_ref().is_some_and(|h| h.spots.iter().any(|s| s.seat.is_none() && s.outside(t) <= 0.0 && t.z <= s.top() + 0.5));
+            let up = running.then(|| jump::target(ground, clips, p.pos, fwd, false)).flatten().filter(|u| !haystack(u.0));
             let (to, ledge) = ground.move_on(p.pos, jump::balance_on(beam, delta));
             // pressing into a wall: ease out of the cycle instead of
             // running on the spot (the run lean would put the head through)
