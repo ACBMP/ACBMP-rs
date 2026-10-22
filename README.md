@@ -3,6 +3,75 @@
 Clean-room Rust reimplementation of Assassin's Creed Brotherhood multiplayer.
 Reads the player's own retail install at runtime; ships no game data.
 
+## Playtesting
+
+Kept current with master: if a control or flag changes, this section changes
+in the same commit.
+
+Setup (once per shell):
+
+    cargo build --release
+    export ACBMP_SCHEMAS=~/Music/anvilforge-py/src/anvilforge/schemas
+    export ACBMP_EXE=~/Music/ACB/ACBMP.exe
+    M=~/Music/ACB/multi
+
+Single player on San Donato (free play, crowd of 20 lookalike NPCs to kill):
+
+    ./target/release/acb-viewer $M/DataPC_AC2MP_SanDonato.forge \
+        --character AC2MP_ID07_MainTemplate_Player --play --crowd 20
+
+Two-player duel (Wanted rules: contracts, kills score, respawns, 5 min):
+
+    ./target/release/acbmp serve $M/DataPC_AC2MP_SanDonato.forge --players 2
+    # then on each player's machine (or twice on one), host = the server's IP:
+    ./target/release/acb-viewer $M/DataPC_AC2MP_SanDonato.forge \
+        --character AC2MP_ID07_MainTemplate_Player --play \
+        --connect HOST:7777 --name alice
+
+The server waits for `--players` clients, then starts. `--time-limit S`
+changes the match length, `--mode free` drops the match rules.
+
+Controls (on foot):
+
+| Key | Action |
+|---|---|
+| W A S D | move, relative to the camera |
+| (nothing) | low profile: walk; stops at ledges deeper than 2 m and at beam ends |
+| Shift | high profile: run; runs into wall runs, freerun jumps and climbs |
+| Space | sprint (high profile) |
+| F | jump: at a ledge stop, lower onto the wall below |
+| E | kill (your target online; any NPC in free play); walks in from ~4 m |
+| Q | stun (your pursuer online) |
+| right mouse (hold) | orbit the camera |
+| mouse wheel | camera distance |
+| Esc | quit |
+
+On a wall: W/S/A/D climb up/down/left/right (fixed directions, not camera
+relative); F + S or F alone jumps back off the wall, F + A/D jumps sideways
+across a gap, F + W leaps to a hold above; Shift + A/D at the end of an edge
+also side-jumps. Walk into a haystack in high profile (or drop onto it) to
+hide; any move key leaves. Walking slowly among the crowd blends you.
+
+HUD: there is no on-screen text yet. Target, distance, compass fill, who is
+hunting you, score, time and the last event are in the window title.
+
+Useful extras: `--at x,y,z,yaw` starts the player somewhere else (see
+`tools/gates.sh` for spots next to the climbs and jumps), `ACBMP_TRACE=1`
+prints every tick's player state to stderr.
+
+### Giving feedback
+
+What helps most: what you did (keys), what you expected (retail behaviour),
+what happened, and where. For "where", run with `ACBMP_TRACE=1` and quote the
+last `player at x y z` line, or the `--at` you started from. Scripted repros
+are best: `--input "0=w,shift 1.5= 2=d"` (keys from each time in seconds) plus
+`--at` replays exactly, at any frame rate.
+
+Known gaps (Phase 2): no on-screen HUD; respawn (5 s) and start (3 s) delays
+are placeholders; blending rules are partly our reading; online matches have
+no crowd yet; benches, ledge kills and beam-end edge animations are missing;
+the stand-in collision body is narrower than retail's.
+
 Crates:
 - `anvil-forge`: `.forge` archive index, `.data` containers, LZO2A/LZO1X blocks
 - `acbmp-cli` (`acbmp`): `ls`, `census`, `digest` over a forge
