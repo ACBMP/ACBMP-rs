@@ -770,6 +770,94 @@ pub fn threatened(target: Vec3, pursuer: Vec3, was: bool) -> bool {
     }
 }
 
+/// A team index (Escort/teamvip: 0 and 1; retail team id >= 0).
+pub type Team = u8;
+
+/// A player's side in an Escort round: the attacking team hunts the VIPs,
+/// the other team protects them (`GBrick_ChooseAttackTeam`, Mac
+/// ReadFromXML 0x012d0948; roles swap per round, see `SetAttackingTeamLoop`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Hunter,
+    Protector,
+}
+
+/// What a body is, as far as team relations care.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A player on this team.
+    Player(Team),
+    /// A VIP NPC (an escorted crowd body; filled in by the VIP task).
+    Vip,
+    /// Any other crowd NPC.
+    Npc,
+}
+
+/// Team setup of an Escort (teamvip) match: no contracts, the relation
+/// follows from team and role. Retail builds killer loops instead
+/// (`GiveTargetsAndAssassinsToThisVipHunter` 0x012d2570: every enemy
+/// player hunts the hunter, the hunter hunts every VIP;
+/// `GiveTargetsToThisProtector` 0x012d2674: the protector hunts every
+/// enemy player) and checks them with `IsAssassinFor`; teammates are never
+/// in each other's loops, so there is no friendly fire (our reading).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Teams {
+    /// Team of each player (index = player).
+    pub team: Vec<Team>,
+    /// The team hunting the VIPs this round.
+    pub attacking_team: Team,
+    /// Body indices of the living VIPs (empty until the VIP task spawns them).
+    pub vips: Vec<usize>,
+}
+
+impl Teams {
+    /// Players alternate teams by slot (0, 1, 0, 1, ...); team 0 attacks first.
+    pub fn alternating(players: usize) -> Teams {
+        Teams { team: (0..players).map(|p| (p % 2) as Team).collect(), attacking_team: 0, vips: Vec::new() }
+    }
+
+    pub fn role(&self, p: usize) -> Role {
+        if self.team[p] == self.attacking_team {
+            Role::Hunter
+        } else {
+            Role::Protector
+        }
+    }
+
+    /// What body `body` is (bodies `0..players` are the players).
+    pub fn kind(&self, body: usize) -> Kind {
+        match self.team.get(body) {
+            Some(&t) => Kind::Player(t),
+            None if self.vips.contains(&body) => Kind::Vip,
+            None => Kind::Npc,
+        }
+    }
+
+    /// How body `body` stands to player `of`.
+    pub fn relation(&self, of: usize, body: usize) -> Relation {
+        if of == body {
+            return Relation::Other;
+        }
+        team_relation(self.team[of], self.role(of), self.kind(body), self.attacking_team)
+    }
+}
+
+/// The kill/stun relation from teams and roles: hunter -> VIP = Target,
+/// protector -> hunter = Target, hunter -> protector = Pursuer, teammates
+/// and protector -> VIP = Other (no friendly fire), crowd = Npc.
+pub fn team_relation(of_team: Team, of_role: Role, other: Kind, attacking_team: Team) -> Relation {
+    match (of_role, other) {
+        (_, Kind::Npc) => Relation::Npc,
+        (Role::Hunter, Kind::Vip) => Relation::Target,
+        (Role::Protector, Kind::Vip) => Relation::Other,
+        (_, Kind::Player(t)) if t == of_team => Relation::Other,
+        (Role::Protector, Kind::Player(t)) if t == attacking_team => Relation::Target,
+        (Role::Hunter, Kind::Player(_)) => Relation::Pursuer,
+        // a third team that neither attacks nor shares ours: no loop either way
+        (Role::Protector, Kind::Player(_)) => Relation::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1016,5 +1104,56 @@ mod tests {
         assert!(!locate(h, Vec3::new(12.0, 0.0, 0.0), false, true).near);
         assert!(threatened(h, Vec3::new(50.0, 0.0, 0.0), true));
         assert!(!threatened(h, Vec3::new(50.0, 0.0, 0.0), false));
+    }
+
+    #[test]
+    fn escort_relation_matrix() {
+        use Relation::*;
+        // players 0,2 team 0 (hunters), 1,3 team 1 (protectors); body 5 a VIP, 4 and 6 crowd
+        let mut t = Teams::alternating(4);
+        t.vips.push(5);
+        assert_eq!((t.role(0), t.role(1)), (Role::Hunter, Role::Protector));
+        let rows = [
+            // of: 0 (hunter)      1 (protector)          2 (hunter)         3 (protector)
+            [Other, Pursuer, Other, Pursuer, Npc, Target, Npc],
+            [Target, Other, Target, Other, Npc, Other, Npc],
+            [Other, Pursuer, Other, Pursuer, Npc, Target, Npc],
+            [Target, Other, Target, Other, Npc, Other, Npc],
+        ];
+        for (of, row) in rows.iter().enumerate() {
+            for (body, &want) in row.iter().enumerate() {
+                assert_eq!(t.relation(of, body), want, "{of} -> {body}");
+            }
+        }
+        // roles swap with the attacking team
+        t.attacking_team = 1;
+        assert_eq!(t.relation(0, 1), Target);
+        assert_eq!(t.relation(1, 0), Pursuer);
+        assert_eq!(t.relation(1, 5), Target);
+        assert_eq!(t.relation(0, 5), Other);
+    }
+
+    #[test]
+    fn escort_no_friendly_fire_and_pursuer_stun() {
+        let a = Actor { pos: Vec3::ZERO, yaw: 0.0, stance: Stance::Ground, speed: 0.0 };
+        let b = Actor { pos: Vec3::new(0.0, 1.0, 0.0), ..a };
+        let rules = Rules { free_play: false, allow_killing_npcs: true };
+        let t = Teams::alternating(4);
+        // teammates: neither kill nor stun, either role
+        for (x, y) in [(0, 2), (2, 0), (1, 3), (3, 1)] {
+            assert!(check(Act::Kill, &a, &b, t.relation(x, y), &rules, PAIR_SPACING).is_err(), "kill {x}->{y}");
+            assert!(check(Act::Stun, &a, &b, t.relation(x, y), &rules, PAIR_SPACING).is_err(), "stun {x}->{y}");
+        }
+        // protector kills a hunter, may not stun it
+        assert_eq!(check(Act::Kill, &a, &b, t.relation(1, 0), &rules, PAIR_SPACING).err(), None);
+        assert_eq!(check(Act::Stun, &a, &b, t.relation(1, 0), &rules, PAIR_SPACING).err(), Some(Reject::NotPursuer));
+        // hunter stuns a protector (its pursuer), may not kill it
+        assert!(check(Act::Stun, &a, &b, t.relation(0, 1), &rules, PAIR_SPACING).is_ok());
+        assert_eq!(check(Act::Kill, &a, &b, t.relation(0, 1), &rules, PAIR_SPACING).err(), Some(Reject::NotTarget));
+        // hunter kills a VIP; a protector may not
+        let mut t = t;
+        t.vips.push(4);
+        assert!(check(Act::Kill, &a, &b, t.relation(0, 4), &rules, PAIR_SPACING).is_ok());
+        assert!(check(Act::Kill, &a, &b, t.relation(1, 4), &rules, PAIR_SPACING).is_err());
     }
 }

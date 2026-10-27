@@ -1034,3 +1034,13 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
 - Jump to a hang (TargetedLedgeGrab 0131c1e4): jump::hang_target picks a wall edge facing us within the
   detection range when the gap has no floor within 1.75 m lower; Flight.grab -> Climb::catch on arrival.
   Feet 1.8 m below / 0.35 m out from the grab point are ours. Map test jump_map::hang_targets (471/637 edges).
+
+## Escort teams and roles, E1 (2026-10-27, escort-teams)
+- `mode::Mode {Duel (default), Escort(rules::Teams)}` on `Match`; `Match::escort(teams, ..)` builds one. Duel path
+  unchanged (contracts). Escort skips `Contracts::update`, so no contracts, chases or threat meter run yet.
+- `rules::Teams {team: Vec<Team>, attacking_team, vips: Vec<usize>}`, `Role {Hunter, Protector}` from
+  `team == attacking_team`, `Kind {Player(team), Vip, Npc}`; `team_relation`: hunter->VIP Target, protector->hunter
+  Target, hunter->protector Pursuer (hunter may stun it), teammates and protector->VIP Other (no friendly fire),
+  crowd Npc. `Match::on_action` now scores through `Match::relation`, which handles both modes.
+- Hooks for later tasks: `Teams::vips` (body indices, E3 fills it), `attacking_team` (E4 swaps per round),
+  `Teams::alternating(n)` (slot parity: placeholder until E5 sends teams on the wire). No net or proto changes.
