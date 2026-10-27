@@ -1,0 +1,66 @@
+# acb-trace offsets for retail ACBMP.exe (PC, 32-bit). Edit and keep next to the binary
+# (or pass --offsets FILE): no rebuild needed. Values are hex or decimal; `rva` values are
+# relative to the module base taken from /proc/<pid>/maps. How each was derived and its
+# confidence: ~/.cache/acbmp-re/findings/retail-mem.md (summary in the kit README).
+# A missing/zero optional offset means "scan for it at attach time"; `check` prints what it
+# found so the value can be pinned here.
+
+# EngineContextImp::ms_Instance (global pointer), MEDIUM
+engine_ctx_rva = 0x022623f0
+# current game world inside EngineContextImp, MEDIUM (validated: must be class World)
+world_off = 0x4c
+# world -> player pad manager pointer (its +4 is the player array); 0 = scan world+0..0x2000
+pad_mgr_off = 0
+# player array slot of the local pad
+pad_slot = 0
+# entity -> component array (pointer; u16 count at +6, & 0x3fff); 0 = scan
+components_off = 0
+# entity -> 4x4 world matrix (16 floats); 0 = scan for an orthonormal matrix
+matrix_off = 0
+# matrix stored with the translation in floats 3/7/11 instead of 12/13/14
+transpose = false
+# AIActor -> current context of track 0 (AIActor::GetCurrentContext: +0x18 + track*0x30), HIGH
+actor_context_off = 0x18
+# context -> its Human*Data object (DataContext::GetActorContextData), MEDIUM; 0 = scan +0..0x40
+context_data_off = 0x10
+# frame counter / game clock (u32 at world + clock_off); 0 = none, use host time
+clock_off = 0
+
+# class ids (GetClassID, same on Mac and PC). Name "HumanXData" -> state "HumanX".
+class.Entity = 0x0984415e
+class.World = 0xfbb63e47
+class.AIActor = 0x14d174f7
+class.Human = 0xa0a43252
+class.BhvAssassin = 0xdb3596ab
+class.SkeletonComponent = 0x71fda747
+class.HumanGroundData = 0x62e58378
+class.HumanInAirData = 0x9edc74ac
+class.HumanClimbData = 0xa23b4e9a
+class.HumanLedgeData = 0x68fe5487
+class.HumanNarrowObjectData = 0xe57b9a5d
+class.HumanWallingData = 0xd79fb15b
+class.HumanHayStackData = 0x5c389244
+class.HumanLadderData = 0x3e5c9ddb
+class.HumanLedgeAssassinationData = 0x06d5dc77
+class.HumanPushableContextData = 0x0bf8a26c
+class.HumanElevatorData = 0x985b528e
+class.HumanBehaviorTransitionData = 0x29a47120
+class.HumanSwimData = 0xf56d6848
+class.HumanCarriedBodyData = 0x80638a8e
+class.HumanGliderPilotData = 0xb61807b4
+class.HumanWagonData = 0x5b4f4659
+class.HumanGroundCarryObjectData = 0xf0c80b37
+class.HumanRidingData = 0xf8750a14
+class.HumanDeadData = 0x8a9bea05
+
+# PC vtables (rva) of the state data classes: a fast path before the GetClassID scan.
+vtable.HumanGroundData = 0x01ce2254
+vtable.HumanInAirData = 0x01d544e0
+vtable.HumanClimbData = 0x01d09b98
+vtable.HumanLedgeData = 0x01ce0e74
+vtable.HumanNarrowObjectData = 0x01d50d28
+vtable.HumanWallingData = 0x01d3981c
+vtable.HumanHayStackData = 0x01d3a228
+vtable.Entity = 0x01e7ac18
+vtable.World = 0x01e7b954
+vtable.AIActor = 0x01da04a8
