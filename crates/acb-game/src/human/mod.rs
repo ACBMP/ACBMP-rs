@@ -12,9 +12,13 @@
 //!   the landing-test delay).
 //! - [`ground`]: `HumanGround` edges (fall off vs step down, edge stop,
 //!   pull-down).
+//! - [`jump`]: the brain's jump button (Legs) window and stick cone, the
+//!   standing-jump (JumpImpulsion) gate.
 
 pub mod ground;
 pub mod in_air;
+pub mod jump;
 
 pub use ground::{Edge, EdgeStop};
 pub use in_air::{Air, AirCheck, Contact};
+pub use jump::Legs;

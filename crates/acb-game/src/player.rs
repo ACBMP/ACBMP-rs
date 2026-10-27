@@ -51,6 +51,9 @@ pub struct Player {
     pub air: Air,
     /// Stopped at a drop (retail `HumanGround` EdgeStop, `human::ground`).
     pub edge: Option<EdgeStop>,
+    /// The Legs button (`PlayerInput::sprint`) over time: the jump gate's
+    /// held / pressed-within-0.5 s window (`human::jump`).
+    pub legs: human::Legs,
 }
 
 /// Low profile stops at a drop deeper than this instead of walking off
@@ -63,7 +66,7 @@ pub const LEDGE_STOP: f32 = human::ground::EDGE_STOP_DEPTH;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air::start(pos.z, Some(0.0)), edge: None }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air::start(pos.z, Some(0.0)), edge: None, legs: human::Legs::default() }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -315,6 +318,9 @@ pub(crate) fn drive(
         return;
     }
     let me = p.body;
+    // the Legs button ticks in every state, so a press made while landing
+    // or climbing still counts for 0.5 s (retail ButtonJustPressedWithDelay)
+    p.legs.tick(input.sprint, dt);
     let c = bodies[me].character.clone();
     let sk = &c.skeleton;
     // being killed or stunned: the victim clip, no control; a stun (or a
@@ -609,7 +615,19 @@ pub(crate) fn drive(
                 if crate::trace() {
                     eprintln!("landed at {:.2?} after {:.3} s", at.to_array(), f.t);
                 }
+                let grab = f.grab;
                 p.flight = None;
+                // a jump to a hang: grab the targeted hold
+                if let Some((hold, q)) = grab.filter(|_| clipset.climbs.is_some()) {
+                    let stance = ground.hang_stance(q, hold.wall);
+                    p.climb = Some(Climb::catch(hold, stance, p.pos, p.loco.last_pose().clone()));
+                    p.loco.resume(p.loco.last_pose().clone());
+                    p.vel = Vec3::ZERO;
+                    if crate::trace() {
+                        eprintln!("climb: targeted ledge grab at {:.2?}", q.to_array());
+                    }
+                    return;
+                }
                 p.loco.set_beam(clips, sk, ground.beam(at).is_some());
                 p.loco.land(0.0, dir != Vec2::ZERO);
             }
@@ -659,8 +677,14 @@ pub(crate) fn drive(
             }
             p.pos = at;
         } else {
-            let running = p.loco.speed >= 1.5 && dir != Vec2::ZERO;
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            // retail jump flag (0166fb1c): Legs held or pressed within
+            // 0.5 s, stick within 80 deg of the facing; ours also needs a
+            // run's speed (the standing jump is the impulsion below)
+            let running = p.loco.speed >= 1.5 && human::jump::freerun(&p.legs, dir, fwd);
+            // retail Move -> JumpImpulsion -> JumpImpulsionStraight: Legs
+            // pressed with the stick released, early in any action
+            let standing = dir == Vec2::ZERO && p.legs.pressed && human::jump::impulsion_allowed(p.loco.action_ratio(clips));
             // freerun: up onto a ledge ahead
             // (never onto a haystack's top: running into one hides)
             let haystack = |t: Vec3| clipset.hide.as_ref().is_some_and(|h| h.spots.iter().any(|s| s.seat.is_none() && s.outside(t) <= 0.0 && t.z <= s.top() + 0.5));
@@ -726,6 +750,15 @@ pub(crate) fn drive(
             // freerun: over a gap instead of dropping into it
             let why = if up.is_some() { "up" } else { "gap" };
             let across = (ledge && running && up.is_none()).then(|| jump::target(ground, clips, p.pos, fwd, true)).flatten();
+            // a hang across the gap (retail TargetedLedgeGrab) beats a floor
+            // more than 1.75 m lower
+            let low = |t: &(Vec3, jump::Flight, bool)| t.0.z < p.pos.z - 1.75;
+            let across = if ledge && running && up.is_none() && across.as_ref().is_none_or(low) {
+                jump::hang_target(ground, clips, p.pos, fwd).or(across)
+            } else {
+                across
+            };
+            let why = if across.as_ref().is_some_and(|t| t.1.grab.is_some()) { "hang" } else { why };
             // low profile at a drop (a roof edge, a beam end): stop at the
             // edge (a beam end at any drop); the jump button lowers onto the
             // wall below or steps off
@@ -757,6 +790,17 @@ pub(crate) fn drive(
             if let Some((target, flight, narrow)) = up.or(across) {
                 jump::take_off(p, clips, sk, target, flight, if narrow { "narrow top" } else { why });
             } else {
+                if standing && !ledge && p.loco.speed < 1.5 {
+                    // the straight jump: up and down on the spot
+                    p.loco.start_fall();
+                    p.vel = Vec3::Z * human::jump::straight_speed();
+                    p.fall_from = p.pos.z;
+                    p.air = Air::start(p.pos.z, Some(0.0));
+                    p.edge = None;
+                    if crate::trace() {
+                        eprintln!("jump straight from {:.2?}", p.pos.to_array());
+                    }
+                }
                 if ledge {
                     p.loco.start_fall();
                     p.vel = (delta / dt.max(1e-4)).extend(0.0);

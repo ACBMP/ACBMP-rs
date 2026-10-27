@@ -81,7 +81,10 @@ fn thin_railing_landing() {
     let mut took_off = None;
     for i in 0..(3.0 / DT) as usize {
         let flying = w.players[0].flight.is_some();
-        w.step(&[if landed.is_none() { run } else { PlayerInput::default() }]);
+        // Legs (sprint) tapped for one tick at 0.6 s: the jump needs it
+        // pressed within 0.5 s (retail), as tools/gates.sh `railing`
+        let legs = PlayerInput { sprint: i == (0.6 / DT) as usize, ..run };
+        w.step(&[if landed.is_none() { legs } else { PlayerInput::default() }]);
         let p = &w.players[0];
         if !flying && p.flight.is_some() {
             took_off = Some((i, p.pos, p.flight.as_ref().unwrap().dur));
@@ -190,4 +193,35 @@ fn beam_clips() {
         println!("{n}: {:.3} s, root {:+.2} {:+.2} {:+.2}, yaw {:+.0}", c.length, m.x, m.y, m.z, yaw(c));
     }
     assert!(speed(&b.walk) < speed(&b.run) && speed(&b.run) < speed(&b.sprint));
+}
+
+/// Jumps to a hang (retail TargetedLedgeGrab): from the floor 3 m out in
+/// front of San Donato's wall edges, facing them, some edges are jump
+/// targets; every one found carries its hold, faces it and ends with the
+/// hands in the catch band (1.3-2.2 m over the feet) in reach.
+#[test]
+fn hang_targets() {
+    let Some(d) = data() else { return };
+    let g = Ground::load(&d.archive).unwrap();
+    let clips = Clips::load(&d.archive, d.builtins.as_ref()).unwrap();
+    let (mut tried, mut found) = (0, 0);
+    for h in g.holds_around(glam::Vec3::ZERO, 200.0) {
+        let mid = (h.a + h.b) * 0.5;
+        let start = mid.truncate() + h.wall * 3.0;
+        let Some(z) = g.floor_below(start.extend(mid.z)) else { continue };
+        if mid.z - z < 1.5 || mid.z - z > 3.5 {
+            continue;
+        }
+        tried += 1;
+        let pos = start.extend(z);
+        let Some((feet, flight, _)) = jump::hang_target(&g, &clips, pos, -h.wall) else { continue };
+        found += 1;
+        let (hold, q) = flight.grab.expect("a hang target carries its hold");
+        assert!(hold.wall.dot(-h.wall) < -0.5, "faces the jumper");
+        let up = q.z - feet.z;
+        assert!((1.3..=2.2).contains(&up), "hands {up:.2} m over the feet");
+        assert!(g.catch_hold(feet, -hold.wall, acb_game::human::in_air::GRASP_PROBE).is_some(), "catchable at {feet:?}");
+    }
+    eprintln!("hang targets: {found} of {tried} wall edges");
+    assert!(tried > 0 && found > 0, "{found} of {tried}");
 }

@@ -203,6 +203,9 @@ pub struct Flight {
     pub lag: f32,
     /// See [`Flight::new`].
     pub edge: Option<f32>,
+    /// A jump to a hang: the hold grabbed when it arrives and its grab
+    /// point (retail `HumanInAir::CheckForTargetedLedgeGrab` 0131c1e4).
+    pub grab: Option<(crate::climb::Hold, Vec3)>,
 }
 
 /// How far the feet rise over a top they jump up onto, metres.
@@ -289,7 +292,7 @@ impl Flight {
                 start + horiz(u.powf(lag)).extend(vert[i])
             })
             .collect();
-        Flight { path, dur: dur.max(1.0 / 60.0), t: 0.0, target, lag, edge }
+        Flight { path, dur: dur.max(1.0 / 60.0), t: 0.0, target, lag, edge, grab: None }
     }
 
     /// Feet position `t` seconds into the flight.
@@ -347,6 +350,28 @@ const UP_REACH: f32 = 2.0;
 const PROFILE_STEP: f32 = 0.05;
 /// Lateral offsets of the profiles (posts slightly off the line).
 const LANES: [f32; 3] = [0.0, -0.25, 0.25];
+
+/// Feet below the grab point of a hang a targeted jump flies to, metres
+/// (ours: inside the 1.3-2.2 m hand band of `Ground::catch_hold`).
+pub const HANG_HANDS: f32 = 1.8;
+/// Feet out from the wall at that hang, metres (ours).
+pub const HANG_OFF: f32 = 0.35;
+
+/// A jump to a hang for feet at `pos` running along `fwd` (unit): a wall
+/// edge facing us across the gap (within [`DETECTION`]), the hang's feet
+/// reachable, and the flight that ends there carrying the hold to grab
+/// (retail `HumanInAir::CheckForTargetedLedgeGrab` 0131c1e4).
+pub fn hang_target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2) -> Option<(Vec3, Flight, bool)> {
+    let (hold, q) = ground.hang_hold(pos, fwd, DETECTION[0].0, SEARCH)?;
+    let feet = q + (hold.wall * HANG_OFF).extend(-HANG_HANDS);
+    let d = feet - pos;
+    if !reachable(d.truncate().dot(fwd), d.z) {
+        return None;
+    }
+    let mut flight = Flight::new(clips, &weights(clips, d), 0, pos, feet, None);
+    flight.grab = Some((hold, q));
+    Some((feet, flight, false))
+}
 
 /// A freerun jump target for feet at `pos` running along `fwd` (unit):
 /// with `off_edge` false, the top of an obstacle rising more than a step
@@ -445,13 +470,14 @@ pub fn target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2, off_edge: bo
 /// Launches the player on `flight` to `target`; `why` names the trigger
 /// for `ACBMP_TRACE`.
 pub(crate) fn take_off(p: &mut Player, clips: &Clips, sk: &Skeleton, target: Vec3, flight: Flight, why: &str) {
-    let edge = flight.edge;
+    let (edge, grab) = (flight.edge, flight.grab);
     let d = target - p.pos;
     let kinds = weights(clips, d);
     let main = main_kind(&kinds);
     let foot = p.loco.start_jump(clips, sk, main);
     // the flight on the clips of the foot it takes off from
-    let flight = if foot == 0 { flight } else { Flight::new(clips, &kinds, foot, p.pos, target, edge) };
+    let mut flight = if foot == 0 { flight } else { Flight::new(clips, &kinds, foot, p.pos, target, edge) };
+    flight.grab = grab;
     p.yaw = (-d.x).atan2(d.y);
     p.vel = Vec3::ZERO;
     p.fall_from = p.pos.z.max(target.z);

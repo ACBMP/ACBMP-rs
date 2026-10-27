@@ -1022,3 +1022,14 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   (protect/checkpoint), kill bonuses as Wanted. Rounds: ChangeAttackerTeam 1 (roles swap), Intro and recap 8 s.
 - Every AC2MP map has 4 team spawn groups (SpawnType 2, TeamIndex 1..4) of 4 spawns.
 - Round length, respawn delay and what the VIP score counts come from unshipped XML: placeholders.
+- Jump button (B2b, 0166fb1c): every jump test calls ButtonPressed / ButtonJustPressedWithDelay(.., 0.5) with
+  PadButton 0 (call sites 167105c/1671084, 1671591/16715b9, 1671764/1671784). PadButton order in the binary's
+  name table is Button1..4, PadUp.., so 0 = Button1 = spacebar in multi/DefaultBindings.map = Legs (kills use 1 =
+  Button2 = left mouse, weapon hand, ButtonWantsToKill b16a76). Ours: PlayerInput::sprint (Space) via
+  human::jump::Legs (held or pressed within 0.5 s, counted in ticks) + stick within 80 deg (cos 0.1736).
+  The run-speed >= 1.5 test stays (ours). Scripted runs tap Space for one tick before the jump.
+- Standing jump (00f6a118): Move -> JumpImpulsion allowed with no action or action ratio < 0.33
+  (Locomotion::action_ratio); ours jumps straight up 0.5 m (retail clip-driven; height not recovered).
+- Jump to a hang (TargetedLedgeGrab 0131c1e4): jump::hang_target picks a wall edge facing us within the
+  detection range when the gap has no floor within 1.75 m lower; Flight.grab -> Climb::catch on arrival.
+  Feet 1.8 m below / 0.35 m out from the grab point are ours. Map test jump_map::hang_targets (471/637 edges).

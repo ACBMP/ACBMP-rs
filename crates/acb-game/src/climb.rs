@@ -978,6 +978,24 @@ impl Ground {
             .map(|x| x.1)
     }
 
+    /// Hold for a targeted jump to a hang (retail `HumanInAir::CheckForTargetedLedgeGrab`
+    /// 0131c1e4 grabs the edge the jump targeted): a wall edge facing us,
+    /// `min..=max` m ahead of `pos` along `fwd` and within 0.7 m of the line,
+    /// with its grab point. Nearest first; ties by the list order.
+    pub fn hang_hold(&self, pos: Vec3, fwd: Vec2, min: f32, max: f32) -> Option<(Hold, Vec3)> {
+        let mid = pos + (fwd * (min + max) * 0.5).extend(0.0);
+        self.holds_near(mid, (max - min) * 0.5 + 0.7)
+            .filter(|h| h.wall.dot(fwd) < -0.5)
+            .filter_map(|h| {
+                let q = h.nearest(mid);
+                let d = (q - pos).truncate();
+                let ahead = d.dot(fwd);
+                ((min..=max).contains(&ahead) && d.perp_dot(fwd).abs() < 0.7).then_some((ahead, *h, q))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| (x.1, x.2))
+    }
+
     /// The next hold from hands at `hand` on a wall facing `n`, moving
     /// `dir`: an edge on the same wall plane, 0.5-2 m away that way.
     pub fn next_hold(&self, hand: Vec3, n: Vec2, dir: Dir) -> Option<(Hold, Vec3)> {

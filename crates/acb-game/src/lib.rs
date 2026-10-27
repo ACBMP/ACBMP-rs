@@ -112,10 +112,12 @@ pub struct PlayerInput {
     /// Camera heading the keys are relative to, radians (0 = +X, pi/2 = +Y).
     pub cam_yaw: f32,
     pub run: bool,
+    /// Retail Legs (viewer Space): sprint, and the freerun jump button
+    /// (held or pressed within 0.5 s, `human::jump`); standing, a straight
+    /// jump.
     pub sprint: bool,
-    /// Jump button (viewer F): wall jumps while climbing, ledge pulldown /
-    /// step-off at a low-profile edge stop. Ground freerun jumps start by
-    /// themselves while running.
+    /// Empty hand (viewer F): wall jumps while climbing, ledge pulldown /
+    /// step-off at a low-profile edge stop.
     pub jump: bool,
     pub kill: bool,
     pub stun: bool,
