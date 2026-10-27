@@ -1009,3 +1009,16 @@ values, sources, our equivalent and status; full name list in `human-states-grap
 - Grasp (0132017a): only in the first 2.0 m of a fall (from the peak), probe 1.2 m ahead (catch_hold reach; side 0.7 m and hand window 1.3-2.2 m stay ours). Old gate (fell > 0.3 m, vz < -1) gone. Effect: the climb gate's S-drop now catches the awning beam below (hangfree, ends -10.61 41.07 3.72).
 - Landing (0130fea6): contact classes 45/70/135 deg via Ground::floor_hit normal; within 0.3 m below the air start a landing waits for the delay timer (retail: length of the starting action; ours: eject 0.467 s, walk-off/drop 0). Our floors stop at 53 deg, so the slope class (45-53) is only logged; no slide state.
 - Edges (00fc3ed2): drops >= 0.53 m are fallen off (was 0.6), smaller ones stepped down (Ground::move_on_edge). Edge stop > 2.0 m kept; Player.edge remembers the stop so F pulls down while standing too (00fd226a), and while walking into it (00fd215e).
+
+## Escort (teamvip) RE, Phase 4 prep (2026-10-27, escort-re)
+Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findings/mode-escort.md`.
+- Engine name "teamvip" (`DataPC.forge` 0x6a0ac994 `TeamVIP GamemodeParameters`), values identical to Wanted2
+  (kill reach, threat meter). Map `DataBlock_gamemode_teamvip` blocks are empty.
+- VIPs are crowd NPCs, not players: `GBrick_SpawnVIPs` NbVIPs 2, all dead -> 5 s -> both respawn, new VIPs become
+  hunter targets after 10 s, way start >= 35 m from hunters. Hunters target every VIP; protectors target every
+  hunter and are its pursuers (stun/escape as in Wanted); no contract lottery; no friendly fire (our reading).
+- VIP paths (`AdditionalWorldData_TeamVIP` / `TeamVIPNavflowPath`) are NOT in any shipped PC forge: we author them.
+- Score defaults: ScoreVIPKilled 100, ScoreEnemyKilled 100, ScoreVIP base 200 / bonus 10 / max 500
+  (protect/checkpoint), kill bonuses as Wanted. Rounds: ChangeAttackerTeam 1 (roles swap), Intro and recap 8 s.
+- Every AC2MP map has 4 team spawn groups (SpawnType 2, TeamIndex 1..4) of 4 spawns.
+- Round length, respawn delay and what the VIP score counts come from unshipped XML: placeholders.
