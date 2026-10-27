@@ -11,6 +11,7 @@ pub mod climb;
 pub mod crowd;
 pub mod ground;
 pub mod hide;
+pub mod human;
 pub mod jump;
 pub mod kill;
 pub mod locomotion;

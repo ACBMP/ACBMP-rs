@@ -165,12 +165,21 @@ impl Ground {
 
     /// Highest floor at `p.xy` no higher than `p.z`.
     pub fn floor_below(&self, p: Vec3) -> Option<f32> {
+        self.floor_hit(p).map(|h| h.0)
+    }
+
+    /// [`Self::floor_below`] plus the floor's unit normal (pointing up).
+    pub fn floor_hit(&self, p: Vec3) -> Option<(f32, Vec3)> {
         let ids = self.floor.get(&cell(p.truncate()))?;
         ids.iter()
-            .filter_map(|&i| ray_tri(p, -Vec3::Z, &self.tris[i as usize]))
-            .filter(|t| *t >= 0.0)
-            .min_by(f32::total_cmp)
-            .map(|t| p.z - t)
+            .filter_map(|&i| ray_tri(p, -Vec3::Z, &self.tris[i as usize]).map(|t| (t, i)))
+            .filter(|(t, _)| *t >= 0.0)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(t, i)| {
+                let [a, b, c] = self.tris[i as usize];
+                let n = (b - a).cross(c - a).normalize_or_zero();
+                (p.z - t, if n.z < 0.0 { -n } else { n })
+            })
     }
 
     /// First wall hit moving horizontally from `from` by `delta` (plus
@@ -238,9 +247,15 @@ impl Ground {
     /// falling, position not snapped). Moves onto no floor at all are
     /// refused.
     pub fn move_on(&self, pos: Vec3, delta: Vec2) -> (Vec3, bool) {
+        self.move_on_edge(pos, delta, STEP)
+    }
+
+    /// [`Self::move_on`] stepping down less than `down` metres (the player:
+    /// [`crate::human::ground::FALL_OFF_EDGE`]); steps up stay at [`STEP`].
+    pub fn move_on_edge(&self, pos: Vec3, delta: Vec2, down: f32) -> (Vec3, bool) {
         let at = self.slide(pos, delta);
         match self.floor_below(at + Vec3::Z * STEP) {
-            Some(z) if z >= at.z - STEP => (at.with_z(z), false),
+            Some(z) if at.z - z < down => (at.with_z(z), false),
             Some(_) => (at, true),
             None => (pos, false),
         }

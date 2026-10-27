@@ -5,6 +5,7 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 
 use crate::climb::{Climb, Dir, Outcome};
 use crate::ground::Ground;
+use crate::human::{self, Air, EdgeStop};
 use crate::locomotion::{Gait, Locomotion};
 use crate::{jump, kill, rules, Body, Clipset, PlayerInput, Scripted};
 
@@ -45,6 +46,11 @@ pub struct Player {
     pub blended: bool,
     /// Horizontal speed over the last tick, m/s (the rules' running test).
     pub moved: f32,
+    /// Retail `HumanInAir` data of the current fall (start height and
+    /// landing-test delay, `human::in_air`).
+    pub air: Air,
+    /// Stopped at a drop (retail `HumanGround` EdgeStop, `human::ground`).
+    pub edge: Option<EdgeStop>,
 }
 
 /// Low profile stops at a drop deeper than this instead of walking off
@@ -53,11 +59,11 @@ pub struct Player {
 /// off. Retail: `HumanGround::TestMoveToEdgeStopOnHumanGroundInterfaceCommand_
 /// UnbalanceOnEdge` enters EdgeStop only for a narrow edge whose gap is
 /// deeper than 2 m (and pull-down clearance); shallower drops are walked off.
-pub const LEDGE_STOP: f32 = 2.0;
+pub const LEDGE_STOP: f32 = human::ground::EDGE_STOP_DEPTH;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0 }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air::start(pos.z, Some(0.0)), edge: None }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -526,6 +532,8 @@ pub(crate) fn drive(
                 p.loco.start_fall();
                 p.vel = v;
                 p.fall_from = p.pos.z;
+                let delay = if matches!(outcome, Outcome::Eject(_)) { EJECT_NO_CATCH } else { 0.0 };
+                p.air = Air::start(p.pos.z, Some(delay));
             }
         }
         bodies[me].show(p.entity(), pose);
@@ -550,7 +558,11 @@ pub(crate) fn drive(
     if let (Some(hide), None) = (&clipset.hide, &p.flight) {
         let air = p.loco.airborne();
         let high = input.run || input.sprint;
-        if let Some(i) = crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), high, air, p.vel.z) {
+        // retail InAir order (human::in_air::ORDER): a hold in reach is
+        // grabbed (below, in the fall) before a haystack is entered
+        let grasp = air && ground.is_some_and(|g| air_grasp(p, g, clipset).is_some());
+        let entry = if grasp { None } else { crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), high, air, p.vel.z) };
+        if let Some(i) = entry {
             if crate::trace() {
                 eprintln!("hide: enter spot {i} from {:.2} {:.2} {:.2}{}", p.pos.x, p.pos.y, p.pos.z, if air { " (air)" } else { "" });
             }
@@ -607,21 +619,31 @@ pub(crate) fn drive(
             // fall height counts from the highest point (retail
             // ComputeFallHeight: InAirData start/peak z - z)
             p.fall_from = p.fall_from.max(p.pos.z);
-            // falling past a hold: grab it (not right after letting go)
-            let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
-            if p.vel.z < -1.0 && clipset.climbs.is_some() && p.fall_from - p.pos.z > 0.3 && p.catch_block <= 0.0 {
-                if let Some(hold) = ground.catch_hold(p.pos, fwd) {
-                    let stance = ground.hang_stance(hold.nearest(p.pos), hold.wall);
-                    p.climb = Some(Climb::catch(hold, stance, p.pos, p.loco.last_pose().clone()));
-                    p.loco.resume(p.loco.last_pose().clone());
-                    p.vel = Vec3::ZERO;
-                    return;
-                }
+            p.air.tick(dt);
+            // falling past a hold: grab it (retail DefaultGrasp: the first
+            // 2 m of a fall, not right after letting go)
+            if let Some(hold) = air_grasp(p, ground, clipset) {
+                let stance = ground.hang_stance(hold.nearest(p.pos), hold.wall);
+                p.climb = Some(Climb::catch(hold, stance, p.pos, p.loco.last_pose().clone()));
+                p.loco.resume(p.loco.last_pose().clone());
+                p.vel = Vec3::ZERO;
+                return;
             }
             let mut at = ground.slide(p.pos, p.vel.truncate() * dt);
             let z = p.pos.z + p.vel.z * dt;
-            match ground.floor_below(at + Vec3::Z * 0.1) {
-                Some(f) if f >= z => {
+            match ground.floor_hit(at + Vec3::Z * 0.1) {
+                // retail TestGroundCollision: near the start height the
+                // landing waits for the landing-test delay (stand on it)
+                Some((f, _)) if f >= z && !p.air.landing_allowed(f) => {
+                    at.z = f;
+                    p.vel.z = 0.0;
+                }
+                Some((f, n)) if f >= z => {
+                    // our floors are <= 53 deg, so ground or slope; retail
+                    // slides on a slope, ours lands (human::in_air::Contact)
+                    if crate::trace() && human::in_air::classify(n) != Some(human::Contact::Ground) {
+                        eprintln!("land: contact {:?} ({:.0} deg)", human::in_air::classify(n), n.z.clamp(-1.0, 1.0).acos().to_degrees());
+                    }
                     at.z = f;
                     p.vel = Vec3::ZERO;
                     p.loco.set_beam(clips, sk, ground.beam(at).is_some());
@@ -643,10 +665,27 @@ pub(crate) fn drive(
             // (never onto a haystack's top: running into one hides)
             let haystack = |t: Vec3| clipset.hide.as_ref().is_some_and(|h| h.spots.iter().any(|s| s.seat.is_none() && s.outside(t) <= 0.0 && t.z <= s.top() + 0.5));
             let up = running.then(|| jump::target(ground, clips, p.pos, fwd, false)).flatten().filter(|u| !haystack(u.0));
-            let (to, ledge) = ground.move_on(p.pos, jump::balance_on(beam, delta));
+            // drops < 0.53 m are stepped down, deeper ones fallen off
+            let (to, ledge) = ground.move_on_edge(p.pos, jump::balance_on(beam, delta), human::ground::FALL_OFF_EDGE);
+            let len = delta.length();
+            if p.edge.is_some_and(|e| !e.still_at(p.pos)) {
+                p.edge = None;
+            }
+            // retail EdgeStop -> Ledge (LedgePullDown): standing at an edge
+            // stop, the jump button lowers onto the wall below
+            if let (Some(e), true, true, true) = (p.edge, input.jump, !input.run, len <= 1e-4) {
+                if let Some(c) = pulldown(p, ground, clipset, e.along) {
+                    if crate::trace() {
+                        eprintln!("climb: {} from {:.2} {:.2} {:.2} (edge stop)", c.describe(), p.pos.x, p.pos.y, p.pos.z);
+                    }
+                    p.climb = Some(c);
+                    p.edge = None;
+                    p.vel = Vec3::ZERO;
+                    return;
+                }
+            }
             // pressing into a wall: ease out of the cycle instead of
             // running on the spot (the run lean would put the head through)
-            let len = delta.length();
             let blocked = len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3;
             if up.is_none() && blocked {
                 p.loco.blocked(dt);
@@ -690,25 +729,22 @@ pub(crate) fn drive(
             // low profile at a drop (a roof edge, a beam end): stop at the
             // edge (a beam end at any drop); the jump button lowers onto the
             // wall below or steps off
-            let deep = |g: &Ground| match g.floor_below(to + Vec3::Z * 0.1) {
-                Some(f) => p.pos.z - f > LEDGE_STOP,
-                None => true,
-            };
+            let deep = |g: &Ground| human::ground::edge_stop(g.floor_below(to + Vec3::Z * 0.1).map(|f| p.pos.z - f));
             if ledge && !input.run && up.is_none() && len > 1e-4 && (beam.is_some() || deep(ground)) {
                 let along = delta / len;
                 if input.jump {
-                    let hang = clipset.climbs.as_ref().and_then(|_| ground.ledge_hold(p.pos, along));
-                    if let Some((hold, point)) = hang {
-                        let stance = ground.hang_stance(point, hold.wall);
-                        let c = Climb::pulldown(hold, point, stance, p.pos, p.yaw, p.loco.last_pose().clone());
+                    // retail Move -> Ledge (LedgePullDown) straight from moving
+                    if let Some(c) = pulldown(p, ground, clipset, along) {
                         if crate::trace() {
                             eprintln!("climb: {} from {:.2} {:.2} {:.2}", c.describe(), p.pos.x, p.pos.y, p.pos.z);
                         }
                         p.climb = Some(c);
+                        p.edge = None;
                         p.vel = Vec3::ZERO;
                         return;
                     }
                 } else {
+                    p.edge = Some(EdgeStop { at: p.pos, along });
                     p.loco.blocked(dt);
                     if crate::trace() && (time * 4.0).floor() != ((time - dt) * 4.0).floor() {
                         eprintln!("ledge stop at {:.2} {:.2} {:.2}", p.pos.x, p.pos.y, p.pos.z);
@@ -725,6 +761,8 @@ pub(crate) fn drive(
                     p.loco.start_fall();
                     p.vel = (delta / dt.max(1e-4)).extend(0.0);
                     p.fall_from = p.pos.z;
+                    p.air = Air::start(p.pos.z, Some(0.0));
+                    p.edge = None;
                 }
                 // shoulder past people rather than through them (walls win)
                 let mut push = Vec2::ZERO;
@@ -758,4 +796,22 @@ pub(crate) fn drive(
     }
     let world = p.entity() * bodies[me].model;
     bodies[me].show(world, step.pose);
+}
+
+/// A hold the falling player grabs this tick (retail
+/// `HumanInAir::CheckForDefaultGrasp`: gate and probe in `human::in_air`).
+fn air_grasp(p: &Player, ground: &Ground, clipset: &Clipset) -> Option<crate::climb::Hold> {
+    if clipset.climbs.is_none() || p.flight.is_some() || !human::in_air::grasp_allowed(p.fall_from - p.pos.z, p.catch_block) {
+        return None;
+    }
+    let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+    ground.catch_hold(p.pos, fwd, human::in_air::GRASP_PROBE)
+}
+
+/// Lowering from an edge onto the wall below, facing over it along `along`.
+fn pulldown(p: &Player, ground: &Ground, clipset: &Clipset, along: Vec2) -> Option<Climb> {
+    clipset.climbs.as_ref()?;
+    let (hold, point) = ground.ledge_hold(p.pos, along)?;
+    let stance = ground.hang_stance(point, hold.wall);
+    Some(Climb::pulldown(hold, point, stance, p.pos, p.yaw, p.loco.last_pose().clone()))
 }

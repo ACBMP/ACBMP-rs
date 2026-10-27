@@ -1002,3 +1002,10 @@ values, sources, our equivalent and status; full name list in `human-states-grap
   HumanXData -> class id -> name. Details/confidence: ~/.cache/acbmp-re/findings/retail-mem.md.
 - Not live-tested (no retail here): first diag.txt from the Wine machine pins the scanned offsets.
 - Ours: ACBMP_TRACE=csv:<path> writes the same columns per tick (findings/trace-format.md).
+
+## Human* port, B2a (InAir order, landing classes, grasp gate, edges)
+- `crates/acb-game/src/human/`: decisions only, constants with retail addresses. player.rs asks it; motion stays in jump/climb/locomotion/Ground.
+- InAir order (01328022): grasp is tested before haystack entry (hide::entry is skipped when a hold is in reach).
+- Grasp (0132017a): only in the first 2.0 m of a fall (from the peak), probe 1.2 m ahead (catch_hold reach; side 0.7 m and hand window 1.3-2.2 m stay ours). Old gate (fell > 0.3 m, vz < -1) gone. Effect: the climb gate's S-drop now catches the awning beam below (hangfree, ends -10.61 41.07 3.72).
+- Landing (0130fea6): contact classes 45/70/135 deg via Ground::floor_hit normal; within 0.3 m below the air start a landing waits for the delay timer (retail: length of the starting action; ours: eject 0.467 s, walk-off/drop 0). Our floors stop at 53 deg, so the slope class (45-53) is only logged; no slide state.
+- Edges (00fc3ed2): drops >= 0.53 m are fallen off (was 0.6), smaller ones stepped down (Ground::move_on_edge). Edge stop > 2.0 m kept; Player.edge remembers the stop so F pulls down while standing too (00fd226a), and while walking into it (00fd215e).
