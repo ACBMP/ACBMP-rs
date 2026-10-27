@@ -20,13 +20,13 @@ M=${ACBMP_MULTI:-$HOME/Music/ACB/multi}
 out=$(mktemp -d)
 runs=(
   "climb|-18,44.6,2.22,-97|0=w,shift 1.5= 2.5=d 8= 8.5=s 8.8=|11"
-  "railing|34.5,-54.38,0.1,-90|0=w,shift 1.1=|4"
-  "parapet|-13,0,6,-97|0=w,shift 0.9=|4"
+  "railing|34.5,-54.38,0.1,-90|0=w,shift 0.6=w,shift,space 0.62=w,shift 1.1=|4"
+  "parapet|-13,0,6,-97|0=w,shift 0.4=w,shift,space 0.42=w,shift 0.9=|4"
   "eject|-18,44.6,2.22,-97|0=w,shift 1.5= 3=s,f 3.3=|6"
   "sidejump|-24.0,43.3,3.8,180|0=w,shift 1.5= 2.5=a,shift 2.7=|5"
   "leap|5.21,14.8,3,180|0=w,shift 1.0= 3=w,f 3.2=|5"
   "pulldown|-12.0,43.99,6.5,90|0=w 3=w,f 3.2= 5=|6"
-  "beamend|34.5,-54.38,0.1,-90|0=w,shift 1.1= 2=d 5=|6"
+  "beamend|34.5,-54.38,0.1,-90|0=w,shift 0.6=w,shift,space 0.62=w,shift 1.1= 2=d 5=|6"
   "roll|31,20.4,9.5,-90|0=w 1.5=|3"
 )
 for fps in 60 144; do

@@ -533,6 +533,15 @@ impl Locomotion {
         self.air.is_some()
     }
 
+    /// Played share (0..1) of the one-shot action's current clip (a start,
+    /// stop, turn or landing); `None` in the cycles or idle (retail
+    /// `ActionComponent::GetCurrentActionRatio`).
+    pub fn action_ratio(&self, clips: &Clips) -> Option<f32> {
+        let a = self.action.as_ref()?;
+        let len = clips.get(*a.queue.first()?).length;
+        Some(if len > 0.0 { (a.t / len).clamp(0.0, 1.0) } else { 1.0 })
+    }
+
     /// Left the ground: the caller moves the character ballistically until
     /// [`Locomotion::land`].
     pub fn start_fall(&mut self) {

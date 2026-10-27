@@ -23,7 +23,7 @@ Actions use retail's names. Bind them however you like:
 
 Timings count from the first key press; ±0.1 s is fine.
 
-In our viewer: HP = Shift, HP+Legs = Shift (it runs into freeruns), sprint = Space, Empty hand = F. The exact replays are in `tools/trace-ours.sh`.
+In our viewer: HP = Shift, Legs = Space (HP+Legs = sprint), Empty hand = F. Freerun jumps need Legs held or pressed within the last 0.5 s (retail), so the replays run on Shift and tap Space just before the jump (`railing`, `parapet`, `beamend`); a held Space would sprint. The exact replays are in `tools/trace-ours.sh`.
 
 | Move | Start X,Y,Z,yaw | Actions | Ends with |
 |---|---|---|---|
