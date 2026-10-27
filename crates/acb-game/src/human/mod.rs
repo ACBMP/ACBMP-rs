@@ -11,14 +11,16 @@
 //! - [`in_air`]: `HumanInAir` (check order, grasp gate, landing classes and
 //!   the landing-test delay).
 //! - [`ground`]: `HumanGround` edges (fall off vs step down, edge stop,
-//!   pull-down).
+//!   pull-down) and the obstacle collision (bumping into a wall).
+//! - [`haystack`]: the haystack contact entry (facing / push cones).
 //! - [`jump`]: the Legs window and stick cone that let a freerun jump out
 //!   at an edge (there is no manual jump).
 
 pub mod ground;
+pub mod haystack;
 pub mod in_air;
 pub mod jump;
 
-pub use ground::{Edge, EdgeStop};
+pub use ground::{Edge, EdgeStop, Obstacle};
 pub use in_air::{Air, AirCheck, Contact};
 pub use jump::Legs;

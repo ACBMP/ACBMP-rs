@@ -51,6 +51,9 @@ pub struct Player {
     pub air: Air,
     /// Stopped at a drop (retail `HumanGround` EdgeStop, `human::ground`).
     pub edge: Option<EdgeStop>,
+    /// Retail `HumanGround` ObstacleCollision: bumped into a wall that is
+    /// neither climbed nor wall-run (human::ground::obstacle).
+    pub obstacle: Option<human::Obstacle>,
     /// The Legs button (`PlayerInput::sprint`) over time: the jump gate's
     /// held / pressed-within-0.5 s window (`human::jump`).
     pub legs: human::Legs,
@@ -66,7 +69,7 @@ pub const LEDGE_STOP: f32 = human::ground::EDGE_STOP_DEPTH;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air::start(pos.z, Some(0.0)), edge: None, legs: human::Legs::default() }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air::start(pos.z, Some(0.0)), edge: None, obstacle: None, legs: human::Legs::default() }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -564,10 +567,11 @@ pub(crate) fn drive(
     if let (Some(hide), None) = (&clipset.hide, &p.flight) {
         let air = p.loco.airborne();
         let high = input.run || input.sprint;
+        let facing = Vec2::new(-p.yaw.sin(), p.yaw.cos());
         // retail InAir order (human::in_air::ORDER): a hold in reach is
         // grabbed (below, in the fall) before a haystack is entered
         let grasp = air && ground.is_some_and(|g| air_grasp(p, g, clipset).is_some());
-        let entry = if grasp { None } else { crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), high, air, p.vel.z) };
+        let entry = if grasp { None } else { crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), facing, air, p.vel.z) };
         if let Some(i) = entry {
             if crate::trace() {
                 eprintln!("hide: enter spot {i} from {:.2} {:.2} {:.2}{}", p.pos.x, p.pos.y, p.pos.z, if air { " (air)" } else { "" });
@@ -632,6 +636,7 @@ pub(crate) fn drive(
                 p.loco.land(0.0, dir != Vec2::ZERO);
             }
         } else if p.loco.airborne() {
+            p.obstacle = None;
             p.vel.z -= jump::GRAVITY * dt;
             p.catch_block = (p.catch_block - dt).max(0.0);
             // fall height counts from the highest point (retail
@@ -708,8 +713,20 @@ pub(crate) fn drive(
             }
             // pressing into a wall: ease out of the cycle instead of
             // running on the spot (the run lean would put the head through)
+            // retail Move -> ObstacleCollision (00ceee20 / 00fd0fd2): a wall
+            // contact within 45 deg of the stick; the bump stops the move
+            // (ours: the cycle eases out, no bump clip). A move refused for
+            // want of floor eases out the same way (ours).
+            let push = dir.normalize_or_zero();
+            let contact = (push != Vec2::ZERO).then(|| ground.slide_hit(p.pos, push * human::ground::OBSTACLE_PROBE).1).flatten();
+            let obstacle = contact.filter(|_| up.is_none()).and_then(|n| human::ground::obstacle(n, push, fwd, p.vel.z));
+            if crate::trace() && obstacle.is_some() && p.obstacle.is_none() {
+                let o = obstacle.unwrap();
+                eprintln!("obstacle: at {:.2} {:.2} {:.2} angle {:.0} deg side blend {:.2}{}", p.pos.x, p.pos.y, p.pos.z, o.angle.to_degrees(), o.blend, if o.faced() { "" } else { " (behind)" });
+            }
+            p.obstacle = obstacle;
             let blocked = len > 1e-4 && (to - p.pos).truncate().dot(delta) / (len * len) < 0.3;
-            if up.is_none() && blocked {
+            if up.is_none() && (blocked || p.obstacle.is_some()) {
                 p.loco.blocked(dt);
             }
             // onto the wall (retail entry order): a wall run when running at

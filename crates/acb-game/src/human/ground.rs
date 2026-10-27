@@ -55,6 +55,70 @@ impl EdgeStop {
     }
 }
 
+/// Retail obstacle collision (`HumanGround` ObstacleCollision): running into
+/// a wall that is neither climbed nor wall-run stops the move and plays the
+/// bump clip, front or side blended by the wall's angle to the facing.
+/// The potential-obstacle test (`Human::TestForPotentialObstacleCollision`
+/// 00ceee20, called by `TestMoveToObstacleCollisionInterface` 00f44ad6)
+/// needs the vertical speed within this, m/s.
+pub const OBSTACLE_MAX_VZ: f32 = 0.2;
+
+/// The contact must be within this angle of the move direction, radians
+/// (00ceee20: `GetBestContactPointInDirection(.., 0.7853982 = pi/4, ..)`).
+pub const OBSTACLE_CONE: f32 = std::f32::consts::FRAC_PI_4;
+
+/// The contact point must be at least this high above the feet, metres
+/// (00ceee20: contact z >= feet z + 0.5; lower contacts are steps). Our
+/// wall sweeps run at 0.55 and 1.3 m, so every sweep hit qualifies.
+pub const OBSTACLE_MIN_HEIGHT: f32 = 0.5;
+
+/// Walls further than this from the facing (behind the player) take the
+/// other branch, radians (`HumanGround::ProcessObstacleCollision` 00fd0fd2:
+/// |angle| <= 2.3561945 = 135 deg).
+pub const OBSTACLE_FACING: f32 = 3.0 * std::f32::consts::FRAC_PI_4;
+
+/// Our contact probe: the stick direction swept this far from the body,
+/// metres (ours; retail reads the controller's contact manifold).
+pub const OBSTACLE_PROBE: f32 = 0.05;
+
+/// An obstacle collision: the wall normal (horizontal, out of the wall),
+/// the signed angle from the facing to the way into the wall (radians,
+/// + = wall to the left) and the side blend (0 = front clip, 1 = side,
+/// 00fd0fd2: |clamp(angle, +-90 deg)| / 90 deg).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Obstacle {
+    pub normal: Vec2,
+    pub angle: f32,
+    pub blend: f32,
+}
+
+/// Retail Move -> ObstacleCollision: a wall contact with normal `n` while
+/// moving along `dir` (unit) at vertical speed `vz`, facing `facing`.
+pub fn obstacle(n: Vec2, dir: Vec2, facing: Vec2, vz: f32) -> Option<Obstacle> {
+    let into = -n;
+    if vz.abs() > OBSTACLE_MAX_VZ || dir == Vec2::ZERO || into.dot(dir) < OBSTACLE_CONE.cos() {
+        return None;
+    }
+    let angle = facing.angle_to(into);
+    let half = std::f32::consts::FRAC_PI_2;
+    let blend = angle.clamp(-half, half).abs() / half;
+    Some(Obstacle { normal: n, angle, blend })
+}
+
+impl Obstacle {
+    /// The wall is in front of the facing (front / side clip), not behind.
+    pub fn faced(&self) -> bool {
+        self.angle.abs() <= OBSTACLE_FACING
+    }
+
+    /// Still in contact: pushing `dir` within the cone into the same wall
+    /// (retail leaves when the bump action ends, `TestObstacleCollisionToMoveMain`
+    /// 00f305a6; ours when the push stops).
+    pub fn holds(&self, dir: Vec2) -> bool {
+        dir != Vec2::ZERO && (-self.normal).dot(dir) >= OBSTACLE_CONE.cos()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,5 +137,26 @@ mod tests {
         assert!(!edge_stop(Some(2.0)));
         assert!(edge_stop(Some(2.1)));
         assert!(edge_stop(None));
+    }
+
+    #[test]
+    fn obstacle_cone_and_blend() {
+        let n = -Vec2::X; // wall ahead along +X
+        let o = obstacle(n, Vec2::X, Vec2::X, 0.0).unwrap();
+        assert_eq!(o.blend, 0.0);
+        assert!(o.faced());
+        // pushing 44 deg off: still; 46 deg: slides past
+        assert!(obstacle(n, Vec2::from_angle(44f32.to_radians()), Vec2::X, 0.0).is_some());
+        assert!(obstacle(n, Vec2::from_angle(46f32.to_radians()), Vec2::X, 0.0).is_none());
+        // falling or rising faster than 0.2 m/s: no obstacle
+        assert!(obstacle(n, Vec2::X, Vec2::X, 0.3).is_none());
+        assert!(obstacle(n, Vec2::X, Vec2::X, -0.19).is_some());
+        // facing 45 deg away: half side blend; 90 and more: full side
+        let o = obstacle(n, Vec2::X, Vec2::from_angle(-std::f32::consts::FRAC_PI_4), 0.0).unwrap();
+        assert!((o.blend - 0.5).abs() < 1e-5 && o.angle > 0.0);
+        let o = obstacle(n, Vec2::X, Vec2::from_angle(2.5), 0.0).unwrap();
+        assert_eq!(o.blend, 1.0);
+        assert!(!o.faced());
+        assert!(o.holds(Vec2::X) && !o.holds(Vec2::Y) && !o.holds(Vec2::ZERO));
     }
 }
