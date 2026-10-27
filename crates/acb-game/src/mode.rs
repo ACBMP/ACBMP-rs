@@ -245,6 +245,8 @@ pub struct Match {
     pub over: bool,
     /// This tick's decisions (cleared at every step).
     pub events: Vec<MatchEvent>,
+    /// Escort: the VIP cycle (`World::escort` sets it up; Duel: `None`).
+    pub vips: Option<crate::vip::Vips>,
 }
 
 /// Seconds to whole ticks.
@@ -273,6 +275,7 @@ impl Match {
             threat_of: vec![None; players],
             over: false,
             events: Vec::new(),
+            vips: None,
         }
     }
 

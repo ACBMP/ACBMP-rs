@@ -223,6 +223,26 @@ pub struct Crowd {
     walk: Clip,
 }
 
+impl Crowd {
+    /// The navmesh and the crowd's idle and walk clips.
+    pub fn load(archive: &Archive, builtins: Option<&BuiltinTracks>) -> anyhow::Result<Crowd> {
+        let load = |name: &str| {
+            by_name(archive, "Animation", name)
+                .and_then(|a| Clip::load_with(archive, a, builtins))
+                .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))
+        };
+        let nav = Nav::load(archive).ok_or_else(|| anyhow::anyhow!("the map has no navmesh"))?;
+        // the walk cycle is two half strides (left foot, right foot)
+        let walk = load("xx_l_walk_hipm_footl")?.then(&load("xx_l_walk_hipm_footr")?);
+        Ok(Crowd { nav, idle: load("xx_l_wait_hipm_footl")?, walk })
+    }
+
+    /// Walking speed of the walk cycle's root motion, m/s.
+    pub fn pace(&self) -> f32 {
+        self.walk.root_motion(self.walk.length).w_axis.truncate().length() / self.walk.length.max(1e-3)
+    }
+}
+
 /// What to put in a [`World`].
 pub struct Setup<'a> {
     /// Characters with the names they were loaded by (personas, for their
@@ -267,6 +287,8 @@ pub struct World {
     /// [`rules::HISTORY`] ticks (oldest first): lag compensation checks a
     /// kill against where the killer saw its victim.
     pub seen: std::collections::VecDeque<Vec<rules::Actor>>,
+    /// Escort VIP ways per attacking team (static per map; not saved).
+    pub vip_ways: Vec<(rules::Team, Arc<vip::WaySet>)>,
 }
 
 /// An Entity or EntityBuilder by name.
@@ -315,6 +337,7 @@ impl World {
             tick: 0,
             mode: None,
             seen: Default::default(),
+            vip_ways: Vec::new(),
         };
         let characters = &setup.characters;
         if characters.is_empty() {
@@ -378,15 +401,7 @@ impl World {
             }
         }
         if setup.crowd > 0 {
-            let load = |name: &str| {
-                by_name(archive, "Animation", name)
-                    .and_then(|a| Clip::load_with(archive, a, builtins))
-                    .ok_or_else(|| anyhow::anyhow!("{name}: animation not found"))
-            };
-            let nav = Nav::load(archive).ok_or_else(|| anyhow::anyhow!("--crowd: the map has no navmesh"))?;
-            // the walk cycle is two half strides (left foot, right foot)
-            let walk = load("xx_l_walk_hipm_footl")?.then(&load("xx_l_walk_hipm_footr")?);
-            let crowd = Crowd { nav, idle: load("xx_l_wait_hipm_footl")?, walk };
+            let crowd = Crowd::load(archive, builtins)?;
             for i in 0..setup.crowd {
                 let character = characters[(count + i) % characters.len()].1.clone();
                 let root_bone = character.skeleton.bones.first().map(|b| b.id);
@@ -478,6 +493,91 @@ impl World {
     }
 
     /// The simulated time the next [`World::step`] runs at.
+    /// Starts an Escort (teamvip) match: adds [`vip::NB_VIPS`] VIP bodies
+    /// (crowd walkers; our reading: lookalikes of the loaded personas, as
+    /// retail's VIP skins ship no data we can map), generates the VIP ways
+    /// for each team as the hunters (Escort teams use team spawn TeamIndex
+    /// team + 1, our reading) and loads the crowd clips if there is no
+    /// crowd. The VIPs spawn on the first tick.
+    pub fn escort(&mut self, archive: &Archive, builtins: Option<&BuiltinTracks>, mut teams: rules::Teams, config: mode::MatchConfig, spawns: Vec<(Vec3, f32)>) -> anyhow::Result<()> {
+        if self.crowd.is_none() {
+            self.crowd = Some(Crowd::load(archive, builtins)?);
+        }
+        let Some(crowd) = &self.crowd else { unreachable!() };
+        let team_spawns = vip::team_spawns(archive);
+        let mut all: Vec<rules::Team> = teams.team.clone();
+        all.push(teams.attacking_team);
+        all.sort_unstable();
+        all.dedup();
+        for t in all {
+            if self.vip_ways.iter().any(|(k, _)| *k == t) {
+                continue;
+            }
+            let avoid: Vec<Vec3> = team_spawns.iter().filter(|s| s.0 == t as u32 + 1).map(|s| s.1).collect();
+            let ways = vip::ways_for(&crowd.nav, &avoid);
+            eprintln!("escort: team {t} hunting: {} VIP ways", ways.len());
+            self.vip_ways.push((t, Arc::new(vip::WaySet::new(ways))));
+        }
+        let start = self.ways_of(teams.attacking_team).and_then(|w| w.fwd.first().map(|w| w.start())).unwrap_or(Vec3::ZERO);
+        let mut bodies = Vec::new();
+        for i in 0..vip::NB_VIPS {
+            let Some(src) = self.bodies.get(i % self.bodies.len().max(1)) else { anyhow::bail!("escort: no character for the VIPs") };
+            let character = src.character.clone();
+            let root_bone = character.skeleton.bones.first().map(|b| b.id);
+            let model = match root_bone {
+                Some(id) if crowd.walk.drives(id) => Mat4::IDENTITY,
+                _ => character.model_to_entity(),
+            };
+            let entity = Mat4::from_translation(start);
+            bodies.push(self.bodies.len());
+            self.bodies.push(Body::new(character, entity, entity, model, 0.0, None));
+        }
+        teams.escorted = bodies.clone();
+        teams.vips.clear();
+        self.mode = Some(mode::Match { vips: Some(vip::Vips::new(bodies)), ..mode::Match::escort(teams, config, spawns) });
+        Ok(())
+    }
+
+    /// VIP ways with `team` hunting (after [`World::escort`]).
+    pub fn ways_of(&self, team: rules::Team) -> Option<Arc<vip::WaySet>> {
+        self.vip_ways.iter().find(|(t, _)| *t == team).map(|(_, w)| w.clone())
+    }
+
+    /// Escort: steps the VIP cycle after the match tick: kills of this
+    /// tick, timers, (re)spawns, walking; keeps [`rules::Teams::vips`] to
+    /// the targetable ones.
+    fn step_vips(&mut self, kills: &[(usize, usize)]) {
+        let Some(m) = &mut self.mode else { return };
+        let mode::Mode::Escort(teams) = &mut m.mode else { return };
+        let Some(v) = &mut m.vips else { return };
+        let (Some(crowd), Some(ways)) = (&self.crowd, self.vip_ways.iter().find(|(t, _)| *t == teams.attacking_team).map(|(_, w)| w.clone())) else { return };
+        v.events.clear();
+        for &(killer, body) in kills {
+            v.killed(body, killer);
+        }
+        let hunters: Vec<Vec3> = self.players.iter().enumerate().filter(|(i, _)| teams.team.get(*i).is_some_and(|&t| t == teams.attacking_team)).map(|(_, p)| p.pos).collect();
+        for s in v.tick(&ways, &hunters) {
+            let b = &mut self.bodies[v.bodies[s]];
+            b.scripted = None;
+            b.agent = None;
+        }
+        v.walk(&crowd.nav, &ways, crowd.pace(), crowd.walk.length, DT);
+        teams.vips = v.targets();
+        if trace() {
+            for e in &v.events {
+                eprintln!("vip: t {:.3} {e:?}", self.time);
+            }
+            if self.tick % 60 == 0 {
+                for (s, slot) in v.slots.iter().enumerate() {
+                    if let Some(x) = slot {
+                        let p = x.walker.pos;
+                        eprintln!("vip {s} body {} way {}{} at {:.2} {:.2} {:.2} next {} checkpoints {}", v.bodies[s], x.way, if x.back { " back" } else { "" }, p.x, p.y, p.z, x.walker.next, x.checkpoints);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn next_time(&self) -> f32 {
         self.time + DT
     }
@@ -508,6 +608,12 @@ impl World {
             None => (rules::Rules::default(), None, vec![true; self.players.len()]),
         };
         let mut actions = Vec::new();
+        // Escort: VIPs hunters may kill this tick, and who killed which
+        let vip_targets: Vec<usize> = match self.mode.as_ref().map(|m| &m.mode) {
+            Some(mode::Mode::Escort(t)) => t.vips.clone(),
+            _ => Vec::new(),
+        };
+        let mut vip_kills = Vec::new();
         let stances: Vec<rules::Stance> = self.players.iter().map(|p| p.actor().stance).collect();
         for (i, p) in self.players.iter_mut().enumerate() {
             let input = if in_control[i] { inputs.get(i).copied().unwrap_or_default() } else { PlayerInput { cam_yaw: inputs.get(i).map_or(0.0, |x| x.cam_yaw), ..Default::default() } };
@@ -525,6 +631,8 @@ impl World {
             if relations.is_some() && p.kill.is_some() && !was_attacking {
                 if let Some(v) = (0..n_players).find(|&j| j != p.body && !was_scripted[j] && self.bodies[j].scripted.is_some()) {
                     actions.push((i, v, p.kill.as_ref().map_or(kill::WALK, |k| k.set())));
+                } else if let Some(v) = vip_targets.iter().copied().find(|&j| !was_scripted[j] && self.bodies[j].scripted.is_some()) {
+                    vip_kills.push((i, v));
                 }
             }
             if let Some(before) = before {
@@ -587,6 +695,7 @@ impl World {
                 self.place_player(p, at, yaw);
             }
         }
+        self.step_vips(&vip_kills);
         self.seen.push_back(self.players.iter().map(|p| p.actor()).collect());
         while self.seen.len() > rules::HISTORY {
             self.seen.pop_front();
@@ -599,8 +708,19 @@ impl World {
         for p in self.bodies.iter().map(|a| a.entity.w_axis.truncate()) {
             near.entry(bucket(p)).or_default().push(p);
         }
-        for a in self.bodies.iter_mut().skip(skip) {
+        let vips = self.mode.as_ref().and_then(|m| m.vips.as_ref());
+        for (i, a) in self.bodies.iter_mut().enumerate().skip(skip) {
             let c = a.character.clone();
+            // a living VIP walks its way (a dead one plays its kill clip)
+            if let (Some(v), Some(crowd)) = (vips, &self.crowd) {
+                if let Some(x) = v.slot_of(i).and_then(|s| v.slots[s].as_ref()) {
+                    a.entity = Mat4::from_rotation_translation(Quat::from_rotation_z(x.walker.yaw), x.walker.pos);
+                    let pose = crowd.walk.sample(&c.skeleton, x.phase * crowd.walk.length);
+                    let world = a.entity * a.model;
+                    a.show(world, pose);
+                    continue;
+                }
+            }
             if let (Some(agent), Some(crowd)) = (&mut a.agent, &self.crowd) {
                 let (bx, by) = bucket(agent.pos);
                 let others: Vec<Vec3> =

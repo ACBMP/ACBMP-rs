@@ -263,9 +263,272 @@ impl Walker {
     }
 }
 
+/// `GBrick_SpawnVIPs` TimeBeforeRespawnAllVIPs default (ReadFromXML
+/// 0x012d1376): all VIPs dead -> this long -> all respawn.
+pub const TIME_BEFORE_RESPAWN_ALL: f32 = 5.0;
+/// HuntersDelayBeforeRespawnAllVIPs: respawned VIPs become hunter targets
+/// this long after they appear (not on the first spawn of a round).
+pub const HUNTERS_DELAY: f32 = 10.0;
+
+impl Way {
+    /// The same way walked goal to start; its last point (the old start)
+    /// is a checkpoint like the old goal.
+    pub fn reversed(&self) -> Way {
+        let last = self.points.len().saturating_sub(1);
+        let mut checkpoints: Vec<usize> = self.checkpoints.iter().filter(|&&i| i != last && i != 0).map(|&i| last - i).collect();
+        checkpoints.push(last);
+        checkpoints.sort_unstable();
+        checkpoints.dedup();
+        Way { points: self.points.iter().rev().copied().collect(), checkpoints }
+    }
+}
+
+/// The ways of one map and attacking team, each also reversed.
+#[derive(Clone, Debug)]
+pub struct WaySet {
+    pub fwd: Vec<Way>,
+    pub back: Vec<Way>,
+}
+
+impl WaySet {
+    pub fn new(fwd: Vec<Way>) -> WaySet {
+        let back = fwd.iter().map(Way::reversed).collect();
+        WaySet { fwd, back }
+    }
+
+    pub fn get(&self, way: usize, back: bool) -> &Way {
+        if back { &self.back[way] } else { &self.fwd[way] }
+    }
+}
+
+/// `ChooseBestVipWay` (0x0130be7e): refill the pool from all ways when it
+/// is empty, then sort by distance to the hunters and take the first.
+/// Our reading of the sort: the nearest way whose start is at least
+/// `MIN_DIST_FROM_KILLERS` from every hunter; if none is, the farthest.
+/// Ties go to the lower index. Takes the way out of the pool.
+pub fn choose_way(pool: &mut Vec<usize>, ways: &[Way], killers: &[Vec3]) -> Option<usize> {
+    if pool.is_empty() {
+        pool.extend(0..ways.len());
+    }
+    let dist = |w: usize| killers.iter().map(|k| (ways[w].start() - *k).truncate().length()).fold(f32::INFINITY, f32::min);
+    let ok = pool.iter().copied().filter(|&w| dist(w) >= MIN_DIST_FROM_KILLERS).min_by(|&a, &b| dist(a).total_cmp(&dist(b)).then(a.cmp(&b)));
+    let pick = ok.or_else(|| pool.iter().copied().max_by(|&a, &b| dist(a).total_cmp(&dist(b)).then(b.cmp(&a))))?;
+    pool.retain(|&w| w != pick);
+    Some(pick)
+}
+
+/// A living VIP walking its way.
+#[derive(Clone, Debug)]
+pub struct Vip {
+    pub way: usize,
+    /// Walking the way goal to start. Our reading: retail has no shipped
+    /// data for what a VIP does at its way's end (the round may end on it,
+    /// MPEMT_ENDROUND_*_VIPEscaped); ours turns round and walks it back.
+    pub back: bool,
+    pub walker: Walker,
+    /// Checkpoints passed since it spawned (the `n` of the checkpoint event).
+    pub checkpoints: u32,
+    /// Walk cycle phase 0..1.
+    pub phase: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum VipEvent {
+    /// VIP slot `vip` appeared on `way` (body `body`).
+    Spawned { vip: usize, body: usize, way: usize },
+    /// The VIPs became hunter targets (after `HUNTERS_DELAY`).
+    Targetable,
+    /// Retail GameModeEvent 0xf sub 2.
+    Killed { vip: usize, body: usize, killer: usize, way: usize },
+    /// Retail GameModeEvent 0xf sub 1: VIP, way, waypoint, n passed so far.
+    Checkpoint { vip: usize, way: usize, checkpoint: usize, n: u32 },
+    /// The VIP reached its way's end (it turns round; see [`Vip::back`]).
+    WayEnd { vip: usize, way: usize },
+}
+
+/// The VIP cycle (`GBrick_SpawnVIPs::Update` 0x0130c150): NbVIPs spawn on
+/// the best ways; a killed VIP is removed and its way returned to the pool
+/// (no one-by-one replacement); when all are dead, `TIME_BEFORE_RESPAWN_ALL`
+/// later all respawn, and hunters may target them `HUNTERS_DELAY` after
+/// that (except on the first spawn). Everything in ticks: part of the
+/// simulated match state.
+#[derive(Clone, Debug)]
+pub struct Vips {
+    /// Body reserved for each VIP slot.
+    pub bodies: Vec<usize>,
+    pub slots: Vec<Option<Vip>>,
+    /// Ways free to spawn on.
+    pub pool: Vec<usize>,
+    /// Ticks until all VIPs (re)spawn.
+    pub respawn_in: Option<u32>,
+    /// Ticks until hunters may target the living VIPs.
+    pub target_in: u32,
+    /// Spawns so far (0: the next is the first of the round).
+    pub spawns: u32,
+    /// This tick's events (the world clears them every tick).
+    pub events: Vec<VipEvent>,
+}
+
+impl Vips {
+    /// VIPs on `bodies`; they spawn on the first tick.
+    pub fn new(bodies: Vec<usize>) -> Vips {
+        let slots = vec![None; bodies.len()];
+        Vips { bodies, slots, pool: Vec::new(), respawn_in: Some(0), target_in: 0, spawns: 0, events: Vec::new() }
+    }
+
+    /// Bodies hunters may target now.
+    pub fn targets(&self) -> Vec<usize> {
+        if self.target_in > 0 {
+            return Vec::new();
+        }
+        self.bodies.iter().zip(&self.slots).filter(|(_, s)| s.is_some()).map(|(&b, _)| b).collect()
+    }
+
+    pub fn slot_of(&self, body: usize) -> Option<usize> {
+        self.bodies.iter().position(|&b| b == body)
+    }
+
+    /// Hunter `killer` killed body `body`: if it is a living VIP, it is
+    /// removed and its way goes back to the pool (`HandleKillEvent`
+    /// 0x01301724); the last one starts the respawn timer.
+    pub fn killed(&mut self, body: usize, killer: usize) -> bool {
+        let Some(vip) = self.slot_of(body) else { return false };
+        let Some(v) = self.slots[vip].take() else { return false };
+        if !self.pool.contains(&v.way) {
+            self.pool.push(v.way);
+        }
+        self.events.push(VipEvent::Killed { vip, body, killer, way: v.way });
+        if self.slots.iter().all(Option::is_none) {
+            self.respawn_in = Some(crate::mode::ticks(TIME_BEFORE_RESPAWN_ALL));
+        }
+        true
+    }
+
+    /// One tick of timers: spawns when due (ways chosen against `killers`,
+    /// the hunters' positions). Returns the slots that spawned.
+    pub fn tick(&mut self, ways: &WaySet, killers: &[Vec3]) -> Vec<usize> {
+        if self.target_in > 0 {
+            self.target_in -= 1;
+            if self.target_in == 0 {
+                self.events.push(VipEvent::Targetable);
+            }
+        }
+        match self.respawn_in {
+            Some(0) => {}
+            Some(n) => {
+                self.respawn_in = Some(n - 1);
+                return Vec::new();
+            }
+            None => return Vec::new(),
+        }
+        self.respawn_in = None;
+        let mut spawned = Vec::new();
+        for vip in 0..self.slots.len() {
+            let Some(way) = choose_way(&mut self.pool, &ways.fwd, killers) else { break };
+            let walker = Walker::new(&ways.fwd[way]);
+            // spread the walk cycles (our choice)
+            let phase = (vip as f32 * 0.37).fract();
+            self.slots[vip] = Some(Vip { way, back: false, walker, checkpoints: 0, phase });
+            self.events.push(VipEvent::Spawned { vip, body: self.bodies[vip], way });
+            spawned.push(vip);
+        }
+        self.target_in = if self.spawns == 0 { 0 } else { crate::mode::ticks(HUNTERS_DELAY) };
+        self.spawns += 1;
+        spawned
+    }
+
+    /// Walks every living VIP one step at `pace` m/s; a walk cycle of
+    /// `cycle` seconds advances the phase.
+    pub fn walk(&mut self, nav: &Nav, ways: &WaySet, pace: f32, cycle: f32, dt: f32) {
+        for (vip, slot) in self.slots.iter_mut().enumerate() {
+            let Some(v) = slot else { continue };
+            let way = ways.get(v.way, v.back);
+            if let Some(i) = v.walker.step(nav, way, pace, dt) {
+                if way.is_checkpoint(i) {
+                    v.checkpoints += 1;
+                    self.events.push(VipEvent::Checkpoint { vip, way: v.way, checkpoint: i, n: v.checkpoints });
+                }
+            }
+            if v.walker.arrived(way) {
+                self.events.push(VipEvent::WayEnd { vip, way: v.way });
+                v.back = !v.back;
+                let yaw = v.walker.yaw;
+                v.walker = Walker::new(ways.get(v.way, v.back));
+                v.walker.yaw = yaw;
+            }
+            v.phase = (v.phase + dt / cycle.max(1e-3)).fract();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Straight 100 m ways along +X at y = 0, 100, 200, ...
+    fn lines(n: usize) -> WaySet {
+        let way = |k: usize| {
+            let y = k as f32 * 100.0;
+            Way { points: vec![Vec3::new(0.0, y, 0.0), Vec3::new(50.0, y, 0.0), Vec3::new(100.0, y, 0.0)], checkpoints: vec![1, 2] }
+        };
+        WaySet::new((0..n).map(way).collect())
+    }
+
+    #[test]
+    fn cycle_in_ticks() {
+        let ways = lines(4);
+        // a hunter by way 0's start: way 0 is too close, way 1 (100 m) is the nearest far enough
+        let killers = [Vec3::new(0.0, 10.0, 0.0)];
+        let mut v = Vips::new(vec![7, 8]);
+        assert_eq!(v.tick(&ways, &killers), vec![0, 1]);
+        let way_of = |v: &Vips, s: usize| v.slots[s].as_ref().unwrap().way;
+        assert_eq!((way_of(&v, 0), way_of(&v, 1)), (1, 2));
+        // first spawn: targets at once
+        assert_eq!(v.targets(), vec![7, 8]);
+        // kill one: removed, its way back in the pool, no respawn yet
+        assert!(v.killed(7, 0));
+        assert!(!v.killed(7, 0), "already dead");
+        assert_eq!(v.targets(), vec![8]);
+        assert!(v.pool.contains(&1));
+        for _ in 0..1000 {
+            assert!(v.tick(&ways, &killers).is_empty());
+        }
+        // the second: 5 s (300 ticks) later both respawn
+        assert!(v.killed(8, 1));
+        assert_eq!(v.respawn_in, Some(300));
+        let mut at = None;
+        // t 0: the tick of the kill (World::step kills, then ticks)
+        for t in 0..=400 {
+            if !v.tick(&ways, &killers).is_empty() {
+                at = Some(t);
+                break;
+            }
+        }
+        assert_eq!(at, Some(300));
+        assert!(v.slots.iter().all(Option::is_some));
+        // respawned: hunters wait 10 s (600 ticks)
+        assert!(v.targets().is_empty());
+        for _ in 0..599 {
+            v.tick(&ways, &killers);
+        }
+        assert!(v.targets().is_empty());
+        v.events.clear();
+        v.tick(&ways, &killers);
+        assert_eq!(v.events, vec![VipEvent::Targetable]);
+        assert_eq!(v.targets(), vec![7, 8]);
+        // every spawned way starts >= 35 m from the killer
+        for s in v.slots.iter().flatten() {
+            assert!(ways.fwd[s.way].start().distance(killers[0]) >= MIN_DIST_FROM_KILLERS);
+        }
+    }
+
+    #[test]
+    fn reversed_way_flags_its_goal() {
+        let w = &lines(1).fwd[0];
+        let r = w.reversed();
+        assert_eq!(r.points[0], w.points[2]);
+        assert_eq!(r.checkpoints, vec![1, 2]);
+    }
 
     #[test]
     fn flags_every_spacing_and_goal() {
