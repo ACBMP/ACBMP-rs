@@ -966,3 +966,29 @@ Pure, deterministic functions the server and client prediction share (no clock, 
   lock/selection exists in our code.
 - Wire v6: PlayerGame.threat u16 (*65535), client applies it with the server state. HUD: " | threat NN%"
   while holding a contract and not chasing.
+
+## Retail Human* state graph (Phase 3)
+Spec: `~/.cache/acbmp-re/findings/human-states.md` (state list, transition table with
+values, sources, our equivalent and status; full name list in `human-states-graph.txt`).
+- Retail FSM `...Main` tests only read flags or "anim finished"; the decisions live in
+  the states' Update/CheckFor* functions and in the player brain
+  `AssassinTaskGround::UpdateGroundMovement` (Mac 0166fb1c), which issues interface
+  commands (FallOffEdge, UnbalanceOnEdge, JumpToTarget, EnterClimb, EnterHayStack, ...).
+- Tuning is code constants: HumanGroundData/HumanInAirData/ClimbData/NarrowObjectData
+  are runtime structs with no reflected roots in DataPC.forge.
+- Walking off: FallOffEdge needs gap depth >= 0.53 m (ours: drop > STEP 0.6); smaller
+  drops are StepDown. EdgeStop / pull-down need > 2.0 m (matches LEDGE_STOP).
+- In air, per tick: water well > targeted ledge grab > default grasp > boats >
+  haystacks > step-off > horses > landing. Ours checks the haystack before the catch.
+- Default grasp only while the fall is < 2.0 m (unless flagged), 1.2 m guidance probe
+  at hand height; ours needs a fall > 0.3 m and vz < -1 instead.
+- Landing contact classes: normal 0-45 deg ground, 45-70 slope, < 135 wall; a 0.3 m
+  landing delay after take-off. We have no slope state.
+- Haystack from the ground: a physical contact, stick within 50 deg of the contact
+  normal, facing within 100 deg. Ours: 1.2 m proximity in high profile.
+- Jumps: the brain's jump flag needs a button held (or pressed within 0.5 s) and the
+  stick within 80 deg of facing. Ours jumps on speed >= 1.5 m/s with no button.
+- Missing here: standing JumpImpulsion, targeted ledge grabs, StepOff, TurnOnWall,
+  ObstacleCollision, NarrowObject FreeRun as a state, beam entry anim.
+- Port order for B2: in-air order + landing + grasp gate; edge fall/step/pull-down;
+  jump input + JumpImpulsion + hang targets; haystack contact, obstacle state, beam entry.
