@@ -42,10 +42,54 @@ pub const DT: f32 = 1.0 / 60.0;
 /// Local bone transforms (translation, rotation) in skeleton order.
 pub type Pose = Vec<(Vec3, Quat)>;
 
-/// `ACBMP_TRACE` is set: print player state and decisions.
+/// `ACBMP_TRACE` is set (and is not `csv:<path>`): print player state and decisions.
 pub fn trace() -> bool {
     static TRACE: OnceLock<bool> = OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var_os("ACBMP_TRACE").is_some())
+    *TRACE.get_or_init(|| std::env::var_os("ACBMP_TRACE").is_some() && trace_csv().is_none())
+}
+
+/// CSV columns written by `ACBMP_TRACE=csv:<path>`, identical to `acb-trace record`
+/// (retail captures). Units and axes: findings/trace-format.md.
+pub const TRACE_CSV_HEADER: &str = "tick,t,x,y,z,yaw_deg,vx,vy,vz,hspeed,state,retail_state,anim,anim_t";
+
+type CsvOut = std::sync::Mutex<std::io::BufWriter<std::fs::File>>;
+
+/// `ACBMP_TRACE=csv:<path>`: the per-tick CSV writer (header already written).
+pub fn trace_csv() -> Option<&'static CsvOut> {
+    use std::io::Write;
+    static CSV: OnceLock<Option<CsvOut>> = OnceLock::new();
+    CSV.get_or_init(|| {
+        let v = std::env::var("ACBMP_TRACE").ok()?;
+        let path = v.strip_prefix("csv:")?;
+        let f = std::fs::File::create(path).map_err(|e| eprintln!("ACBMP_TRACE: {path}: {e}")).ok()?;
+        let mut f = std::io::BufWriter::new(f);
+        writeln!(f, "{TRACE_CSV_HEADER}").ok()?;
+        Some(std::sync::Mutex::new(f))
+    })
+    .as_ref()
+}
+
+/// One `ACBMP_TRACE=csv` row for a player (velocity = this tick's displacement / DT).
+fn trace_csv_row(tick: u64, time: f32, p: &player::Player) {
+    use std::io::Write;
+    let Some(csv) = trace_csv() else { return };
+    let v = (p.pos - p.prev_pos) / DT;
+    let (state, retail) = p.trace_state();
+    let row = format!(
+        "{tick},{time:.4},{:.4},{:.4},{:.4},{:.2},{:.4},{:.4},{:.4},{:.4},{state},{retail},,",
+        p.pos.x,
+        p.pos.y,
+        p.pos.z,
+        p.yaw.to_degrees(),
+        v.x,
+        v.y,
+        v.z,
+        v.truncate().length()
+    );
+    if let Ok(mut f) = csv.lock() {
+        let _ = writeln!(f, "{row}");
+        let _ = f.flush();
+    }
 }
 
 /// `ACBMP_TRACE=pose`: print the player's pose change every tick.
@@ -488,6 +532,9 @@ impl World {
             if let Some(b) = self.bodies.get_mut(p.body) {
                 b.entity = p.entity();
             }
+        }
+        if let Some(p) = self.players.first() {
+            trace_csv_row(self.tick, t, p);
         }
         // blending: walking among a crowd group (NPCs, persona lookalikes)
         let npcs: Vec<rules::Member> = self

@@ -63,7 +63,19 @@ hunting you, score, time and the last event are in the window title.
 
 Useful extras: `--at x,y,z,yaw` starts the player somewhere else (see
 `tools/gates.sh` for spots next to the climbs and jumps), `ACBMP_TRACE=1`
-prints every tick's player state to stderr.
+prints every tick's player state to stderr, and `ACBMP_TRACE=csv:run.csv`
+writes it as CSV (one row per 60 Hz tick, same columns as the retail captures).
+
+### Retail captures (kit)
+
+`tools/make-capture-kit.sh` builds `dist/capture-kit.tar.gz`: a static
+`acb-trace`, its `offsets.toml`, `capture.sh` and a README. On the machine that
+runs retail ACBMP.exe under Wine: allow ptrace (`sudo sysctl
+kernel.yama.ptrace_scope=0` or `sudo setcap cap_sys_ptrace+ep acb-trace`), get
+into a level, run `./acb-trace check` and send back `diag.txt` (the memory
+offsets are not confirmed on a live game yet). Then walk to a start spot with
+`./acb-trace where --to x,y,z,yaw` and record with `./capture.sh MOVE...` (or
+`./acb-trace record --out FILE`). The animation columns are still empty.
 
 ### Giving feedback
 

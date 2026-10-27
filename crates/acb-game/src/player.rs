@@ -75,6 +75,26 @@ impl Player {
 }
 
 impl Player {
+    /// `ACBMP_TRACE=csv` state column: (our state, nearest retail Human* state or "").
+    /// The full mapping table is left to tasks A2/B2 (findings/human-states.md).
+    pub fn trace_state(&self) -> (&'static str, &'static str) {
+        if self.kill.is_some() {
+            ("kill", "")
+        } else if self.hide.as_ref().is_some_and(|h| h.seated()) {
+            ("sit", "")
+        } else if self.hide.is_some() {
+            ("hide", "HumanHayStack")
+        } else if self.climb.is_some() {
+            ("climb", "HumanClimb")
+        } else if self.flight.is_some() || self.loco.airborne() {
+            ("air", "HumanInAir")
+        } else if self.loco.on_beam() {
+            ("beam", "HumanNarrowObject")
+        } else {
+            ("ground", "HumanGround")
+        }
+    }
+
     /// The player as the rules see it.
     pub fn actor(&self) -> rules::Actor {
         let stance = if self.kill.is_some() {

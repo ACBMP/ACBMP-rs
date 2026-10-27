@@ -65,6 +65,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "acb-trace"
+version = "0.1.0"
+
+[[package]]
 name = "acb-viewer"
 version = "0.1.0"
 dependencies = [
