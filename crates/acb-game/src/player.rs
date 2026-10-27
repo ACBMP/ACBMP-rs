@@ -680,11 +680,9 @@ pub(crate) fn drive(
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
             // retail jump flag (0166fb1c): Legs held or pressed within
             // 0.5 s, stick within 80 deg of the facing; ours also needs a
-            // run's speed (the standing jump is the impulsion below)
+            // run's speed. There is no manual jump: jumps only come out of
+            // freerunning at an edge or gap.
             let running = p.loco.speed >= 1.5 && human::jump::freerun(&p.legs, dir, fwd);
-            // retail Move -> JumpImpulsion -> JumpImpulsionStraight: Legs
-            // pressed with the stick released, early in any action
-            let standing = dir == Vec2::ZERO && p.legs.pressed && human::jump::impulsion_allowed(p.loco.action_ratio(clips));
             // freerun: up onto a ledge ahead
             // (never onto a haystack's top: running into one hides)
             let haystack = |t: Vec3| clipset.hide.as_ref().is_some_and(|h| h.spots.iter().any(|s| s.seat.is_none() && s.outside(t) <= 0.0 && t.z <= s.top() + 0.5));
@@ -790,17 +788,6 @@ pub(crate) fn drive(
             if let Some((target, flight, narrow)) = up.or(across) {
                 jump::take_off(p, clips, sk, target, flight, if narrow { "narrow top" } else { why });
             } else {
-                if standing && !ledge && p.loco.speed < 1.5 {
-                    // the straight jump: up and down on the spot
-                    p.loco.start_fall();
-                    p.vel = Vec3::Z * human::jump::straight_speed();
-                    p.fall_from = p.pos.z;
-                    p.air = Air::start(p.pos.z, Some(0.0));
-                    p.edge = None;
-                    if crate::trace() {
-                        eprintln!("jump straight from {:.2?}", p.pos.to_array());
-                    }
-                }
                 if ledge {
                     p.loco.start_fall();
                     p.vel = (delta / dt.max(1e-4)).extend(0.0);

@@ -23,16 +23,6 @@ pub const LEGS_DELAY: f32 = 0.5;
 /// dot(stick, facing) > cos 80 deg (0166fb1c 1671029, 0.17364818).
 pub const JUMP_CONE_COS: f32 = 0.173_648_18;
 
-/// A standing jump (`HumanGround` Move -> JumpImpulsion) may interrupt the
-/// current action only before this share of it has played
-/// (`TestMoveToJumpImpulsionOnHumanGroundInterfaceCommand_JumpImpulsion`
-/// 00f6a118: `GetCurrentActionRatio < 0.33`; no action = allowed).
-pub const IMPULSION_RATIO: f32 = 0.33;
-
-/// Peak of the straight jump (JumpImpulsionStraight -> InAir), metres.
-/// Ours: retail drives it from the impulsion clip, not recovered yet.
-pub const STRAIGHT_JUMP_HEIGHT: f32 = 0.5;
-
 /// The Legs button over time, counted in fixed ticks (deterministic).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Legs {
@@ -69,17 +59,6 @@ pub fn in_cone(dir: Vec2, facing: Vec2) -> bool {
 /// The freerun jump gate: Legs held or just pressed, stick in the cone.
 pub fn freerun(legs: &Legs, dir: Vec2, facing: Vec2) -> bool {
     legs.wants_jump() && in_cone(dir, facing)
-}
-
-/// May a standing jump start, given the running action's played share
-/// (`None`: no action)?
-pub fn impulsion_allowed(ratio: Option<f32>) -> bool {
-    ratio.is_none_or(|r| r < IMPULSION_RATIO)
-}
-
-/// Take-off speed of the straight jump, m/s up.
-pub fn straight_speed() -> f32 {
-    (2.0 * crate::jump::GRAVITY * STRAIGHT_JUMP_HEIGHT).sqrt()
 }
 
 #[cfg(test)]
@@ -125,16 +104,5 @@ mod tests {
         l.tick(true, DT);
         assert!(freerun(&l, at(45.0), f));
         assert!(!freerun(&l, at(90.0), f));
-    }
-
-    #[test]
-    fn standing_jump_ratio() {
-        assert!(impulsion_allowed(None));
-        assert!(impulsion_allowed(Some(0.0)));
-        assert!(impulsion_allowed(Some(0.32)));
-        assert!(!impulsion_allowed(Some(0.33)));
-        assert!(!impulsion_allowed(Some(0.9)));
-        let v = straight_speed();
-        assert!((v * v / (2.0 * crate::jump::GRAVITY) - STRAIGHT_JUMP_HEIGHT).abs() < 1e-4);
     }
 }

@@ -40,7 +40,7 @@ Controls (on foot):
 | W A S D | move, relative to the camera |
 | (nothing) | low profile: walk; stops at ledges deeper than 2 m and at beam ends |
 | Shift | high profile: run; runs into wall runs and climbs |
-| Space | Legs: sprint (high profile). Freerun jumps (up onto a ledge, across a gap, to a hang across a gap) need Space held or pressed in the last 0.5 s and the move direction within 80° of facing (retail); standing still, Space jumps straight up |
+| Space | Legs: sprint (high profile). Freerun jumps (up onto a ledge, across a gap, to a hang across a gap) need Space held or pressed in the last 0.5 s and the move direction within 80° of facing (retail); there is no jump button: standing still, Space does nothing |
 | F | jump: at a ledge stop (walking into it or standing there), lower onto the wall below |
 | E | kill (your target online; any NPC in free play); walks in from ~4 m |
 | Q | stun (your pursuer online) |

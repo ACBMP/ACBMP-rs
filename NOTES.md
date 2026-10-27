@@ -1028,8 +1028,9 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   Button2 = left mouse, weapon hand, ButtonWantsToKill b16a76). Ours: PlayerInput::sprint (Space) via
   human::jump::Legs (held or pressed within 0.5 s, counted in ticks) + stick within 80 deg (cos 0.1736).
   The run-speed >= 1.5 test stays (ours). Scripted runs tap Space for one tick before the jump.
-- Standing jump (00f6a118): Move -> JumpImpulsion allowed with no action or action ratio < 0.33
-  (Locomotion::action_ratio); ours jumps straight up 0.5 m (retail clip-driven; height not recovered).
+- No manual jump (user, 2026-10-27): the player never jumps on a button press alone. Jumps only come
+  out of freerunning (HP + Legs) at an edge or gap. B2b's standing JumpImpulsion port was removed; the
+  retail state exists, but MP players never reach it by pressing a button.
 - Jump to a hang (TargetedLedgeGrab 0131c1e4): jump::hang_target picks a wall edge facing us within the
   detection range when the gap has no floor within 1.75 m lower; Flight.grab -> Climb::catch on arrival.
   Feet 1.8 m below / 0.35 m out from the grab point are ours. Map test jump_map::hang_targets (471/637 edges).
