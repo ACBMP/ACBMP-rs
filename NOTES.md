@@ -1022,3 +1022,13 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   (protect/checkpoint), kill bonuses as Wanted. Rounds: ChangeAttackerTeam 1 (roles swap), Intro and recap 8 s.
 - Every AC2MP map has 4 team spawn groups (SpawnType 2, TeamIndex 1..4) of 4 spawns.
 - Round length, respawn delay and what the VIP score counts come from unshipped XML: placeholders.
+
+## Escort teams and roles, E1 (2026-10-27, escort-teams)
+- `mode::Mode {Duel (default), Escort(rules::Teams)}` on `Match`; `Match::escort(teams, ..)` builds one. Duel path
+  unchanged (contracts). Escort skips `Contracts::update`, so no contracts, chases or threat meter run yet.
+- `rules::Teams {team: Vec<Team>, attacking_team, vips: Vec<usize>}`, `Role {Hunter, Protector}` from
+  `team == attacking_team`, `Kind {Player(team), Vip, Npc}`; `team_relation`: hunter->VIP Target, protector->hunter
+  Target, hunter->protector Pursuer (hunter may stun it), teammates and protector->VIP Other (no friendly fire),
+  crowd Npc. `Match::on_action` now scores through `Match::relation`, which handles both modes.
+- Hooks for later tasks: `Teams::vips` (body indices, E3 fills it), `attacking_team` (E4 swaps per round),
+  `Teams::alternating(n)` (slot parity: placeholder until E5 sends teams on the wire). No net or proto changes.
