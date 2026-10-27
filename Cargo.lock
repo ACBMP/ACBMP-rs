@@ -101,6 +101,7 @@ name = "acbmp-cli"
 version = "0.1.0"
 dependencies = [
  "acb-anim",
+ "acb-game",
  "acb-net",
  "acb-render",
  "acb-world",

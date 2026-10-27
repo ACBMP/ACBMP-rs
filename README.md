@@ -67,6 +67,9 @@ Useful extras: `--at x,y,z,yaw` starts the player somewhere else (see
 `tools/gates.sh` for spots next to the climbs and jumps), `ACBMP_TRACE=1`
 prints every tick's player state to stderr, and `ACBMP_TRACE=csv:run.csv`
 writes it as CSV (one row per 60 Hz tick, same columns as the retail captures).
+`acbmp ways <map.forge> [--hunters 1..4] [--points]` lists the generated
+Escort VIP ways (length, checkpoints, distance of the start from the hunter
+team spawns); Escort itself is not playable yet.
 
 ### Retail captures (kit)
 

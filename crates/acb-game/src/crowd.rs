@@ -90,6 +90,26 @@ impl Nav {
         Some(Nav { graph, flows, flow_index, main: best, centroid, grid })
     }
 
+    /// Points along every CrowdFlow lane centre line, at most `every`
+    /// metres apart, in data order.
+    pub(crate) fn lane_points(&self, every: f32) -> Vec<Vec3> {
+        let mut out = Vec::new();
+        for f in &self.flows {
+            out.push(Vec3::from(f.points[0]));
+            for w in f.points.windows(2) {
+                let (a, b) = (Vec3::from(w[0]), Vec3::from(w[1]));
+                let n = (a.distance(b) / every).ceil().max(1.0) as usize;
+                out.extend((1..=n).map(|i| a.lerp(b, i as f32 / n as f32)));
+            }
+        }
+        out
+    }
+
+    /// Centroids of the main component's triangles, in data order.
+    pub(crate) fn main_centroids(&self) -> impl Iterator<Item = Vec3> + '_ {
+        self.main.iter().map(|&t| self.centroid[t as usize])
+    }
+
     pub fn triangles(&self) -> usize {
         self.main.len()
     }

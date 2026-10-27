@@ -20,6 +20,7 @@ pub mod action;
 pub mod player;
 pub mod rules;
 pub mod state;
+pub mod vip;
 
 use std::sync::{Arc, OnceLock};
 
