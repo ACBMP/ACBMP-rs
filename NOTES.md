@@ -1044,3 +1044,21 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   crowd Npc. `Match::on_action` now scores through `Match::relation`, which handles both modes.
 - Hooks for later tasks: `Teams::vips` (body indices, E3 fills it), `attacking_team` (E4 swaps per round),
   `Teams::alternating(n)` (slot parity: placeholder until E5 sends teams on the wire). No net or proto changes.
+
+## Escort VIP ways, E2 (2026-10-27, escort-ways)
+- Retail reads the ways from `AdditionalWorldData_TeamVIP` (not shipped on PC), so `acb_game::vip` generates them:
+  `ways_for(&Nav, hunter_spawns) -> Vec<Way { points, checkpoints }>` (up to `WAYS` 4), `team_spawns(&Archive)`
+  (SpawnType 2, (TeamIndex, pos)), `Walker` (follows a way exactly, faces turns at the crowd's 4 rad/s, reports
+  reached waypoints; E3 can drive VIP bodies with it), `clear`/`height` (on-mesh checks).
+- Generation: candidates = CrowdFlow lane points every 5 m (triangle centroids without lanes), snapped to the main
+  navmesh component, >= 35 m (`MIN_DIST_FROM_KILLERS`) from every hunter spawn and 0.3 m from the mesh border. Fixed
+  seed (crowd `Rng`); a way = up to 6 A* legs (crowd `Nav::path`) between candidates, each greedily string-pulled with
+  a 0.2 m clearance either side, until 150..400 m; leg goals stay 30 m from earlier ones, way starts 40 m apart.
+  Checkpoints every 25 m plus the goal (our reading; retail flags hand-placed waypoints). Only `+ - * / sqrt` in the
+  generator, no HashMap iteration: same output everywhere.
+- Navmesh tiles have mm seams (e.g. x = -32 on San Donato): `height` bridges 5 cm, else a walker on a clear
+  segment drops off the mesh at the seam.
+- Small maps can't keep all 16 team spawns 35 m away (Firenze, SanMarco, Siena: 0 ways). Per hunter group (1 or 2)
+  every AC2MP map gets 3-4 ways, so E3 should call `ways_for` with the attacking team's spawn group.
+- San Donato (tests/vip_map.rs): all groups 3 ways 155-183 m; hunters 1 / 2: 4 ways 155-217 m each, 6-9 checkpoints,
+  starts 36-105 m from hunters, walked at 1.4 m/s inside 1.25x length/pace + 5 s. `acbmp ways` lists them.

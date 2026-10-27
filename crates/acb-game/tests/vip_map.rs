@@ -22,10 +22,18 @@ fn san_donato_ways_walkable_far_from_hunters() {
     let nav = Nav::load(&a).unwrap();
     let spawns = vip::team_spawns(&a);
     assert_eq!(spawns.len(), 16, "4 team spawn groups of 4");
-    let avoid: Vec<_> = spawns.iter().map(|s| s.1).collect();
-    let ways = vip::ways_for(&nav, &avoid);
+    // all four groups (ways for either side), then each Escort hunter team
+    for hunters in [0, 1, 2] {
+        let avoid: Vec<_> = spawns.iter().filter(|s| hunters == 0 || s.0 == hunters).map(|s| s.1).collect();
+        eprintln!("hunters {hunters}:");
+        check(&nav, &avoid);
+    }
+}
+
+fn check(nav: &Nav, avoid: &[glam::Vec3]) {
+    let ways = vip::ways_for(nav, avoid);
     assert!(ways.len() >= vip::NB_VIPS, "{} ways", ways.len());
-    assert_eq!(ways, vip::ways_for(&nav, &avoid), "deterministic");
+    assert_eq!(ways, vip::ways_for(nav, avoid), "deterministic");
     let pace = 1.4;
     let dt = 1.0 / 60.0;
     for (i, w) in ways.iter().enumerate() {
@@ -35,17 +43,17 @@ fn san_donato_ways_walkable_far_from_hunters() {
         assert!(w.length() >= vip::MIN_LENGTH, "way {i}: {} m", w.length());
         // no navmesh gaps along the polyline
         for (j, s) in w.points.windows(2).enumerate() {
-            assert!(vip::clear(&nav, s[0], s[1]), "way {i} segment {j} leaves the navmesh");
+            assert!(vip::clear(nav, s[0], s[1]), "way {i} segment {j} leaves the navmesh");
         }
         // a crowd-kinematics walker arrives in time, passing every checkpoint
         let bound = w.length() / pace * 1.25 + 5.0;
         let mut walker = Walker::new(w);
         let (mut t, mut passed) = (0.0, 0);
         while !walker.arrived(w) && t < bound {
-            if walker.step(&nav, w, pace, dt).is_some_and(|k| w.is_checkpoint(k)) {
+            if walker.step(nav, w, pace, dt).is_some_and(|k| w.is_checkpoint(k)) {
                 passed += 1;
             }
-            assert!(nav.locate(walker.pos + glam::Vec3::Z * 0.5).is_some(), "way {i}: walker off the navmesh at {:?}", walker.pos);
+            assert!(vip::height(nav, walker.pos).is_some(), "way {i}: walker off the navmesh at {:?}", walker.pos);
             t += dt;
         }
         assert!(walker.arrived(w), "way {i}: not arrived after {t:.1} s (bound {bound:.1}), at {:?}", walker.pos);

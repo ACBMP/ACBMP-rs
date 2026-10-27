@@ -27,7 +27,9 @@ pub const MIN_LENGTH: f32 = 150.0;
 pub const MAX_LENGTH: f32 = 400.0;
 /// A way is up to `LEGS` A* legs between lane points; each leg's goal
 /// stays `LEG_SPREAD` from the earlier ones (no walking back and forth).
-const LEGS: usize = 4;
+const LEGS: usize = 6;
+/// Candidate start/goal spacing along the lanes.
+const LANE_STEP: f32 = 5.0;
 const LEG_SPREAD: f32 = 30.0;
 /// Starts of different ways stay this far apart (our choice).
 const START_SPREAD: f32 = 40.0;
@@ -36,6 +38,7 @@ const SEED: u64 = 0x7EA4_71B0_E5C0_0002;
 const STEP: f32 = 0.1;
 /// Clearance to the navmesh border either side of a way (our choice).
 const MARGIN: f32 = 0.2;
+const SEAM: f32 = 0.05;
 const DZ: f32 = 0.6;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +77,14 @@ fn far_from(p: Vec3, avoid: &[Vec3]) -> bool {
     avoid.iter().all(|a| a.distance(p) >= MIN_DIST_FROM_KILLERS)
 }
 
+/// Navmesh height under `p`, bridging the few-millimetre seams between
+/// navmesh tiles (`SEAM` either way along x or y).
+pub fn height(nav: &Nav, p: Vec3) -> Option<f32> {
+    [Vec3::ZERO, Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y]
+        .iter()
+        .find_map(|d| nav.locate(p + *d * SEAM + Vec3::Z * 0.5).map(|(_, z)| z))
+}
+
 /// Whether the straight walk `a` -> `b` stays on the main navmesh, with
 /// `MARGIN` to either side, within `DZ` of the straight height line.
 pub fn clear(nav: &Nav, a: Vec3, b: Vec3) -> bool {
@@ -84,7 +95,7 @@ pub fn clear(nav: &Nav, a: Vec3, b: Vec3) -> bool {
         let p = a.lerp(b, i as f32 / n as f32);
         [p, p + side, p - side]
             .iter()
-            .all(|q| nav.locate(*q + Vec3::Z * 0.5).is_some_and(|(_, z)| (z - q.z).abs() < DZ))
+            .all(|q| height(nav, *q).is_some_and(|z| (z - q.z).abs() < DZ))
     })
 }
 
@@ -137,11 +148,19 @@ fn flag(pts: Vec<Vec3>) -> Way {
 }
 
 /// Up to `WAYS` ways whose start and goal are at least
-/// `MIN_DIST_FROM_KILLERS` from every point of `avoid` (the hunter team
-/// spawns). Deterministic for a given navmesh and `avoid`.
+/// `MIN_DIST_FROM_KILLERS` from every point of `avoid`: the attacking
+/// team's spawn group (`team_spawns` filtered by TeamIndex), or all four
+/// groups for ways that suit either side (fewer on small maps).
+/// Deterministic for a given navmesh and `avoid`; about 0.1-0.5 s.
 pub fn ways_for(nav: &Nav, avoid: &[Vec3]) -> Vec<Way> {
-    let snap = |p: Vec3| nav.locate(p + Vec3::Z * 0.5).map(|(t, z)| (t, p.with_z(z)));
-    let mut cand: Vec<(u32, Vec3)> = nav.lane_points().filter_map(snap).filter(|c| far_from(c.1, avoid)).collect();
+    // on the mesh with `MARGIN` all round
+    let snap = |p: Vec3| {
+        let (t, z) = nav.locate(p + Vec3::Z * 0.5)?;
+        let p = p.with_z(z);
+        let m = MARGIN * 1.5;
+        clear(nav, p - Vec3::X * m, p + Vec3::X * m).then_some((t, p))
+    };
+    let mut cand: Vec<(u32, Vec3)> = nav.lane_points(LANE_STEP).into_iter().filter_map(snap).filter(|c| far_from(c.1, avoid)).collect();
     if cand.len() < 8 {
         cand = nav.main_centroids().filter_map(snap).filter(|c| far_from(c.1, avoid)).collect();
     }
@@ -151,7 +170,7 @@ pub fn ways_for(nav: &Nav, avoid: &[Vec3]) -> Vec<Way> {
     }
     let mut rng = Rng::new(SEED);
     let length = |p: &[Vec3]| p.windows(2).map(|w| w[0].distance(w[1])).sum::<f32>();
-    for _ in 0..64 {
+    for _ in 0..256 {
         if ways.len() >= WAYS {
             break;
         }
@@ -239,7 +258,7 @@ impl Walker {
         self.yaw = wrap(self.yaw + wrap(want - self.yaw).clamp(-TURN * dt, TURN * dt));
         let d = (target - self.pos).clamp_length_max(pace * dt);
         let moved = self.pos + d;
-        self.pos = nav.locate(moved + Vec3::Z * 0.5).map_or(moved, |(_, z)| moved.with_z(z));
+        self.pos = height(nav, moved).map_or(moved, |z| moved.with_z(z));
         None
     }
 }
