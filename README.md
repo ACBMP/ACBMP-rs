@@ -79,6 +79,12 @@ offsets are not confirmed on a live game yet). Then walk to a start spot with
 `./acb-trace where --to x,y,z,yaw` and record with `./capture.sh MOVE...` (or
 `./acb-trace record --out FILE`). The animation columns are still empty.
 
+The moves, start spots and timings to record are in `docs/capture-protocol.md`.
+To compare: `tools/trace-ours.sh OUT [move...] [--fps N]` replays those moves here
+and writes `OUT/<move>.csv`, then `tools/tracecmp.py retail/<move>-1.csv OUT/<move>.csv`
+prints the state sequence, flights, end offset, speed and turn rate side by side
+(exit 1 past 10 cm or 2 ticks).
+
 ### Giving feedback
 
 What helps most: what you did (keys), what you expected (retail behaviour),
