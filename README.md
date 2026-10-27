@@ -41,7 +41,7 @@ Controls (on foot):
 | (nothing) | low profile: walk; stops at ledges deeper than 2 m and at beam ends |
 | Shift | high profile: run; runs into wall runs, freerun jumps and climbs |
 | Space | sprint (high profile) |
-| F | jump: at a ledge stop, lower onto the wall below |
+| F | jump: at a ledge stop (walking into it or standing there), lower onto the wall below |
 | E | kill (your target online; any NPC in free play); walks in from ~4 m |
 | Q | stun (your pursuer online) |
 | right mouse (hold) | orbit the camera |
@@ -51,7 +51,9 @@ Controls (on foot):
 On a wall: W/S/A/D climb up/down/left/right (fixed directions, not camera
 relative); F + S or F alone jumps back off the wall, F + A/D jumps sideways
 across a gap, F + W leaps to a hold above; Shift + A/D at the end of an edge
-also side-jumps. Walk into a haystack in high profile (or drop onto it) to
+also side-jumps. A fall grabs a hold up to 1.2 m ahead only in its first
+2 m (retail); after that you go down. Drops under 0.53 m are stepped down,
+deeper ones fallen off. Walk into a haystack in high profile (or drop onto it) to
 hide; any move key leaves. Bushes count as haystacks too (one is right
 behind the first San Donato spawn): sunk into one with the legs out of sight
 means hidden, not stuck; any move key hops out. Walking slowly among the crowd blends you. Stand

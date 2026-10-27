@@ -961,15 +961,18 @@ impl Ground {
     }
 
     /// A hold to grab while falling at `pos` facing `fwd`: a wall edge
-    /// facing us within 0.7 m ahead, 1.3-2.2 m above the feet.
-    pub fn catch_hold(&self, pos: Vec3, fwd: Vec2) -> Option<Hold> {
-        self.holds_near(pos, 1.5)
+    /// facing us up to `reach` m ahead (retail probe
+    /// [`crate::human::in_air::GRASP_PROBE`]) and within 0.7 m to the side,
+    /// 1.3-2.2 m above the feet (hand height).
+    pub fn catch_hold(&self, pos: Vec3, fwd: Vec2, reach: f32) -> Option<Hold> {
+        self.holds_near(pos, reach + 0.3)
             .filter(|h| h.wall.dot(fwd) < -0.5)
             .filter_map(|h| {
                 let q = h.nearest(pos);
                 let d = (q - pos).truncate();
                 let dz = q.z - pos.z;
-                (d.length() < 0.7 && d.dot(fwd) > -0.1 && (1.3..=2.2).contains(&dz)).then_some((d.length(), *h))
+                let ahead = d.dot(fwd);
+                (ahead > -0.1 && ahead <= reach && d.perp_dot(fwd).abs() < 0.7 && (1.3..=2.2).contains(&dz)).then_some((d.length(), *h))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|x| x.1)
