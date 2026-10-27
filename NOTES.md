@@ -1009,3 +1009,14 @@ values, sources, our equivalent and status; full name list in `human-states-grap
 - Grasp (0132017a): only in the first 2.0 m of a fall (from the peak), probe 1.2 m ahead (catch_hold reach; side 0.7 m and hand window 1.3-2.2 m stay ours). Old gate (fell > 0.3 m, vz < -1) gone. Effect: the climb gate's S-drop now catches the awning beam below (hangfree, ends -10.61 41.07 3.72).
 - Landing (0130fea6): contact classes 45/70/135 deg via Ground::floor_hit normal; within 0.3 m below the air start a landing waits for the delay timer (retail: length of the starting action; ours: eject 0.467 s, walk-off/drop 0). Our floors stop at 53 deg, so the slope class (45-53) is only logged; no slide state.
 - Edges (00fc3ed2): drops >= 0.53 m are fallen off (was 0.6), smaller ones stepped down (Ground::move_on_edge). Edge stop > 2.0 m kept; Player.edge remembers the stop so F pulls down while standing too (00fd226a), and while walking into it (00fd215e).
+- Jump button (B2b, 0166fb1c): every jump test calls ButtonPressed / ButtonJustPressedWithDelay(.., 0.5) with
+  PadButton 0 (call sites 167105c/1671084, 1671591/16715b9, 1671764/1671784). PadButton order in the binary's
+  name table is Button1..4, PadUp.., so 0 = Button1 = spacebar in multi/DefaultBindings.map = Legs (kills use 1 =
+  Button2 = left mouse, weapon hand, ButtonWantsToKill b16a76). Ours: PlayerInput::sprint (Space) via
+  human::jump::Legs (held or pressed within 0.5 s, counted in ticks) + stick within 80 deg (cos 0.1736).
+  The run-speed >= 1.5 test stays (ours). Scripted runs tap Space for one tick before the jump.
+- Standing jump (00f6a118): Move -> JumpImpulsion allowed with no action or action ratio < 0.33
+  (Locomotion::action_ratio); ours jumps straight up 0.5 m (retail clip-driven; height not recovered).
+- Jump to a hang (TargetedLedgeGrab 0131c1e4): jump::hang_target picks a wall edge facing us within the
+  detection range when the gap has no floor within 1.75 m lower; Flight.grab -> Climb::catch on arrival.
+  Feet 1.8 m below / 0.35 m out from the grab point are ours. Map test jump_map::hang_targets (471/637 edges).
