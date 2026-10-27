@@ -9,7 +9,7 @@
 
 use glam::Vec3;
 
-use crate::rules::{Contracts, ContractEvent, Relation, Rules};
+use crate::rules::{Contracts, ContractEvent, Relation, Rules, Teams};
 
 /// `GBrick_ScoreKill` XML default `TargetKilled` (Mac 0x0103832c).
 pub const KILL_POINTS: u32 = 100;
@@ -207,9 +207,23 @@ pub enum MatchEvent {
     Over { winner: Option<usize> },
 }
 
+/// Which rule set a [`Match`] runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// Wanted-style free-for-all with [`Contracts`] (the duel).
+    #[default]
+    Duel,
+    /// Escort (teamvip): two teams, hunters vs protectors, relations from
+    /// [`Teams`]; contracts stay empty. VIP bodies, ways, team scoring and
+    /// rounds come later (Phase 4 E2..E5) through [`Teams::vips`] and
+    /// [`Teams::attacking_team`].
+    Escort(Teams),
+}
+
 #[derive(Clone, Debug)]
 pub struct Match {
     pub config: MatchConfig,
+    pub mode: Mode,
     pub contracts: Contracts,
     pub score: Vec<u32>,
     /// Per player: ticks until the respawn while dead.
@@ -239,9 +253,15 @@ pub fn ticks(secs: f32) -> u32 {
 }
 
 impl Match {
+    /// An Escort match: `teams.team` must have one entry per player.
+    pub fn escort(teams: Teams, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
+        Match { mode: Mode::Escort(teams.clone()), ..Match::new(teams.team.len(), config, spawns) }
+    }
+
     pub fn new(players: usize, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
         Match {
             config,
+            mode: Mode::Duel,
             contracts: Contracts::new(players),
             score: vec![0; players],
             respawn: vec![None; players],
@@ -265,7 +285,9 @@ impl Match {
     /// How body `body` stands to player `of` (bodies `0..players` are the
     /// players).
     pub fn relation(&self, of: usize, body: usize) -> Relation {
-        if body < self.contracts.hunters.len() {
+        if let Mode::Escort(teams) = &self.mode {
+            teams.relation(of, body)
+        } else if body < self.contracts.hunters.len() {
             self.contracts.relation(of, body)
         } else {
             Relation::Npc
@@ -290,7 +312,7 @@ impl Match {
             kill::HAY_GRAB => BONUS_HIDDEN,
             _ => 0,
         };
-        let rel = self.contracts.relation(killer, victim);
+        let rel = self.relation(killer, victim);
         if stun {
             // a stunned hunter loses its contract on the stunner
             if matches!(rel, Relation::Pursuer | Relation::Mutual) {
@@ -430,7 +452,8 @@ impl Match {
                 }
             }
         }
-        if self.ticks >= ticks(self.config.start_delay) {
+        // Escort has no contracts: the relation comes from the teams
+        if self.ticks >= ticks(self.config.start_delay) && self.mode == Mode::Duel {
             for e in self.contracts.update(crate::DT, pos) {
                 self.events.push(MatchEvent::Contract(e));
             }
@@ -628,5 +651,29 @@ mod tests {
         m.contracts.hunters[h].target = Some(other);
         m.tick(&who, &los);
         assert!(m.threat[h] < 0.05, "{}", m.threat[h]);
+    }
+
+    #[test]
+    fn escort_kills_follow_teams_not_contracts() {
+        let spawns = vec![(Vec3::ZERO, 0.0)];
+        let cfg = MatchConfig { time_limit: 10.0, score_limit: 0, respawn_delay: 1.0, start_delay: 0.0 };
+        let mut m = Match::escort(Teams::alternating(4), cfg, spawns);
+        let pos = [Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(15.0, 0.0, 0.0)];
+        run(&mut m, 60, &pos);
+        assert!(m.contracts.hunters.iter().all(|h| h.target.is_none()), "no contracts in escort");
+        assert_eq!(m.relation(0, 2), Relation::Other, "no friendly fire");
+        assert_eq!(m.relation(1, 0), Relation::Target);
+        assert_eq!(m.relation(0, 1), Relation::Pursuer);
+        assert_eq!(m.relation(0, 9), Relation::Npc);
+        // protector 1 kills hunter 0: scores, 0 respawns
+        m.on_action(1, 0, 0);
+        assert_eq!(m.score[1], KILL_POINTS);
+        assert!(!m.alive(0));
+        // hunter 2 kills its teammate... it cannot be granted, and would not score
+        m.on_action(2, 0, 0);
+        assert_eq!(m.score[2], 0);
+        // hunter 2 stuns protector 3 (its pursuer)
+        m.on_action(2, 3, crate::kill::STUN);
+        assert_eq!(m.score[2], STUN_POINTS);
     }
 }
