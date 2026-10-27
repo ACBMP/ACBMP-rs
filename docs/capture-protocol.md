@@ -45,6 +45,14 @@ Where the start Z is above the ground (`roll` at 9.5 m, `parapet` at 6 m), you s
 
 **Fall heights.** If you can, also record `fall5`, `fall8` and `fall12`: walk off ledges about 5, 8 and 12 m high, anywhere on the map. These check the landing type and damage thresholds. Note the start spot that `where` prints.
 
+## Escort (teamvip) observations (optional)
+These values only exist in game-mode XML that didn't ship, so we need them from a real match. If you can get an Escort match going on the Wine machine (it needs players on both teams), note:
+- the round length, and whether a round also ends when a VIP finishes its path;
+- the respawn delay after you die, as hunter and as protector;
+- the protector score popups each time a VIP passes a checkpoint (the numbers shown and roughly where on the path);
+- a 60 fps video of one round, if possible.
+A short `./acb-trace record` while walking next to a VIP from its spawn to its exit gives us its path on that map. The ways aren't in the PC data, so for now we author them ourselves.
+
 ## Send back
 - All `*.csv` files plus `diag.txt`.
 - The persona name and the Wine/Proton version.
