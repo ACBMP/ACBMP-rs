@@ -966,3 +966,14 @@ Pure, deterministic functions the server and client prediction share (no clock, 
   lock/selection exists in our code.
 - Wire v6: PlayerGame.threat u16 (*65535), client applies it with the server state. HUD: " | threat NN%"
   while holding a contract and not chasing.
+
+## Retail traces: acb-trace (2026-10-27)
+- crates/acb-trace reads retail ACBMP.exe (Wine) via /proc/<pid>/mem; offsets in
+  crates/acb-trace/offsets.toml (shipped next to the binary, editable). Objects are identified
+  by class id from their GetClassID stub (`B8 id C3`), so each chain link is validated and
+  unknown offsets (world->player array, entity components, entity matrix) are scanned for.
+- Chain: [base+0x22623f0] EngineContextImp -> +0x4c World -> (scan) pad manager -> +4 -> [0]
+  entity -> components -> AIActor -> +0x18 current ActorContext (Human* state) -> +0x10
+  HumanXData -> class id -> name. Details/confidence: ~/.cache/acbmp-re/findings/retail-mem.md.
+- Not live-tested (no retail here): first diag.txt from the Wine machine pins the scanned offsets.
+- Ours: ACBMP_TRACE=csv:<path> writes the same columns per tick (findings/trace-format.md).
