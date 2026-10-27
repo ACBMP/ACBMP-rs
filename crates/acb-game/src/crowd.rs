@@ -90,6 +90,16 @@ impl Nav {
         Some(Nav { graph, flows, flow_index, main: best, centroid, grid })
     }
 
+    /// Every CrowdFlow lane vertex, in data order.
+    pub(crate) fn lane_points(&self) -> impl Iterator<Item = Vec3> + '_ {
+        self.flows.iter().flat_map(|f| f.points.iter().map(|p| Vec3::from(*p)))
+    }
+
+    /// Centroids of the main component's triangles, in data order.
+    pub(crate) fn main_centroids(&self) -> impl Iterator<Item = Vec3> + '_ {
+        self.main.iter().map(|&t| self.centroid[t as usize])
+    }
+
     pub fn triangles(&self) -> usize {
         self.main.len()
     }

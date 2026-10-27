@@ -107,6 +107,15 @@ enum Cmd {
         #[arg(long)]
         obj: Option<PathBuf>,
     },
+    /// List the generated Escort VIP ways (start, length, checkpoints)
+    Ways {
+        forge: PathBuf,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Also print every waypoint (`*` marks checkpoints)
+        #[arg(long)]
+        points: bool,
+    },
     /// Decode the map's freerun guidance edges and check them against collision
     Guidance {
         forge: PathBuf,
@@ -390,6 +399,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Cloth { forge, schemas, character: Some(ch), .. } => cloth_capsules(forge, &ch, schemas)?,
         Cmd::Cloth { forge, name, schemas, character: None } => cloth(forge, &name, schemas)?,
         Cmd::Navmesh { forge, schemas, obj } => navmesh(forge, schemas, obj)?,
+        Cmd::Ways { forge, schemas, points } => ways(forge, schemas, points)?,
         Cmd::Guidance { forge, schemas, obj } => guidance(forge, schemas, obj)?,
         Cmd::Posebounds { forge, builder, clip, schemas, exe, t } => posebounds(forge, &builder, &clip, schemas, exe, t)?,
         Cmd::Texture { forge, name, out, schemas } => {
@@ -857,6 +867,29 @@ fn cloth(forge: PathBuf, needle: &str, schemas: PathBuf) -> anyhow::Result<()> {
             c.settings.iterations,
             fit.unwrap_or_else(|| "no visual mesh".into())
         );
+    }
+    Ok(())
+}
+
+fn ways(forge: PathBuf, schemas: PathBuf, points: bool) -> anyhow::Result<()> {
+    let schema = load_schema(&schemas)?;
+    let archive = acb_world::Archive::open(&forge, &schema)?;
+    let nav = acb_game::crowd::Nav::load(&archive).ok_or_else(|| anyhow::anyhow!("no navmesh"))?;
+    let spawns = acb_game::vip::team_spawns(&archive);
+    let avoid: Vec<_> = spawns.iter().map(|s| s.1).collect();
+    println!("{} team spawns, {} nav triangles, {} lanes", spawns.len(), nav.triangles(), nav.flows());
+    for (i, w) in acb_game::vip::ways_for(&nav, &avoid).iter().enumerate() {
+        let (s, g) = (w.start(), *w.points.last().unwrap());
+        let near = avoid.iter().map(|a| a.distance(s)).fold(f32::INFINITY, f32::min);
+        println!(
+            "way {i}: {:.0} m, {} points, {} checkpoints, start ({:.1} {:.1} {:.1}) goal ({:.1} {:.1} {:.1}), nearest team spawn {near:.1} m",
+            w.length(), w.points.len(), w.checkpoints.len(), s.x, s.y, s.z, g.x, g.y, g.z
+        );
+        if points {
+            for (j, p) in w.points.iter().enumerate() {
+                println!("  {j:3}{} {:.2} {:.2} {:.2}", if w.is_checkpoint(j) { "*" } else { " " }, p.x, p.y, p.z);
+            }
+        }
     }
     Ok(())
 }
