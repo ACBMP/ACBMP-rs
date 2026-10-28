@@ -492,7 +492,6 @@ impl World {
         Ok(w)
     }
 
-    /// The simulated time the next [`World::step`] runs at.
     /// Starts an Escort (teamvip) match: adds [`vip::NB_VIPS`] VIP bodies
     /// (crowd walkers; our reading: lookalikes of the loaded personas, as
     /// retail's VIP skins ship no data we can map), generates the VIP ways
@@ -578,6 +577,7 @@ impl World {
         }
     }
 
+    /// The simulated time the next [`World::step`] runs at.
     pub fn next_time(&self) -> f32 {
         self.time + DT
     }
