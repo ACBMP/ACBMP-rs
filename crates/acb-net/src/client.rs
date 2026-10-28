@@ -641,7 +641,7 @@ impl Client {
                 .min_by(f32::total_cmp);
             s += &match (nearest, v.respawn_in, v.target_in) {
                 (Some(d), _, _) => format!(" | VIP {d:.1} m"),
-                (None, Some(n), _) => format!(" | VIPs in {} s", n.div_ceil(TICK_HZ)),
+                (None, Some(n), _) if n > 0 => format!(" | VIPs in {} s", n.div_ceil(TICK_HZ)),
                 (None, None, n) if hunting && n > 0 => format!(" | VIPs targetable in {} s", n.div_ceil(TICK_HZ)),
                 _ => " | no VIP".into(),
             };
