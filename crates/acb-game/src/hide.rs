@@ -25,8 +25,10 @@
 //! `xx_l_haystack_wait` (loop), out `xx_l_haystack_hop_out` (2.0 m forward)
 //! then `xx_l_haystack_hop_out_tr_l_wait`.
 //!
-//! **Rules (our reading):** a ground entry needs high profile (run or
-//! sprint) moving into the box from within [`ENTRY_MARGIN`]; an air entry a
+//! **Rules:** a ground entry is retail's contact test
+//! ([`crate::human::haystack`], 00fe030c): touching the box (body radius plus
+//! [`crate::human::haystack::CONTACT_SKIN`]), facing within 100 deg and
+//! pushing within 50 deg of the way in, at any profile; an air entry a
 //! descending fall over the box no higher than [`AIR_ENTRY`] above its
 //! top, and it takes no fall damage. Any move input inside leaves towards
 //! it (camera relative). Hidden ([`crate::rules::Stance::Hidden`]) only
@@ -71,6 +73,20 @@ impl Spot {
         let dx = (self.min.x - l.x).max(l.x - self.max.x).max(0.0);
         let dy = (self.min.y - l.y).max(l.y - self.max.y).max(0.0);
         Vec2::new(dx, dy).length()
+    }
+
+    /// A body at `p` within `reach` of the box (horizontally): the contact
+    /// normal, world, horizontal unit, out of the box towards `p` (from
+    /// the centre when inside).
+    pub fn contact(&self, p: Vec3, reach: f32) -> Option<Vec2> {
+        if self.outside(p) > reach {
+            return None;
+        }
+        let l = self.local(p).truncate();
+        let q = l.clamp(self.min.truncate(), self.max.truncate());
+        let n = if l.distance(q) > 1e-4 { l - q } else { l - (self.min + self.max).truncate() * 0.5 };
+        let w = self.frame.x_axis.truncate().truncate() * n.x + self.frame.y_axis.truncate().truncate() * n.y;
+        (w.length() > 1e-6).then(|| w.normalize())
     }
 
     /// Box top height, world.
@@ -187,8 +203,8 @@ pub struct Hide {
     pub clips: HideClips,
 }
 
-/// Ground entry reach outside the box, metres (our choice: one stride).
-pub const ENTRY_MARGIN: f32 = 1.2;
+/// Ground entry reach outside the box: a body contact, metres.
+pub const ENTRY_MARGIN: f32 = crate::ground::BODY_RADIUS + crate::human::haystack::CONTACT_SKIN;
 /// Air entry: no higher than this above the box top, metres.
 pub const AIR_ENTRY: f32 = 1.5;
 /// Seat reach: sit from this close to the seat point, metres (our choice).
@@ -224,18 +240,16 @@ pub struct Hiding {
     from_world: Mat4,
 }
 
-/// Which spot a player at `pos` facing `yaw` going `dir` (world, unit or
-/// zero) enters, if any: `air` = falling.
-pub fn entry(spots: &[Spot], pos: Vec3, dir: Vec2, high_profile: bool, air: bool, vz: f32) -> Option<usize> {
+/// Which spot a player at `pos` facing `facing` going `dir` (world, unit
+/// or zero) enters, if any: `air` = falling.
+pub fn entry(spots: &[Spot], pos: Vec3, dir: Vec2, facing: Vec2, air: bool, vz: f32) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
     for (i, s) in spots.iter().enumerate() {
         let c = s.center();
         let ok = if air {
             vz < 0.0 && s.outside(pos) <= 0.0 && pos.z <= s.top() + AIR_ENTRY && pos.z >= s.frame.w_axis.z + 0.3
         } else {
-            let to = (c - pos).truncate();
-            let d = s.outside(pos);
-            high_profile && dir != Vec2::ZERO && d <= ENTRY_MARGIN && (pos.z - c.z).abs() < 0.6 && to.normalize_or_zero().dot(dir) > 0.5
+            (pos.z - c.z).abs() < 0.6 && s.contact(pos, ENTRY_MARGIN).is_some_and(|n| crate::human::haystack::enters(n, facing, dir))
         };
         let d = (c - pos).truncate().length();
         let ok = ok && s.seat.is_none();
@@ -395,16 +409,20 @@ mod tests {
     #[test]
     fn entry_rules() {
         let s = [spot()];
-        // running at it from 0.4 m outside the box edge (x 8.6)
+        // in contact 0.4 m outside the box edge (x 8.6), any profile
         let p = Vec3::new(8.2, 0.0, 0.0);
-        assert_eq!(entry(&s, p, Vec2::X, true, false, 0.0), Some(0));
-        // walking (low profile), facing away, too far
-        assert_eq!(entry(&s, p, Vec2::X, false, false, 0.0), None);
-        assert_eq!(entry(&s, p, -Vec2::X, true, false, 0.0), None);
-        assert_eq!(entry(&s, Vec3::new(7.2, 0.0, 0.0), Vec2::X, true, false, 0.0), None);
+        assert_eq!(entry(&s, p, Vec2::X, Vec2::X, false, 0.0), Some(0));
+        // pushing 60 deg off the way in, moving away, facing away, too far
+        assert_eq!(entry(&s, p, Vec2::from_angle(1.05), Vec2::X, false, 0.0), None);
+        assert_eq!(entry(&s, p, -Vec2::X, Vec2::X, false, 0.0), None);
+        assert_eq!(entry(&s, p, Vec2::X, -Vec2::X, false, 0.0), None);
+        assert_eq!(entry(&s, Vec3::new(7.9, 0.0, 0.0), Vec2::X, Vec2::X, false, 0.0), None);
+        // at a side face the way in is +Y
+        assert_eq!(entry(&s, Vec3::new(10.0, -1.3, 0.0), Vec2::Y, Vec2::Y, false, 0.0), Some(0));
+        assert_eq!(entry(&s, Vec3::new(10.0, -1.3, 0.0), Vec2::X, Vec2::X, false, 0.0), None);
         // falling onto it: from 1.5 m above the top, not from higher up
-        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.0), Vec2::ZERO, false, true, -3.0), Some(0));
-        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.2), Vec2::ZERO, false, true, -3.0), None);
-        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.0), Vec2::ZERO, false, true, 1.0), None);
+        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.0), Vec2::ZERO, Vec2::X, true, -3.0), Some(0));
+        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.2), Vec2::ZERO, Vec2::X, true, -3.0), None);
+        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.0), Vec2::ZERO, Vec2::X, true, 1.0), None);
     }
 }

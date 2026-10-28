@@ -217,6 +217,13 @@ impl Ground {
     /// Horizontal move with wall sliding, swept at knee and chest height (so
     /// steps and curbs pass).
     pub fn slide(&self, pos: Vec3, delta: Vec2) -> Vec3 {
+        self.slide_hit(pos, delta).0
+    }
+
+    /// [`Self::slide`], also returning the first wall contact's normal
+    /// (horizontal, out of the wall; the sweeps are at 0.55 and 1.3 m, above
+    /// retail's 0.5 m obstacle contact height).
+    pub fn slide_hit(&self, pos: Vec3, delta: Vec2) -> (Vec3, Option<Vec2>) {
         let blocked = |from: Vec3, d: Vec2| {
             [0.55, 1.3]
                 .into_iter()
@@ -225,6 +232,7 @@ impl Ground {
         };
         let mut at = pos;
         let mut d = delta;
+        let mut hit = None;
         for _ in 0..2 {
             match blocked(at, d) {
                 None => {
@@ -232,13 +240,14 @@ impl Ground {
                     break;
                 }
                 Some((f, n)) => {
+                    hit = hit.or(Some(n));
                     at += (d * f).extend(0.0);
                     let rest = d * (1.0 - f);
                     d = rest - n * rest.dot(n);
                 }
             }
         }
-        at
+        (at, hit)
     }
 
     /// Moves a character standing at `pos` by `delta`: slides along walls

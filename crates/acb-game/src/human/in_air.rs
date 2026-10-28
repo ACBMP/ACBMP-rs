@@ -1,6 +1,6 @@
 //! `HumanInAir`: what a falling character checks each tick, in retail order.
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 /// The `HumanInAir::UpdateMainMain` (01328022) checks this port has, in the
 /// retail tick order (WaterWell, TargetedLedgeGrab, DefaultGrasp, Boats,
@@ -86,11 +86,13 @@ pub struct Air {
     /// with the length of the action that began the air state
     /// (0133caae, length * 30000 ticks).
     pub delay: Option<f32>,
+    /// Wall-reception checks passed so far (retail InAirData +0x3a4).
+    pub wall_hits: u8,
 }
 
 impl Air {
     pub fn start(z: f32, delay: Option<f32>) -> Air {
-        Air { start_z: z, time: 0.0, delay }
+        Air { start_z: z, time: 0.0, delay, wall_hits: 0 }
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -100,6 +102,47 @@ impl Air {
     /// May the fall land at height `z` (0130fea6 delay test)?
     pub fn landing_allowed(&self, z: f32) -> bool {
         self.start_z - z > LANDING_DELAY_DROP || self.delay.is_some_and(|d| self.time >= d)
+    }
+}
+
+/// Retail InAir -> TurnOnWall (WallReception): a fall that runs face first
+/// into a wall turns its back to it and drops down it
+/// (`HumanInAir::TestMainToTurnOnWallOnInterfaceCommand_WallReception`
+/// 01315f90; TurnOnWall -> Main when the reception clip ends, 012d4a4a).
+/// The velocity into the wall must exceed this, m/s (01315f90: velocity .
+/// -n > 0.17364818).
+pub const WALL_INTO: f32 = 0.173_648_18;
+/// The wall must face the character: its normal within this of the
+/// reversed facing, radians (01315f90: < 0.7853982).
+pub const WALL_FACING: f32 = std::f32::consts::FRAC_PI_4;
+/// Only after this long in the air, seconds (01315f90: ticks / 30000 > 0.2).
+pub const WALL_MIN_AIR: f32 = 0.2;
+/// Horizontal speed above this, m/s (01315f90: length > 2.0).
+pub const WALL_SPEED: f32 = 2.0;
+/// Heading within this of the facing, radians (01315f90: < 1.0471976).
+pub const WALL_HEADING: f32 = std::f32::consts::FRAC_PI_3;
+/// The check must pass this many times (01315f90: counter +0x3a4 >= 2).
+pub const WALL_HITS: u8 = 2;
+
+/// One wall-reception check: wall contact normal `n` (horizontal unit, out
+/// of the wall), velocity `vel`, facing `facing` (unit).
+pub fn wall_reception(n: Vec2, vel: Vec3, facing: Vec2, air_time: f32) -> bool {
+    let h = vel.truncate();
+    h.dot(-n) > WALL_INTO
+        && (-facing).angle_to(n).abs() < WALL_FACING
+        && air_time > WALL_MIN_AIR
+        && h.length() > WALL_SPEED
+        && facing.angle_to(h).abs() < WALL_HEADING
+}
+
+impl Air {
+    /// Counts a passed [`wall_reception`] check; true once there were
+    /// [`WALL_HITS`] of them: turn on the wall.
+    pub fn wall(&mut self, hit: bool) -> bool {
+        if hit {
+            self.wall_hits = self.wall_hits.saturating_add(1);
+        }
+        hit && self.wall_hits >= WALL_HITS
     }
 }
 
@@ -149,5 +192,25 @@ mod tests {
         }
         assert!(!a.landing_allowed(4.9));
         assert!(b.landing_allowed(4.9));
+    }
+
+    #[test]
+    fn wall_reception_rules() {
+        let n = -glam::Vec2::X; // wall ahead along +X
+        let f = glam::Vec2::X;
+        let v = Vec3::new(3.0, 0.0, -2.0);
+        assert!(wall_reception(n, v, f, 0.3));
+        // too early, too slow, moving along the wall, facing it sideways
+        assert!(!wall_reception(n, v, f, 0.2));
+        assert!(!wall_reception(n, Vec3::new(1.9, 0.0, 0.0), f, 0.3));
+        assert!(!wall_reception(n, Vec3::new(0.1, 3.0, 0.0), glam::Vec2::Y, 0.3));
+        assert!(!wall_reception(n, v, glam::Vec2::from_angle(0.8), 0.3));
+        // heading 61 deg off the facing
+        assert!(!wall_reception(-glam::Vec2::from_angle(0.5), Vec3::new(3.0, 0.0, 0.0), glam::Vec2::from_angle(1.07), 0.3));
+        // two passed checks turn
+        let mut a = Air::start(5.0, None);
+        assert!(!a.wall(true));
+        assert!(!a.wall(false));
+        assert!(a.wall(true));
     }
 }

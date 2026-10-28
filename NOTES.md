@@ -1010,6 +1010,12 @@ values, sources, our equivalent and status; full name list in `human-states-grap
 - Landing (0130fea6): contact classes 45/70/135 deg via Ground::floor_hit normal; within 0.3 m below the air start a landing waits for the delay timer (retail: length of the starting action; ours: eject 0.467 s, walk-off/drop 0). Our floors stop at 53 deg, so the slope class (45-53) is only logged; no slide state.
 - Edges (00fc3ed2): drops >= 0.53 m are fallen off (was 0.6), smaller ones stepped down (Ground::move_on_edge). Edge stop > 2.0 m kept; Player.edge remembers the stop so F pulls down while standing too (00fd226a), and while walking into it (00fd215e).
 
+## Human* port, B2c (haystack contact, obstacle collision, turn on wall)
+- Haystack (00fe030c): entered on contact (body radius + 0.12 m skin, ours: our haystacks are solid boxes the slide stops at 0.4 m), facing within 100 deg and the stick within 50 deg of the way in, any profile (human::haystack). The 1.2 m high-profile proximity is gone; kills.sh hay holds the run to 1.0 s (contact is reached ~0.85 s in).
+- ObstacleCollision (00ceee20 entry, 00fd0fd2 clip choice): wall contact within 45 deg of the stick, |vz| <= 0.2, contact >= 0.5 m up (our sweeps are at 0.55/1.3 m). Player.obstacle keeps angle and side blend; no bump clip yet, the cycle eases out (loco.blocked). Contact = the stick swept 0.05 m (Ground::slide_hit), so it holds at zero speed. The < 30 % step test stays for no-floor refusals.
+- TurnOnWall (01315f90): in the air, wall hit face first (normal within 45 deg of -facing), into it > 0.17 m/s, > 2 m/s horizontal, heading within 60 deg of the facing, > 0.2 s airborne, passes twice -> yaw turns away from the wall, horizontal velocity 0 (no reception clip).
+- Not ported: StepOff (00cef704: pushes off a contact too steep to stand on, clearance ray >= 0.8 m; our floors stop at 53 deg so nothing is stood on there), beam entry clip, TestIsEdgeValidForFall, walk-off landing delay.
+
 ## Escort (teamvip) RE, Phase 4 prep (2026-10-27, escort-re)
 Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findings/mode-escort.md`.
 - Engine name "teamvip" (`DataPC.forge` 0x6a0ac994 `TeamVIP GamemodeParameters`), values identical to Wanted2
