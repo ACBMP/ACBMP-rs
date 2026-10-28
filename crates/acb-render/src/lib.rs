@@ -115,6 +115,8 @@ struct GpuSkinned {
     /// Per mesh bone: mesh space -> model space.
     skin: Vec<Mat4>,
     draws: Vec<SkinnedDraw>,
+    /// Highlight colour added to the lighting (e.g. Escort VIPs).
+    tint: Option<Vec3>,
 }
 
 struct SkinnedDraw {
@@ -124,6 +126,9 @@ struct SkinnedDraw {
     palette: Vec<u16>,
     frame: wgpu::Buffer,
     consts: wgpu::BindGroup,
+    /// Own PS frame buffer and bind group, used while the mesh is tinted.
+    tint_ps: wgpu::Buffer,
+    tinted: wgpu::BindGroup,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -617,11 +622,21 @@ impl Renderer {
             for s in &scene.skinned {
                 let rows = retail::instance_rows(view_proj, &[s.world]);
                 self.queue.write_buffer(&s.instances, 0, bytemuck::cast_slice(&rows));
+                let tinted = s.tint.map(|t| {
+                    let mut e = *env;
+                    e.ambient.iter_mut().for_each(|a| *a += t);
+                    e.sun_color += t;
+                    e
+                });
+                let env = tinted.as_ref().unwrap_or(env);
                 for d in &s.draws {
                     let palette: Vec<Mat4> =
                         d.palette.iter().map(|&b| s.skin.get(b as usize).copied().unwrap_or(Mat4::IDENTITY)).collect();
                     let mat = &scene.retail_materials[d.material];
                     retail.write_skinned_frame(self, mat, &d.frame, env, &fv, &palette);
+                    if s.tint.is_some() {
+                        retail.write_tinted_ps(self, mat, &d.tint_ps, env, &fv);
+                    }
                 }
             }
         }
@@ -750,7 +765,7 @@ impl Renderer {
                     continue;
                 }
                 pass.set_pipeline(retail.pipeline(mat));
-                pass.set_bind_group(0, &d.consts, &[]);
+                pass.set_bind_group(0, if s.tint.is_some() { &d.tinted } else { &d.consts }, &[]);
                 pass.set_bind_group(1, depth_bound.get(&d.material).unwrap_or(&mat.textures), &[]);
                 pass.draw_indexed(d.range.clone(), 0, 0..1);
             }
@@ -1011,13 +1026,15 @@ impl Scene {
             ) else {
                 continue;
             };
-            let (frame, consts) = retail.skinned_consts(r, &self.retail_materials[slot]);
+            let retail::SkinnedConsts { frame, tint_ps, consts, tinted } = retail.skinned_consts(r, &self.retail_materials[slot]);
             draws.push(SkinnedDraw {
                 range: s.first_index..s.first_index + s.index_count,
                 material: slot,
                 palette: s.palette.clone(),
                 frame,
                 consts,
+                tint_ps,
+                tinted,
             });
         }
         let init = |label: &str, contents: &[u8], usage| {
@@ -1035,6 +1052,7 @@ impl Scene {
             world: Mat4::IDENTITY,
             skin: vec![Mat4::IDENTITY; mesh.bones.len()],
             draws,
+            tint: None,
         });
         Some(self.skinned.len() - 1)
     }
@@ -1056,6 +1074,14 @@ impl Scene {
             s.world = world;
             s.skin.clear();
             s.skin.extend_from_slice(skin);
+        }
+    }
+
+    /// Highlights a skinned mesh: `tint` is added to its ambient light and
+    /// sun colour (no extra pipeline); `None` clears it.
+    pub fn set_skinned_tint(&mut self, handle: usize, tint: Option<Vec3>) {
+        if let Some(s) = self.skinned.get_mut(handle) {
+            s.tint = tint;
         }
     }
 

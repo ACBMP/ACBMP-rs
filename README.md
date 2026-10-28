@@ -43,10 +43,16 @@ first (`--attacking 1`). Every round starts with all players on their team's
 spawn group, then two VIPs walk their ways: hunters kill them (100 each),
 the protecting team scores checkpoints and way ends. `--time-limit S` is each
 round's play (default 300 s, a placeholder), `--intro S` / `--recap S` the 8 s
-phases around it. The server prints the team totals at the end. There is no
-Escort HUD yet: role, round and team scores show only in the server log and
-the `net: event` lines of `ACBMP_TRACE=1` clients (the window HUD still shows
-the duel clock). `tools/escort.sh` runs a 2v2 on one machine with 5 % loss and
+phases around it. The server prints the team totals at the end. To play
+locally, start the server with `--players 2` (or 4) and run that many
+viewers with `--connect 127.0.0.1:7777` (`--port` sets another) on the same
+machine. The Escort HUD is the window title (and the `hud tick` lines of
+`ACBMP_TRACE=1` clients), e.g. `team 0 hunter | VIP 12.3 m | [team 0 100]
+team 1 10 | round 1/2 play 0:35 | +100 points`: your team and role (hunter or
+protector), the distance to the nearest VIP (targetable ones when hunting,
+living ones when protecting; `VIPs in N s` while they respawn), team totals
+(yours bracketed), round, phase (intro/play/recap/over) with its clock, and
+the last message. Living VIPs are drawn gold-tinted. `tools/escort.sh` runs a 2v2 on one machine with 5 % loss and
 150 ms round trip; its viewers use the test input `--input "0=vip"` (while
 your team hunts, run at the nearest VIP pressing kill).
 

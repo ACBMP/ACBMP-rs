@@ -1122,3 +1122,15 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   5 % loss, 75 ms each way: 3 VIP kills, each once (server and all clients), swap after round 1,
   0 desync / 0 match desync on 4 clients.
 - Open: Escort HUD (E6), respawn near own VIP / far for hunters (GetBestSpawnPoint_VIPrule), round length.
+
+## Escort HUD, E6 (2026-10-28, phase4-escort-hud)
+- `Client::hud` branches on `Mode::Escort` + `Rounds` into `escort_hud`: `team T hunter|protector`, respawn
+  timer or nearest VIP distance (hunters: targetable `Teams::vips`; protectors: any living `Vips` slot; else
+  `VIPs in N s` / `VIPs targetable in N s` / `no VIP`), health, team totals (own bracketed),
+  `round R/N phase m:ss` (Rounds::left), last message. Duel path untouched (duel.sh output unchanged).
+  The window title uses the same line, so no duel clock in Escort any more.
+- VIP highlight: `Scene::set_skinned_tint(handle, Some(rgb))` adds the colour to ambient cube and sun colour.
+  Retail character programs light in the PS, so each skinned draw got a second bind group with its own PS
+  frame buffer (`SkinnedConsts::tinted`), written only while tinted; no new pipeline. Viewer tints living
+  VIP bodies (`living_vips`) with `VIP_TINT` (0.45, 0.32, 0) = gold.
+- tools/escort.sh prints 3 `hud tick .*round` lines and the final `hud:` per client.
