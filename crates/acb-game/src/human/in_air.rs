@@ -202,9 +202,9 @@ pub struct StepContact {
 }
 
 /// Does this tick's contact set start a StepOff? `clear_below` is the free
-/// distance straight down (asked only when needed). Our stand-in collision
-/// has no collision materials, so every contact is default material and,
-/// as in retail for default material, nothing steps off.
+/// distance straight down (asked only when needed). The no-stand flag is
+/// `CollisionMaterial::AIType == AIType_StepOff` (2; retail material +0x10);
+/// on San Donato only `Restricted_BounceOff_WoodSolid_NoCam` has it.
 pub fn step_off(contacts: &[StepContact], clear_below: impl FnOnce() -> f32) -> bool {
     let (mut sum, mut no_stand, mut direct) = (Vec3::ZERO, false, false);
     for c in contacts {

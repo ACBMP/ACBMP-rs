@@ -184,6 +184,14 @@ impl Archive<'_> {
         Some(CollisionMesh { vertices, materials: vec![mat; triangles.len()], triangles })
     }
 
+    /// `AIType` of a CollisionMaterial root (`CollisionMaterial::AIType`:
+    /// 0 None, 1 UnreachableAreaByAI, 2 StepOff; retail field +0x10, read
+    /// by the InAir StepOff test 00cef704).
+    pub fn material_ai_type(&self, uid: u32) -> Option<u32> {
+        let r = self.root(uid).ok()?;
+        self.field(&r.obj, "AIType")?.as_u32()
+    }
+
     fn mesh_shape(&self, o: &Obj) -> Result<CollisionMesh, Error> {
         let bytes = |n: &str| self.field(o, n).and_then(Value::as_bytes).unwrap_or_default();
         let vertices = bytes("Vertices")

@@ -676,8 +676,23 @@ pub(crate) fn drive(
                     p.vel.y = 0.0;
                 }
             }
+            // retail InAir -> StepOff (00cef704): falling onto a surface
+            // whose collision material forbids standing pushes off it,
+            // 0.4 m out along the mean contact normal and 0.4 m up over
+            // 0.2 s (00d129e8; ours as a velocity, then the fall goes on)
+            let contacts = if beam.is_none() && p.vel.z <= 0.0 { ground.step_contacts(at) } else { Vec::new() };
+            let step_off = !contacts.is_empty()
+                && human::in_air::step_off(&contacts, || ground.floor_below(at).map_or(f32::INFINITY, |f| at.z - f));
             let z = p.pos.z + p.vel.z * dt;
             match ground.floor_hit(at + Vec3::Z * 0.1) {
+                _ if step_off => {
+                    let d = human::in_air::step_off_dir(&contacts);
+                    let t = human::in_air::STEP_OFF_TIME;
+                    p.vel = (d * human::in_air::STEP_OFF_PUSH / t).extend(human::in_air::STEP_OFF_RISE / t);
+                    if crate::trace() {
+                        eprintln!("air: step off at {:.2?} dir {:.2?}", at.to_array(), d.to_array());
+                    }
+                }
                 _ if let Some((a, _)) = beam => {
                     at = a;
                     p.vel = Vec3::ZERO;

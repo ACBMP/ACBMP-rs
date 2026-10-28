@@ -140,3 +140,15 @@ fn entries_on_san_donato() {
     assert!(g.wall_ahead(feet, fwd, glam::Vec2::Y * 4.0).is_none());
     assert!(g.climb_entry(Vec3::new(-11.19, 47.82, 6.61), glam::Vec2::Y).is_some());
 }
+
+/// Retail StepOff material (`CollisionMaterial::AIType` 2): on San Donato
+/// only `Restricted_BounceOff_WoodSolid_NoCam`, 11 triangles of one small
+/// cap; a fall onto its top touches it and steps off.
+#[test]
+fn step_off_material_on_san_donato() {
+    let Some(g) = ground() else { return };
+    assert_eq!(g.no_stand_triangles().count(), 11);
+    let contacts = g.step_contacts(Vec3::new(14.9, 22.1, 3.65));
+    assert!(!contacts.is_empty());
+    assert!(acb_game::human::in_air::step_off(&contacts, || 3.0));
+}
