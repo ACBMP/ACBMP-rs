@@ -38,6 +38,8 @@ fn world() -> Option<World> {
     let spawns: Vec<(Vec3, f32)> = w.players.iter().map(|p| (p.pos, p.yaw)).collect();
     let config = MatchConfig { time_limit: 600.0, score_limit: 0, respawn_delay: 5.0, start_delay: 0.0 };
     w.escort(&archive, builtins.as_ref(), Teams::alternating(2), config, spawns).unwrap();
+    // no intro: the VIP cycle starts on the first tick (rounds: mode tests)
+    w.mode.as_mut().unwrap().rounds = Some(acb_game::rounds::Rounds::new(2, 0.0, 600.0, acb_game::rounds::RECAP_DURATION));
     Some(w)
 }
 

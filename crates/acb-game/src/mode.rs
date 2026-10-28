@@ -128,6 +128,12 @@ pub enum ScoreReason {
     Kill,
     Stun,
     Escape,
+    /// Escort: a hunter killed a VIP ([`crate::rounds::VIP_KILLED_POINTS`]).
+    VipKill,
+    /// Escort: a VIP passed a checkpoint (protecting team).
+    Checkpoint,
+    /// Escort: a VIP reached its way's end (protecting team).
+    Protect,
 }
 
 /// `GBrick_Escape` chase phases (`GetNewPhase` 0x00c0f710): in sight or
@@ -205,6 +211,11 @@ pub enum MatchEvent {
     Fall { player: usize, damage: u32, fatal: bool },
     /// The match ended; `winner` is `None` on a draw.
     Over { winner: Option<usize> },
+    /// Escort: points for a whole team (checkpoints, protected VIPs); a
+    /// player's [`MatchEvent::Score`] also counts for its team.
+    TeamScore { team: crate::rules::Team, points: u32, reason: ScoreReason },
+    /// Escort: round phases, the attacking-team swap, the match end.
+    Round(crate::rounds::RoundEvent),
 }
 
 /// Which rule set a [`Match`] runs.
@@ -247,6 +258,8 @@ pub struct Match {
     pub events: Vec<MatchEvent>,
     /// Escort: the VIP cycle (`World::escort` sets it up; Duel: `None`).
     pub vips: Option<crate::vip::Vips>,
+    /// Escort: rounds and team totals (Duel: `None`).
+    pub rounds: Option<crate::rounds::Rounds>,
 }
 
 /// Seconds to whole ticks.
@@ -256,8 +269,58 @@ pub fn ticks(secs: f32) -> u32 {
 
 impl Match {
     /// An Escort match: `teams.team` must have one entry per player.
+    /// `config.time_limit` is the playing time of each round (score limit
+    /// unused); [`crate::rounds::ROUNDS`] rounds with retail intro/recap.
     pub fn escort(teams: Teams, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
-        Match { mode: Mode::Escort(teams.clone()), ..Match::new(teams.team.len(), config, spawns) }
+        let n = teams.team.iter().copied().chain([teams.attacking_team]).max().map_or(2, |t| t as usize + 1).max(2);
+        let rounds = crate::rounds::Rounds::retail(n, config.time_limit);
+        Match { mode: Mode::Escort(teams.clone()), rounds: Some(rounds), ..Match::new(teams.team.len(), config, spawns) }
+    }
+
+    /// Escort: whether a round is being played (Duel: always).
+    pub fn playing(&self) -> bool {
+        self.rounds.as_ref().is_none_or(|r| r.playing())
+    }
+
+    /// `points` to player `p` (and, in Escort, to its team while playing).
+    fn award(&mut self, p: usize, points: u32, reason: ScoreReason) {
+        if let (Mode::Escort(teams), Some(r)) = (&self.mode, &mut self.rounds) {
+            if !r.add(teams.team[p], points) {
+                return;
+            }
+        }
+        self.score[p] += points;
+        self.events.push(MatchEvent::Score { player: p, points, reason });
+    }
+
+    /// Escort: `points` to the whole of `team` while playing.
+    fn award_team(&mut self, team: crate::rules::Team, points: u32, reason: ScoreReason) {
+        if self.rounds.as_mut().is_some_and(|r| r.add(team, points)) {
+            self.events.push(MatchEvent::TeamScore { team, points, reason });
+        }
+    }
+
+    /// Escort: scores this tick's VIP events: a VIP kill pays its hunter,
+    /// checkpoints and way ends pay the protecting team(s).
+    pub(crate) fn on_vip_events(&mut self, events: &[crate::vip::VipEvent]) {
+        use crate::vip::VipEvent;
+        let Mode::Escort(teams) = &self.mode else { return };
+        let attacking = teams.attacking_team;
+        let protecting: Vec<crate::rules::Team> = (0..self.rounds.as_ref().map_or(0, |r| r.team_score.len()) as crate::rules::Team).filter(|&t| t != attacking).collect();
+        for e in events {
+            let (points, reason) = match *e {
+                VipEvent::Killed { killer, .. } => {
+                    self.award(killer, crate::rounds::VIP_KILLED_POINTS, ScoreReason::VipKill);
+                    continue;
+                }
+                VipEvent::Checkpoint { n, .. } => (crate::rounds::checkpoint_points(n), ScoreReason::Checkpoint),
+                VipEvent::WayEnd { n, .. } => (crate::rounds::protect_points(n), ScoreReason::Protect),
+                _ => continue,
+            };
+            for &t in &protecting {
+                self.award_team(t, points, reason);
+            }
+        }
     }
 
     pub fn new(players: usize, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
@@ -276,6 +339,7 @@ impl Match {
             over: false,
             events: Vec::new(),
             vips: None,
+            rounds: None,
         }
     }
 
@@ -289,7 +353,12 @@ impl Match {
     /// players).
     pub fn relation(&self, of: usize, body: usize) -> Relation {
         if let Mode::Escort(teams) = &self.mode {
-            teams.relation(of, body)
+            // intro / recap: nobody may kill or stun another player or a VIP
+            match teams.kind(body) {
+                crate::rules::Kind::Npc => Relation::Npc,
+                _ if !self.playing() => Relation::Other,
+                _ => teams.relation(of, body),
+            }
         } else if body < self.contracts.hunters.len() {
             self.contracts.relation(of, body)
         } else {
@@ -319,8 +388,7 @@ impl Match {
         if stun {
             // a stunned hunter loses its contract on the stunner
             if matches!(rel, Relation::Pursuer | Relation::Mutual) {
-                self.score[killer] += STUN_POINTS;
-                self.events.push(MatchEvent::Score { player: killer, points: STUN_POINTS, reason: ScoreReason::Stun });
+                self.award(killer, STUN_POINTS, ScoreReason::Stun);
                 for e in self.contracts.on_stunned(victim) {
                     self.events.push(MatchEvent::Contract(e));
                 }
@@ -328,8 +396,7 @@ impl Match {
             return;
         }
         if matches!(rel, Relation::Target | Relation::Mutual) {
-            self.score[killer] += KILL_POINTS + bonus;
-            self.events.push(MatchEvent::Score { player: killer, points: KILL_POINTS + bonus, reason: ScoreReason::Kill });
+            self.award(killer, KILL_POINTS + bonus, ScoreReason::Kill);
         }
         for e in self.contracts.on_death(victim, Some(killer)) {
             self.events.push(MatchEvent::Contract(e));
@@ -410,9 +477,8 @@ impl Match {
                     c.coef = if time > 0.0 { c.coef + crate::DT / time } else { 0.0 };
                     if c.coef > 1.0 {
                         self.chases[h] = None;
-                        self.score[t] += ESCAPE_POINTS;
                         self.events.push(MatchEvent::Escaped { hunter: h, target: t });
-                        self.events.push(MatchEvent::Score { player: t, points: ESCAPE_POINTS, reason: ScoreReason::Escape });
+                        self.award(t, ESCAPE_POINTS, ScoreReason::Escape);
                         for e in self.contracts.on_stunned(h) {
                             self.events.push(MatchEvent::Contract(e));
                         }
@@ -461,6 +527,10 @@ impl Match {
                 self.events.push(MatchEvent::Contract(e));
             }
         }
+        if self.rounds.is_some() {
+            self.tick_rounds();
+            return back;
+        }
         let best = self.score.iter().copied().max().unwrap_or(0);
         let by_score = self.config.score_limit > 0 && best >= self.config.score_limit;
         if by_score || self.ticks >= ticks(self.config.time_limit) {
@@ -470,6 +540,26 @@ impl Match {
             self.events.push(MatchEvent::Over { winner });
         }
         back
+    }
+
+    /// Escort: the round clock. A round's play starts with a fresh VIP
+    /// cycle; between rounds the attacking team swaps; after the last
+    /// recap the match is over.
+    fn tick_rounds(&mut self) {
+        let (Mode::Escort(teams), Some(r)) = (&mut self.mode, &mut self.rounds) else { return };
+        for e in r.tick(&mut teams.attacking_team) {
+            use crate::rounds::{Phase, RoundEvent};
+            match e {
+                RoundEvent::Phase { phase: Phase::Play, .. } => {
+                    if let Some(v) = &mut self.vips {
+                        *v = crate::vip::Vips::new(v.bodies.clone());
+                    }
+                }
+                RoundEvent::Phase { .. } | RoundEvent::Swap { .. } => teams.vips.clear(),
+                RoundEvent::Over { .. } => self.over = true,
+            }
+            self.events.push(MatchEvent::Round(e));
+        }
     }
 }
 
@@ -661,6 +751,7 @@ mod tests {
         let spawns = vec![(Vec3::ZERO, 0.0)];
         let cfg = MatchConfig { time_limit: 10.0, score_limit: 0, respawn_delay: 1.0, start_delay: 0.0 };
         let mut m = Match::escort(Teams::alternating(4), cfg, spawns);
+        m.rounds = Some(crate::rounds::Rounds::new(2, 0.0, 10.0, 8.0));
         let pos = [Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(15.0, 0.0, 0.0)];
         run(&mut m, 60, &pos);
         assert!(m.contracts.hunters.iter().all(|h| h.target.is_none()), "no contracts in escort");
@@ -678,5 +769,89 @@ mod tests {
         // hunter 2 stuns protector 3 (its pursuer)
         m.on_action(2, 3, crate::kill::STUN);
         assert_eq!(m.score[2], STUN_POINTS);
+    }
+
+    /// E4 gate: a scripted round pair in ticks (intro 1 s, play 4 s, recap
+    /// 1 s): kills, VIP kills and VIP way events give the expected team
+    /// totals, teams swap roles for round 2, nothing scores outside play.
+    #[test]
+    fn escort_round_pair_scores_and_swaps() {
+        use crate::rounds::{Phase, RoundEvent, Rounds};
+        use crate::vip::VipEvent;
+        let spawns = vec![(Vec3::ZERO, 0.0)];
+        let cfg = MatchConfig { time_limit: 4.0, score_limit: 0, respawn_delay: 1.0, start_delay: 0.0 };
+        let mut m = Match::escort(Teams::alternating(4), cfg, spawns);
+        m.vips = Some(crate::vip::Vips::new(vec![4, 5]));
+        m.rounds = Some(Rounds::new(2, 1.0, 4.0, 1.0));
+        let pos = [Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(15.0, 0.0, 0.0)];
+        let who: Vec<Presence> = pos.iter().map(|&p| Presence::at(p)).collect();
+        let killed = |vip, killer| VipEvent::Killed { vip, body: 4 + vip, killer, way: 0 };
+        let checkpoint = |n| VipEvent::Checkpoint { vip: 0, way: 0, checkpoint: 3, n };
+        let mut rounds_log = Vec::new();
+        let mut tick = |m: &mut Match| {
+            m.events.clear();
+            m.tick(&who, &|_, _| true);
+            rounds_log.extend(m.events.iter().filter_map(|e| if let MatchEvent::Round(r) = e { Some((m.ticks, *r)) } else { None }));
+        };
+        let team_score = |m: &Match| m.rounds.as_ref().unwrap().team_score.clone();
+        // intro: no kills (relation Other), VIP events do not score
+        tick(&mut m);
+        assert_eq!(m.relation(1, 0), Relation::Other);
+        m.on_action(1, 0, 0);
+        m.on_vip_events(&[killed(0, 0), checkpoint(1)]);
+        assert_eq!(team_score(&m), vec![0, 0]);
+        assert_eq!(m.score, vec![0; 4]);
+        while m.ticks < ticks(1.0) + 1 {
+            tick(&mut m);
+        }
+        // round 1 (team 0 hunts): VIP kill 100 for 0; protector 1 kills
+        // hunter 0 for 100; VIP 1 passes 2 checkpoints (10 + 20) and
+        // reaches its way's end (200 + 2 * 10) for team 1
+        assert!(m.playing());
+        assert_eq!(m.relation(1, 0), Relation::Target);
+        m.on_vip_events(&[killed(0, 0)]);
+        m.on_action(1, 0, crate::kill::WALK);
+        m.on_vip_events(&[checkpoint(1)]);
+        m.on_vip_events(&[checkpoint(2), VipEvent::WayEnd { vip: 1, way: 0, n: 2 }]);
+        assert_eq!(team_score(&m), vec![100, 350]);
+        assert!(m.events.contains(&MatchEvent::TeamScore { team: 1, points: 220, reason: ScoreReason::Protect }));
+        // recap: still nothing scores
+        while m.ticks < ticks(5.0) + 1 {
+            tick(&mut m);
+        }
+        assert_eq!(m.rounds.as_ref().unwrap().phase, Phase::Recap);
+        m.on_vip_events(&[killed(1, 2)]);
+        assert_eq!(team_score(&m), vec![100, 350]);
+        while m.ticks < ticks(7.0) + 1 {
+            tick(&mut m);
+        }
+        // round 2: team 1 hunts; the VIP cycle restarted
+        let Mode::Escort(t) = &m.mode else { unreachable!() };
+        assert_eq!(t.attacking_team, 1);
+        assert_eq!(m.relation(0, 1), Relation::Target, "protector 0 may kill hunter 1");
+        assert_eq!(m.vips.as_ref().unwrap().respawn_in, Some(0));
+        m.on_vip_events(&[killed(0, 1)]);
+        m.on_action(2, 3, crate::kill::WALK);
+        m.on_vip_events(&[checkpoint(1)]);
+        assert_eq!(team_score(&m), vec![210, 450]);
+        assert_eq!(m.rounds.as_ref().unwrap().round_score, vec![vec![100, 350], vec![110, 100]]);
+        assert_eq!(m.score, vec![100, 200, 100, 0]);
+        while !m.over {
+            tick(&mut m);
+        }
+        let s = ticks(1.0);
+        assert_eq!(
+            rounds_log,
+            vec![
+                (s + 1, RoundEvent::Phase { round: 0, phase: Phase::Play }),
+                (5 * s + 1, RoundEvent::Phase { round: 0, phase: Phase::Recap }),
+                (6 * s + 1, RoundEvent::Swap { round: 1, attacking: 1 }),
+                (6 * s + 1, RoundEvent::Phase { round: 1, phase: Phase::Intro }),
+                (7 * s + 1, RoundEvent::Phase { round: 1, phase: Phase::Play }),
+                (11 * s + 1, RoundEvent::Phase { round: 1, phase: Phase::Recap }),
+                (12 * s + 1, RoundEvent::Phase { round: 1, phase: Phase::Over }),
+                (12 * s + 1, RoundEvent::Over { winner: Some(1) }),
+            ]
+        );
     }
 }
