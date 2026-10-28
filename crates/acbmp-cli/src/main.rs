@@ -1358,36 +1358,17 @@ fn meshes(forge: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
 }
 
 fn loc(forge: PathBuf, needle: &str, package: &str, schemas: PathBuf, raw: Option<PathBuf>) -> anyhow::Result<()> {
-    use anvil_fastload::Value;
     let schema = load_schema(&schemas)?;
     let archive = open_map(&forge, &schema)?;
-    let packages = archive.uids_of("LocalizationPackage");
-    let name_is = |u: &u32, f: &dyn Fn(&str) -> bool| archive.loc(*u).is_some_and(|l| f(&l.name));
-    let uid = (packages.iter().find(|u| name_is(u, &|n| n == package)))
-        .or_else(|| packages.iter().find(|u| name_is(u, &|n| n.contains(package))))
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("no LocalizationPackage matching {package:?}"))?;
-    let root = archive.root(uid)?;
-    let data = archive
-        .field(&root.obj, "CompressedData")
-        .and_then(Value::as_obj)
-        .and_then(|c| archive.field(c, "Data"))
-        .ok_or_else(|| anyhow::anyhow!("package has no CompressedData.Data"))?;
-    let bytes: Vec<u8> = match data {
-        Value::Packed { data, .. } => data.clone(),
-        Value::Raw(b) => b.clone(),
-        Value::Array(items) => items.iter().filter_map(|v| v.as_u32()).map(|b| b as u8).collect(),
-        _ => anyhow::bail!("unexpected Data value"),
-    };
     if let Some(out) = raw {
+        let bytes = archive.localization_data(package)?;
         std::fs::write(&out, &bytes)?;
         println!("{} bytes -> {}", bytes.len(), out.display());
         return Ok(());
     }
-    let loc = anvil_forge::loc::Localization::parse(&bytes)?;
     let want_id = needle.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok());
     let lower = needle.to_lowercase();
-    for s in loc.strings()? {
+    for s in archive.localization(package)? {
         let hit = match want_id {
             Some(id) => s.id == id,
             None => s.text.to_lowercase().contains(&lower),

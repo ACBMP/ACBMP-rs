@@ -18,6 +18,7 @@ use anvil_schema::Schema;
 pub mod ambiance;
 pub mod collision;
 pub mod guidance;
+pub mod localization;
 pub mod mesh;
 pub mod navmesh;
 pub mod shading;
