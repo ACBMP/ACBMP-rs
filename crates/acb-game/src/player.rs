@@ -699,9 +699,13 @@ pub(crate) fn drive(
             let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
             // retail jump flag (0166fb1c): Legs held or pressed within
             // 0.5 s, stick within 80 deg of the facing; ours also needs a
-            // run's speed. There is no manual jump: jumps only come out of
-            // freerunning at an edge or gap.
-            let running = p.loco.speed >= 1.5 && human::jump::freerun(&p.legs, dir, fwd);
+            // run's speed unless standing (ForwardFromIdle). There is no
+            // manual jump: jumps only come out of freerunning at an edge or
+            // gap.
+            // Standing still (or early in a start) the jump goes through retail
+            // ForwardFromIdle (00f6720c); ours flies the same jump clips.
+            let idle = human::jump::forward_from_idle(p.loco.speed < human::jump::IDLE_SPEED, p.loco.action_ratio(clips));
+            let running = (p.loco.speed >= 1.5 || idle.is_some()) && human::jump::freerun(&p.legs, dir, fwd);
             // freerun: up onto a ledge ahead
             // (never onto a haystack's top: running into one hides)
             let haystack = |t: Vec3| clipset.hide.as_ref().is_some_and(|h| h.spots.iter().any(|s| s.seat.is_none() && s.outside(t) <= 0.0 && t.z <= s.top() + 0.5));

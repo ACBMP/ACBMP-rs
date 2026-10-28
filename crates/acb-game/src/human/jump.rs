@@ -61,6 +61,69 @@ pub fn freerun(legs: &Legs, dir: Vec2, facing: Vec2) -> bool {
     legs.wants_jump() && in_cone(dir, facing)
 }
 
+/// Retail Move -> JumpImpulsionForwardFromIdle (JumpToTarget command,
+/// `TestMoveToJumpImpulsionForwardFromIdle...JumpToTarget` 00f6720c): a
+/// freerun jump to a target may start from standing still, or early in a
+/// running action (a start clip) whose ratio is below this; later it waits.
+pub const FORWARD_FROM_IDLE_RATIO: f32 = 0.75;
+/// Below this speed the character counts as standing (retail tests its
+/// locomotion state, +0x8ec == 0; the threshold is ours), m/s.
+pub const IDLE_SPEED: f32 = 0.1;
+/// ForwardFromIdle blends its flat and its up clip by the target's height
+/// above the feet, up to this, metres (00fbbc7a: clamp(dz, 0, 1.3) / 1.3).
+pub const FORWARD_FROM_IDLE_UP: f32 = 1.3;
+
+/// May a freerun jump to a target start via ForwardFromIdle? `standing`:
+/// no locomotion; `action`: the running action's ratio, if any. Returns
+/// the ratio the impulsion clip starts at (1 from standing,
+/// `ratio / 0.75` early in an action), `None` = not now (00f6720c).
+pub fn forward_from_idle(standing: bool, action: Option<f32>) -> Option<f32> {
+    if standing {
+        return Some(1.0);
+    }
+    action.filter(|r| *r < FORWARD_FROM_IDLE_RATIO).map(|r| (r / FORWARD_FROM_IDLE_RATIO).max(0.0))
+}
+
+/// The ForwardFromIdle up blend for a target `dz` metres above the feet
+/// (0 = flat clip, 1 = up clip), 00fbbc7a.
+pub fn forward_from_idle_up(dz: f32) -> f32 {
+    dz.clamp(0.0, FORWARD_FROM_IDLE_UP) / FORWARD_FROM_IDLE_UP
+}
+
+/// The JumpImpulsion anticipation: pending commands (JumpToTarget,
+/// SideStepToTarget, EnterWallingVertical, StraightJump) only leave the
+/// state once it has run this long times the impulsion ratio (1 on entry),
+/// seconds (`_EnterJumpImpulsion` 00f80e88: ratio * 0.2 s; the tests
+/// 00f3159c / 00f31634 / 00fddfdc / 00fde04a / 00f316cc defer until then).
+pub const IMPULSION_ANTICIPATION: f32 = 0.2;
+
+/// Where a JumpImpulsion goes once [`IMPULSION_ANTICIPATION`] is over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImpulsionExit {
+    /// JumpToTarget: JumpImpulsionForwardFromIdle, then InAir when its clip
+    /// ends (00f3159c, 00f3c4e0).
+    ForwardFromIdle,
+    /// SideStepToTarget: straight to InAir (00f31634).
+    SideStep,
+    /// EnterWallingVertical from standing: WallingImpulsion (00fddfdc).
+    WallingImpulsion,
+    /// EnterWallingVertical while moving: Walling (00fde04a).
+    Walling,
+}
+
+/// A pending JumpImpulsion command's exit after `t` s in the state, or
+/// `None` while the anticipation runs (the command stays pending).
+pub fn impulsion_exit(t: f32, ratio: f32, exit: ImpulsionExit, moving: bool) -> Option<ImpulsionExit> {
+    if t + 1e-4 < ratio * IMPULSION_ANTICIPATION {
+        return None;
+    }
+    Some(match exit {
+        ImpulsionExit::WallingImpulsion | ImpulsionExit::Walling if moving => ImpulsionExit::Walling,
+        ImpulsionExit::WallingImpulsion | ImpulsionExit::Walling => ImpulsionExit::WallingImpulsion,
+        e => e,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +167,20 @@ mod tests {
         l.tick(true, DT);
         assert!(freerun(&l, at(45.0), f));
         assert!(!freerun(&l, at(90.0), f));
+    }
+
+    #[test]
+    fn forward_from_idle_and_impulsion_exits() {
+        assert_eq!(forward_from_idle(true, None), Some(1.0));
+        assert_eq!(forward_from_idle(false, None), None);
+        assert_eq!(forward_from_idle(false, Some(0.375)), Some(0.5));
+        assert_eq!(forward_from_idle(false, Some(0.8)), None);
+        assert_eq!(forward_from_idle_up(2.0), 1.0);
+        assert!((forward_from_idle_up(0.65) - 0.5).abs() < 1e-6);
+        assert_eq!(impulsion_exit(0.1, 1.0, ImpulsionExit::SideStep, false), None);
+        assert_eq!(impulsion_exit(0.2, 1.0, ImpulsionExit::SideStep, false), Some(ImpulsionExit::SideStep));
+        assert_eq!(impulsion_exit(0.25, 1.0, ImpulsionExit::Walling, false), Some(ImpulsionExit::WallingImpulsion));
+        assert_eq!(impulsion_exit(0.25, 1.0, ImpulsionExit::WallingImpulsion, true), Some(ImpulsionExit::Walling));
+        assert_eq!(impulsion_exit(0.05, 0.25, ImpulsionExit::ForwardFromIdle, false), Some(ImpulsionExit::ForwardFromIdle));
     }
 }
