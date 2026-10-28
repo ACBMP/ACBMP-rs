@@ -707,7 +707,7 @@ pub(crate) fn drive(
             let haystack = |t: Vec3| clipset.hide.as_ref().is_some_and(|h| h.spots.iter().any(|s| s.seat.is_none() && s.outside(t) <= 0.0 && t.z <= s.top() + 0.5));
             let up = running.then(|| jump::target(ground, clips, p.pos, fwd, false)).flatten().filter(|u| !haystack(u.0));
             // drops < 0.53 m are stepped down, deeper ones fallen off
-            let (to, ledge) = ground.move_on_edge(p.pos, jump::balance_on(beam, delta), human::ground::FALL_OFF_EDGE);
+            let (mut to, ledge) = ground.move_on_edge(p.pos, jump::balance_on(beam, delta), human::ground::FALL_OFF_EDGE);
             let len = delta.length();
             if p.edge.is_some_and(|e| !e.still_at(p.pos)) {
                 p.edge = None;
@@ -819,7 +819,16 @@ pub(crate) fn drive(
             if let Some((target, flight, narrow)) = up.or(across) {
                 jump::take_off(p, clips, sk, target, flight, if narrow { "narrow top" } else { why });
             } else {
-                if ledge {
+                // retail TestIsEdgeValidForFall (00fc38ca, clearance box
+                // 00d01166): no falling off into a blocked space past the
+                // edge (a railing, a wall, a low overhang); stay on the edge
+                let blocked = ledge && len > 1e-4 && !ground.box_clear(human::ground::fall_box(to, delta / len), delta / len, human::ground::FALL_BOX_HALF);
+                if blocked {
+                    if crate::trace() {
+                        eprintln!("edge: fall blocked at {:.2} {:.2} {:.2}", to.x, to.y, to.z);
+                    }
+                    to = p.pos;
+                } else if ledge {
                     p.loco.start_fall();
                     p.vel = (delta / dt.max(1e-4)).extend(0.0);
                     p.fall_from = p.pos.z;
