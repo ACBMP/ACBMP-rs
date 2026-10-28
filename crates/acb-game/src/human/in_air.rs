@@ -28,6 +28,25 @@ pub const GRASP_PROBE: f32 = 1.2;
 /// sits at hand height, so this is documentation only).
 pub const GRASP_HAND_HEIGHT: f32 = 0.38;
 
+/// `HumanInAir` Main -> NarrowObject (`TestMainToNarrowObjectMain`
+/// 012cc888, flag +0x3a0 bit1): set by `CheckForDefaultGrasp` (0132017a)
+/// when `GetBeamAnchor` (0130fb08) finds a beam (narrow-object entry type
+/// 3; pilotis entry 4 and targeted beam landings 8 are not ported). The
+/// beam is searched in a box of these half extents (side, sight, up),
+/// metres (0130fb08: 0.55, 0.4, 0.35) ...
+pub const BEAM_BOX_HALF: Vec3 = Vec3::new(0.55, 0.4, 0.35);
+/// ... centred this far above the probe point, metres (0130fb08: +0.15;
+/// retail's point is the entity matrix applied to a CharacterComponent
+/// offset (+0x40) we have not identified: ours is the feet).
+pub const BEAM_BOX_UP: f32 = 0.15;
+
+/// Whether a beam top at `z` is caught by a fall that started at
+/// `start_z` (ours: a beam at the start height, the one just stepped off,
+/// is not, see [`LANDING_DELAY_DROP`]).
+pub fn beam_catch_allowed(start_z: f32, z: f32) -> bool {
+    start_z - z > LANDING_DELAY_DROP
+}
+
 /// The default grasp gate: the fall so far (`fall`, metres from its highest
 /// point) is under [`GRASP_MAX_FALL`] and no eject window (`block`, seconds)
 /// is running. Replaces our old "fell 0.3 m and vz < -1 m/s" gate.
@@ -183,9 +202,9 @@ pub struct StepContact {
 }
 
 /// Does this tick's contact set start a StepOff? `clear_below` is the free
-/// distance straight down (asked only when needed). Our stand-in collision
-/// has no collision materials, so every contact is default material and,
-/// as in retail for default material, nothing steps off.
+/// distance straight down (asked only when needed). The no-stand flag is
+/// `CollisionMaterial::AIType == AIType_StepOff` (2; retail material +0x10);
+/// on San Donato only `Restricted_BounceOff_WoodSolid_NoCam` has it.
 pub fn step_off(contacts: &[StepContact], clear_below: impl FnOnce() -> f32) -> bool {
     let (mut sum, mut no_stand, mut direct) = (Vec3::ZERO, false, false);
     for c in contacts {

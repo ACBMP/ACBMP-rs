@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use acb_world::{Archive, CollisionMesh};
 
 use crate::climb::Hold;
+use crate::human::in_air::StepContact;
 use glam::{Mat4, Vec2, Vec3};
 
 const CELL: f32 = 2.0;
@@ -18,6 +19,9 @@ const CAMERA_LAYER: u32 = 18;
 
 pub struct Ground {
     tris: Vec<[Vec3; 3]>,
+    /// Per triangle: its collision material is `AIType_StepOff` (2): no
+    /// standing on it (retail InAir StepOff, [`crate::human::in_air::step_off`]).
+    no_stand: Vec<bool>,
     floor: HashMap<(i32, i32), Vec<u32>>,
     wall: HashMap<(i32, i32), Vec<u32>>,
     /// Freerun guidance edges with an upward face (ledges): ends.
@@ -36,6 +40,9 @@ pub const BODY_MASS: f32 = 65.0;
 
 /// Height a character steps up or down without falling, metres.
 pub const STEP: f32 = 0.6;
+
+/// `CollisionMaterial::AIType_StepOff`: the material forbids standing.
+pub const AI_TYPE_STEP_OFF: u32 = 2;
 
 pub(crate) fn cell(p: Vec2) -> (i32, i32) {
     ((p.x / CELL).floor() as i32, (p.y / CELL).floor() as i32)
@@ -64,7 +71,7 @@ fn ray_tri(o: Vec3, d: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
 
 impl Ground {
     pub fn load(archive: &Archive) -> anyhow::Result<Ground> {
-        let mut g = Ground { tris: Vec::new(), floor: HashMap::new(), wall: HashMap::new(), ledges: Vec::new(), ledge_grid: HashMap::new(), holds: Vec::new(), hold_grid: HashMap::new() };
+        let mut g = Ground { tris: Vec::new(), no_stand: Vec::new(), floor: HashMap::new(), wall: HashMap::new(), ledges: Vec::new(), ledge_grid: HashMap::new(), holds: Vec::new(), hold_grid: HashMap::new() };
         for e in archive.guidance_edges() {
             let wall = e.normals.iter().map(|n| Vec3::from(*n)).find(|n| n.z.abs() < 0.5 && n.truncate().length() > 0.5);
             if let Some(w) = wall {
@@ -93,6 +100,7 @@ impl Ground {
             }
         }
         let mut shapes: HashMap<u32, Option<CollisionMesh>> = HashMap::new();
+        let mut step_off: HashMap<u32, bool> = HashMap::new();
         for c in archive.colliders() {
             // camera-only proxies (haystack CamCol) and loose debris
             if c.layer == CAMERA_LAYER || !c.fixed {
@@ -101,14 +109,17 @@ impl Ground {
             let shape = shapes.entry(c.shape).or_insert_with(|| archive.collision_mesh(c.shape).ok().flatten());
             let Some(shape) = shape else { continue };
             let m = Mat4::from_cols_array(&c.matrix);
-            for t in &shape.triangles {
-                g.add(t.map(|i| m.transform_point3(Vec3::from(shape.vertices[i as usize]))));
+            for (k, t) in shape.triangles.iter().enumerate() {
+                let mat = shape.materials.get(k).copied().unwrap_or(0);
+                let no_stand = mat != 0
+                    && *step_off.entry(mat).or_insert_with(|| archive.material_ai_type(mat) == Some(AI_TYPE_STEP_OFF));
+                g.add(t.map(|i| m.transform_point3(Vec3::from(shape.vertices[i as usize]))), no_stand);
             }
         }
         Ok(g)
     }
 
-    fn add(&mut self, v: [Vec3; 3]) {
+    fn add(&mut self, v: [Vec3; 3], no_stand: bool) {
         let n = (v[1] - v[0]).cross(v[2] - v[0]);
         let len = n.length();
         if len < 1e-8 {
@@ -117,6 +128,7 @@ impl Ground {
         let grid = if (n.z / len).abs() >= WALKABLE_NZ { &mut self.floor } else { &mut self.wall };
         let id = self.tris.len() as u32;
         self.tris.push(v);
+        self.no_stand.push(no_stand);
         let lo = cell(v[0].truncate().min(v[1].truncate()).min(v[2].truncate()));
         let hi = cell(v[0].truncate().max(v[1].truncate()).max(v[2].truncate()));
         for x in lo.0..=hi.0 {
@@ -153,6 +165,47 @@ impl Ground {
 
     pub fn triangles(&self) -> usize {
         self.tris.len()
+    }
+
+    /// Contacts of the feet sphere (radius [`BODY_RADIUS`], resting on
+    /// `feet`) with no-standing triangles, for
+    /// [`crate::human::in_air::step_off`]. Default-material contacts are
+    /// left out: our landing takes those (retail: a default contact steeper
+    /// than 45 deg alone never steps off either).
+    pub fn step_contacts(&self, feet: Vec3) -> Vec<StepContact> {
+        let c = feet + Vec3::Z * BODY_RADIUS;
+        let (lo, hi) = (cell(c.truncate() - Vec2::splat(BODY_RADIUS)), cell(c.truncate() + Vec2::splat(BODY_RADIUS)));
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for x in lo.0..=hi.0 {
+            for y in lo.1..=hi.1 {
+                for grid in [&self.floor, &self.wall] {
+                    for &i in grid.get(&(x, y)).into_iter().flatten() {
+                        if !self.no_stand[i as usize] || !seen.insert(i) {
+                            continue;
+                        }
+                        let t = &self.tris[i as usize];
+                        let q = closest_on_tri(c, t);
+                        let d = c - q;
+                        if d.length_squared() > BODY_RADIUS * BODY_RADIUS {
+                            continue;
+                        }
+                        let mut tri = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero();
+                        if tri.dot(d) < 0.0 {
+                            tri = -tri;
+                        }
+                        let normal = d.try_normalize().unwrap_or(tri);
+                        out.push(StepContact { tri, normal, no_stand: true, character: false });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The no-standing (StepOff material) triangles.
+    pub fn no_stand_triangles(&self) -> impl Iterator<Item = [Vec3; 3]> + '_ {
+        self.tris.iter().zip(&self.no_stand).filter(|(_, n)| **n).map(|(t, _)| *t)
     }
 
     /// The walkable (floor) triangles.
@@ -330,4 +383,38 @@ mod tests {
         let w = [Vec3::new(0.1, -2.0, -2.0), Vec3::new(0.1, 2.0, -2.0), Vec3::new(0.1, 0.0, 3.0)];
         assert!(tri_box_overlap(&w, h));
     }
+}
+
+/// Closest point of triangle `t` to `p` (Ericson, Real-Time Collision
+/// Detection 5.1.5).
+fn closest_on_tri(p: Vec3, [a, b, c]: &[Vec3; 3]) -> Vec3 {
+    let (ab, ac, ap) = (*b - *a, *c - *a, p - *a);
+    let (d1, d2) = (ab.dot(ap), ac.dot(ap));
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return *a;
+    }
+    let bp = p - *b;
+    let (d3, d4) = (ab.dot(bp), ac.dot(bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return *b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return *a + ab * (d1 / (d1 - d3));
+    }
+    let cp = p - *c;
+    let (d5, d6) = (ab.dot(cp), ac.dot(cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return *c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return *a + ac * (d2 / (d2 - d6));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && d4 - d3 >= 0.0 && d5 - d6 >= 0.0 {
+        return *b + (*c - *b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+    }
+    let denom = 1.0 / (va + vb + vc);
+    *a + ab * (vb * denom) + ac * (vc * denom)
 }

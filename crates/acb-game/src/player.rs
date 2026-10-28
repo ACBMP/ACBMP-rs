@@ -571,7 +571,7 @@ pub(crate) fn drive(
         // retail InAir order (human::in_air::ORDER): a hold in reach is
         // grabbed (below, in the fall) before a haystack is entered
         let grasp = air && ground.is_some_and(|g| air_grasp(p, g, clipset).is_some());
-        let entry = if grasp { None } else { crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), facing, air, p.vel.z) };
+        let entry = if grasp { None } else { crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), facing, air) };
         if let Some(i) = entry {
             if crate::trace() {
                 eprintln!("hide: enter spot {i} from {:.2} {:.2} {:.2}{}", p.pos.x, p.pos.y, p.pos.z, if air { " (air)" } else { "" });
@@ -652,6 +652,15 @@ pub(crate) fn drive(
                 p.vel = Vec3::ZERO;
                 return;
             }
+            // a beam in reach of a short fall: onto it (retail DefaultGrasp
+            // -> GetBeamAnchor 0130fb08 -> InAir.NarrowObject; ours lands on
+            // its centre line in the beam clip set, no entry clip)
+            let sight = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            let beam = if p.vel.z <= 0.0 && human::in_air::grasp_allowed(p.fall_from - p.pos.z, p.catch_block) {
+                ground.beam_anchor(p.pos, sight).filter(|(a, _)| human::in_air::beam_catch_allowed(p.air.start_z, a.z))
+            } else {
+                None
+            };
             let (mut at, wall) = ground.slide_hit(p.pos, p.vel.truncate() * dt);
             // retail TurnOnWall (WallReception, 01315f90): running face
             // first into a wall in the air turns the back to it and drops
@@ -667,8 +676,35 @@ pub(crate) fn drive(
                     p.vel.y = 0.0;
                 }
             }
+            // retail InAir -> StepOff (00cef704): falling onto a surface
+            // whose collision material forbids standing pushes off it,
+            // 0.4 m out along the mean contact normal and 0.4 m up over
+            // 0.2 s (00d129e8; ours as a velocity, then the fall goes on)
+            let contacts = if beam.is_none() && p.vel.z <= 0.0 { ground.step_contacts(at) } else { Vec::new() };
+            let step_off = !contacts.is_empty()
+                && human::in_air::step_off(&contacts, || ground.floor_below(at).map_or(f32::INFINITY, |f| at.z - f));
             let z = p.pos.z + p.vel.z * dt;
             match ground.floor_hit(at + Vec3::Z * 0.1) {
+                _ if step_off => {
+                    let d = human::in_air::step_off_dir(&contacts);
+                    let t = human::in_air::STEP_OFF_TIME;
+                    p.vel = (d * human::in_air::STEP_OFF_PUSH / t).extend(human::in_air::STEP_OFF_RISE / t);
+                    if crate::trace() {
+                        eprintln!("air: step off at {:.2?} dir {:.2?}", at.to_array(), d.to_array());
+                    }
+                }
+                _ if let Some((a, _)) = beam => {
+                    at = a;
+                    p.vel = Vec3::ZERO;
+                    p.loco.set_beam(clips, sk, true);
+                    let height = p.fall_from - a.z;
+                    let (damage, kind) = jump::landing(height);
+                    if crate::trace() {
+                        eprintln!("air: onto beam at {:.2?} from {:.2?}, fall {height:.2} m", a.to_array(), p.pos.to_array());
+                    }
+                    p.landing = Some((height, damage, kind));
+                    p.loco.land(height, dir != Vec2::ZERO);
+                }
                 // retail TestGroundCollision: near the start height the
                 // landing waits for the landing-test delay (stand on it)
                 Some((f, _)) if f >= z && !p.air.landing_allowed(f) => {

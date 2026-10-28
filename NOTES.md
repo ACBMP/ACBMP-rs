@@ -1134,3 +1134,8 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   frame buffer (`SkinnedConsts::tinted`), written only while tinted; no new pipeline. Viewer tints living
   VIP bodies (`living_vips`) with `VIP_TINT` (0.45, 0.32, 0) = gold.
 - tools/escort.sh prints 3 `hud tick .*round` lines and the final `hud:` per client.
+
+## Human state machine part 5 (2026-10-28, phase3-human-e)
+- InAir->HayStack (`CheckForHayStacks` 01319100): air entry on contact or when the feet..feet+1.8 m segment crosses the detection box (`DetectHayStack` 01318f9a), rising or falling: `human::haystack::air_enters`. Not ported: ignore timer (00ec45f0), state +0x3b0==9 veto, the prev-pos ray-cast branch, `IsNearDeepHayStackTarget` 0130aa50.
+- InAir->NarrowObject (`CheckForDefaultGrasp` 0132017a, `GetBeamAnchor` 0130fb08, box half 0.55 side / 0.4 sight / 0.35 up at +0.15): `Ground::beam_anchor`, gated by the 2 m grasp rule and a 0.3 m drop (ours). Drop at 38.25,-54.6,2.2 catches the railing at 38.60 -54.60 1.01 (60/144 fps). Not ported: pilotis grab, TargetedLedgeGrab beam landing; retail probe point offset unknown (ours feet).
+- StepOff wired: CollisionMaterial layout (FastLoad 00344b40 = reflected order) +8 SoundType, +0xc GraphicalType, +0x10 AIType, +0x14 Friction, +0x18 Restitution. AIType 2 = `AIType_StepOff`. `Archive::material_ai_type`, `Ground` per-triangle no_stand, `Ground::step_contacts` (feet sphere r 0.4), fall branch after the beam check. San Donato: only `Restricted_BounceOff_WoodSolid_NoCam`, 11 triangles at ~14.9 22.1 3.0-3.7; a drop there steps off along (-0.57, 0.82) and lands below (60/144 fps). Clearance ray from our feet (retail origin unverified).

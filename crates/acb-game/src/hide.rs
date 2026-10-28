@@ -28,9 +28,10 @@
 //! **Rules:** a ground entry is retail's contact test
 //! ([`crate::human::haystack`], 00fe030c): touching the box (body radius plus
 //! [`crate::human::haystack::CONTACT_SKIN`]), facing within 100 deg and
-//! pushing within 50 deg of the way in, at any profile; an air entry a
-//! descending fall over the box no higher than [`AIR_ENTRY`] above its
-//! top, and it takes no fall damage. Any move input inside leaves towards
+//! pushing within 50 deg of the way in, at any profile; an air entry
+//! retail's `CheckForHayStacks` ([`crate::human::haystack::air_enters`]):
+//! a contact, or the feet below the box top with the 1.8 m segment up
+//! from them crossing it, and it takes no fall damage. Any move input inside leaves towards
 //! it (camera relative). Hidden ([`crate::rules::Stance::Hidden`]) only
 //! while fully inside; entering and leaving are plain ground stances.
 
@@ -111,10 +112,18 @@ pub fn spots(archive: &Archive) -> Vec<Spot> {
         for c in comps.iter().filter_map(|v| v.as_obj()).filter(|c| archive.is_type(c, "HayStackComponent")) {
             let v3 = |n: &str| archive.field(c, n).and_then(|v| v.as_f32s()).filter(|f| f.len() >= 3).map(|f| Vec3::new(f[0], f[1], f[2]));
             let (Some(min), Some(max)) = (v3("DetectionBoxMin"), v3("DetectionBoxMax")) else { continue };
+            // retail DetectHayStack (01318f9a) adds DetectionBoxPosition
+            // to the entity's world translation (unrotated)
+            let at = v3("DetectionBoxPosition").unwrap_or(Vec3::ZERO);
+            let mut m = Mat4::from_cols_array(&m);
+            m.w_axis += at.extend(0.0);
+            if crate::trace() && at != Vec3::ZERO {
+                eprintln!("hide: spot {} box offset {:.2?}", e.id, at.to_array());
+            }
             let kind = archive.field(c, "HayStackType").and_then(|v| v.as_u32()).unwrap_or(0);
             let active = archive.field(c, "Active").and_then(|v| v.as_u32()).unwrap_or(1) != 0;
             if active {
-                out.push(Spot { entity: e.id, frame: Mat4::from_cols_array(&m), min, max, kind, seat: None });
+                out.push(Spot { entity: e.id, frame: m, min, max, kind, seat: None });
             }
         }
         for c in comps.iter().filter_map(|v| v.as_obj()).filter(|c| archive.is_type(c, "RestObjectAttributeComponent")) {
@@ -205,8 +214,6 @@ pub struct Hide {
 
 /// Ground entry reach outside the box: a body contact, metres.
 pub const ENTRY_MARGIN: f32 = crate::ground::BODY_RADIUS + crate::human::haystack::CONTACT_SKIN;
-/// Air entry: no higher than this above the box top, metres.
-pub const AIR_ENTRY: f32 = 1.5;
 /// Seat reach: sit from this close to the seat point, metres (our choice).
 pub const SIT_REACH: f32 = 0.6;
 /// Half size of a seat's box (only `outside` / `center` use it), metres.
@@ -242,12 +249,14 @@ pub struct Hiding {
 
 /// Which spot a player at `pos` facing `facing` going `dir` (world, unit
 /// or zero) enters, if any: `air` = falling.
-pub fn entry(spots: &[Spot], pos: Vec3, dir: Vec2, facing: Vec2, air: bool, vz: f32) -> Option<usize> {
+pub fn entry(spots: &[Spot], pos: Vec3, dir: Vec2, facing: Vec2, air: bool) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
     for (i, s) in spots.iter().enumerate() {
         let c = s.center();
         let ok = if air {
-            vz < 0.0 && s.outside(pos) <= 0.0 && pos.z <= s.top() + AIR_ENTRY && pos.z >= s.frame.w_axis.z + 0.3
+            // retail CheckForHayStacks (01319100): a contact or the feet's
+            // 1.8 m segment crossing the box, rising or falling
+            crate::human::haystack::air_enters(s.outside(pos), s.local(pos).z, s.min.z, s.max.z, ENTRY_MARGIN)
         } else {
             (pos.z - c.z).abs() < 0.6 && s.contact(pos, ENTRY_MARGIN).is_some_and(|n| crate::human::haystack::enters(n, facing, dir))
         };
@@ -411,18 +420,20 @@ mod tests {
         let s = [spot()];
         // in contact 0.4 m outside the box edge (x 8.6), any profile
         let p = Vec3::new(8.2, 0.0, 0.0);
-        assert_eq!(entry(&s, p, Vec2::X, Vec2::X, false, 0.0), Some(0));
+        assert_eq!(entry(&s, p, Vec2::X, Vec2::X, false), Some(0));
         // pushing 60 deg off the way in, moving away, facing away, too far
-        assert_eq!(entry(&s, p, Vec2::from_angle(1.05), Vec2::X, false, 0.0), None);
-        assert_eq!(entry(&s, p, -Vec2::X, Vec2::X, false, 0.0), None);
-        assert_eq!(entry(&s, p, Vec2::X, -Vec2::X, false, 0.0), None);
-        assert_eq!(entry(&s, Vec3::new(7.9, 0.0, 0.0), Vec2::X, Vec2::X, false, 0.0), None);
+        assert_eq!(entry(&s, p, Vec2::from_angle(1.05), Vec2::X, false), None);
+        assert_eq!(entry(&s, p, -Vec2::X, Vec2::X, false), None);
+        assert_eq!(entry(&s, p, Vec2::X, -Vec2::X, false), None);
+        assert_eq!(entry(&s, Vec3::new(7.9, 0.0, 0.0), Vec2::X, Vec2::X, false), None);
         // at a side face the way in is +Y
-        assert_eq!(entry(&s, Vec3::new(10.0, -1.3, 0.0), Vec2::Y, Vec2::Y, false, 0.0), Some(0));
-        assert_eq!(entry(&s, Vec3::new(10.0, -1.3, 0.0), Vec2::X, Vec2::X, false, 0.0), None);
-        // falling onto it: from 1.5 m above the top, not from higher up
-        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.0), Vec2::ZERO, Vec2::X, true, -3.0), Some(0));
-        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.2), Vec2::ZERO, Vec2::X, true, -3.0), None);
-        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 3.0), Vec2::ZERO, Vec2::X, true, 1.0), None);
+        assert_eq!(entry(&s, Vec3::new(10.0, -1.3, 0.0), Vec2::Y, Vec2::Y, false), Some(0));
+        assert_eq!(entry(&s, Vec3::new(10.0, -1.3, 0.0), Vec2::X, Vec2::X, false), None);
+        // in the air (retail CheckForHayStacks): once the feet are below
+        // the top (1.6), rising or falling; not above it
+        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 1.55), Vec2::ZERO, Vec2::X, true), Some(0));
+        assert_eq!(entry(&s, Vec3::new(10.2, 0.3, 1.7), Vec2::ZERO, Vec2::X, true), None);
+        // beside it in contact, no facing / push test in the air
+        assert_eq!(entry(&s, Vec3::new(8.2, 0.0, 1.0), Vec2::ZERO, -Vec2::X, true), Some(0));
     }
 }
