@@ -15,6 +15,8 @@
 #   pulldown -13.58 43.99 5.02   (walk to a roof edge: stops; W+F: hangs)
 #   beamend  38.60 -55.12 1.01   (walk along a railing: stops at its end)
 #   roll     34.46 20.40 0.02    (9.5 m fall, W held: damage roll, 30 %)
+#   pilotis  -41.71 10.61 6.90   (0.6 m drop 0.3 m beside a post: retail
+#                                 CheckForPilotis, onto its centre)
 set -u
 : "${ACBMP_SCHEMAS:=$HOME/Music/anvilforge-py/src/anvilforge/schemas}" "${ACBMP_EXE:=$HOME/Music/ACB/ACBMP.exe}"
 export ACBMP_SCHEMAS ACBMP_EXE
@@ -30,6 +32,7 @@ runs=(
   "pulldown|-12.0,43.99,6.5,90|0=w 3=w,f 3.2= 5=|6"
   "beamend|34.5,-54.38,0.1,-90|0=w,shift 0.6=w,shift,space 0.62=w,shift 1.1= 2=d 5=|6"
   "roll|31,20.4,9.5,-90|0=w 1.5=|3"
+  "pilotis|-41.81,10.30,7.5,-90|0=|2"
 )
 for fps in 60 144; do
   for r in "${runs[@]}"; do

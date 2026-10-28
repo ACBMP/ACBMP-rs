@@ -85,7 +85,8 @@ also side-jumps. A fall grabs a hold up to 1.2 m ahead only in its first
 deeper ones fallen off, unless something blocks the space just past the
 edge (a railing, a wall, a low overhang: you stay on the edge). A short
 fall (its first 2 m) next to a railing or beam lands on it, in the beam
-stance. Walk or run into a haystack (touch it, facing it and pushing
+stance; next to a post top (pilotis) you land on its centre (try a drop at
+`--at=-41.81,10.30,7.5,-90`). Walk or run into a haystack (touch it, facing it and pushing
 towards it) to hide; in the air you go in when you touch it or when the
 1.8 m from your feet up crosses it (dropping or jumping onto or past
 it). Any move key leaves. Falling onto a surface whose collision material

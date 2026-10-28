@@ -11,8 +11,17 @@
 //! segment from the feet [`AIR_SEGMENT`] up crosses a haystack's
 //! detection box (`DetectHayStack` 01318f9a, over far objects within
 //! [`AIR_RADIUS`]). There is no fall speed or height-above-top rule.
+//!
+//! Before any of that the check is skipped while the haystack ignore timer
+//! runs ([`ignore_blocks`]) and during a respawn drop ([`RESPAWN_DROP`]).
+//! During a leap of faith (`HumanInAir::IsInLeapOfFaith` 012e64a0, the
+//! vtable +0x88 test) retail instead casts a ray from the previous position
+//! through the current one ([`leap_ray`]) and enters the jump's deep
+//! haystack target when the ray hits and the feet are near its height
+//! ([`near_deep_target`]); the contact and box tests fall back to that
+//! target too.
 
-use glam::Vec2;
+use glam::{Vec2, Vec3};
 
 /// The facing must be within 100 deg of the way into the haystack (the
 /// negated contact normal): `-n . facing > cos 100`
@@ -57,9 +66,86 @@ pub fn air_enters(outside: f32, z: f32, min_z: f32, max_z: f32, reach: f32) -> b
     outside <= reach && z <= max_z && z + AIR_SEGMENT >= min_z
 }
 
+/// `HumanInAirData::GetHayStackIgnoreTimer` (00ec45f0, InAirData +0x228):
+/// the air haystack check is skipped while the clock is before the timer's
+/// end. Retail starts the timer lazily at the clock's current time (so it
+/// never blocks then) and nothing else in the Mac build writes its end
+/// (+0x230): kept for fidelity, `None` = never armed.
+pub fn ignore_blocks(now: f32, until: Option<f32>) -> bool {
+    until.is_some_and(|u| now < u)
+}
+
+/// InAirData +0x3b0 value for the drop after a respawn
+/// (`BhvAssassin::PostRespawn` 010dad1b, also `Human::PlayerLeaving`
+/// 00c9fc9b); `CheckForHayStacks` returns early for it (01319100).
+pub const RESPAWN_DROP: u32 = 9;
+
+/// May the air state look for haystacks at all: not while the ignore
+/// timer runs, not during a respawn drop (01319100 prologue).
+pub fn air_check_allowed(now: f32, ignore_until: Option<f32>, respawn_drop: bool) -> bool {
+    !ignore_blocks(now, ignore_until) && !respawn_drop
+}
+
+/// `HumanInAir::IsNearDeepHayStackTarget` (0130aa50): the feet must be
+/// within this height of the deep haystack target (HumanInAir +0x420),
+/// metres (`|z - target z| < 2.0`).
+pub const DEEP_TARGET_DZ: f32 = 2.0;
+
+pub fn near_deep_target(z: f32, target_z: f32) -> bool {
+    (z - target_z).abs() < DEEP_TARGET_DZ
+}
+
+/// `CheckForHayStacks` (01319100) leap-of-faith ray: from the previous
+/// position along the step, this many times the step's length (3.0).
+pub const LEAP_RAY_SCALE: f32 = 3.0;
+/// No ray (and no entry) for a step this short or shorter, metres (0.0005).
+pub const LEAP_RAY_MIN: f32 = 0.0005;
+
+/// The leap-of-faith ray `(from, to)` for a step `prev -> cur`, if any.
+pub fn leap_ray(prev: Vec3, cur: Vec3) -> Option<(Vec3, Vec3)> {
+    let d = cur - prev;
+    let len = d.length() * LEAP_RAY_SCALE;
+    (len > LEAP_RAY_MIN).then(|| (prev, prev + d.normalize() * len))
+}
+
+/// The leap-of-faith entry: the ray hit something (the clearance ray cast
+/// fails) and the feet are near the deep target's height.
+pub fn leap_enters(ray_hit: bool, z: f32, target_z: f32) -> bool {
+    ray_hit && near_deep_target(z, target_z)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignore_timer_and_respawn_veto() {
+        assert!(!ignore_blocks(5.0, None));
+        assert!(ignore_blocks(5.0, Some(5.5)));
+        assert!(!ignore_blocks(5.5, Some(5.5)));
+        assert!(air_check_allowed(1.0, None, false));
+        assert!(!air_check_allowed(1.0, Some(2.0), false));
+        assert!(!air_check_allowed(1.0, None, true));
+    }
+
+    #[test]
+    fn deep_target_within_2_m() {
+        assert!(near_deep_target(11.9, 10.0));
+        assert!(near_deep_target(8.1, 10.0));
+        assert!(!near_deep_target(12.0, 10.0));
+        assert!(!near_deep_target(7.9, 10.0));
+    }
+
+    #[test]
+    fn leap_ray_three_steps_long() {
+        let (a, b) = leap_ray(Vec3::ZERO, Vec3::new(0.0, 0.0, -0.5)).unwrap();
+        assert_eq!(a, Vec3::ZERO);
+        assert!((b.z + 1.5).abs() < 1e-6);
+        assert!(leap_ray(Vec3::ZERO, Vec3::new(0.0001, 0.0, 0.0)).is_none());
+        assert!(leap_enters(true, 3.0, 2.0));
+        assert!(!leap_enters(false, 3.0, 2.0));
+        assert!(!leap_enters(true, 5.0, 2.0));
+    }
 
     fn at(deg: f32) -> Vec2 {
         Vec2::from_angle(deg.to_radians())

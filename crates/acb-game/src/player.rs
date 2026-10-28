@@ -69,7 +69,7 @@ pub const LEDGE_STOP: f32 = human::ground::EDGE_STOP_DEPTH;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air::start(pos.z, Some(0.0)), edge: None, obstacle: None, legs: human::Legs::default() }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air { respawn: true, ..Air::start(pos.z, Some(0.0)) }, edge: None, obstacle: None, legs: human::Legs::default() }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -563,16 +563,38 @@ pub(crate) fn drive(
         Gait::Walk
     };
     // into a hiding spot: running into one, or falling onto it (not during
-    // a targeted jump: it lands first, else the flight resumes after the exit)
-    if let (Some(hide), None) = (&clipset.hide, &p.flight) {
-        let air = p.loco.airborne();
+    // a targeted jump: it lands first, else the flight resumes after the
+    // exit), or a jump aimed into one crossing it (retail leap of faith)
+    // the respawn drop ends on the ground (any later air state is a new one)
+    if !p.loco.airborne() && p.flight.is_none() {
+        p.air.respawn = false;
+    }
+    let leap = match (&clipset.hide, &p.flight) {
+        (Some(hide), Some(f)) => crate::hide::deep_target(&hide.spots, f.target).filter(|&i| {
+            let (next, _) = f.clone().step(dt);
+            crate::hide::leap_entry(&hide.spots, i, f.target, p.pos, next)
+        }),
+        _ => None,
+    };
+    if let (Some(hide), true) = (&clipset.hide, p.flight.is_none() || leap.is_some()) {
+        let air = p.loco.airborne() || leap.is_some();
         let high = input.run || input.sprint;
         let facing = Vec2::new(-p.yaw.sin(), p.yaw.cos());
         // retail InAir order (human::in_air::ORDER): a hold in reach is
-        // grabbed (below, in the fall) before a haystack is entered
+        // grabbed (below, in the fall) before a haystack is entered; no
+        // haystack during a respawn drop or while the ignore timer runs
+        // (CheckForHayStacks 01319100; ours never arms the timer)
         let grasp = air && ground.is_some_and(|g| air_grasp(p, g, clipset).is_some());
-        let entry = if grasp { None } else { crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), facing, air) };
+        let vetoed = air && !human::haystack::air_check_allowed(time, None, p.air.respawn);
+        let entry = if leap.is_some() {
+            leap
+        } else if grasp || vetoed {
+            None
+        } else {
+            crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), facing, air)
+        };
         if let Some(i) = entry {
+            p.flight = None;
             if crate::trace() {
                 eprintln!("hide: enter spot {i} from {:.2} {:.2} {:.2}{}", p.pos.x, p.pos.y, p.pos.z, if air { " (air)" } else { "" });
             }
@@ -632,7 +654,15 @@ pub(crate) fn drive(
                     }
                     return;
                 }
-                p.loco.set_beam(clips, sk, ground.beam(at).is_some());
+                // retail CheckForTargetedLedgeGrab (0131c1e4) arrival on a
+                // beam foothold (0x100): NarrowObject, entry type 8 (ours:
+                // the beam clip set, the target already settled on its
+                // centre line; no beam landing clip)
+                let on_beam = ground.beam(at).is_some();
+                if on_beam && crate::trace() {
+                    eprintln!("air: targeted beam landing at {:.2?} ({:?})", at.to_array(), human::in_air::arrival(human::in_air::FOOTHOLD_BEAM));
+                }
+                p.loco.set_beam(clips, sk, on_beam);
                 p.loco.land(0.0, dir != Vec2::ZERO);
             }
         } else if p.loco.airborne() {
@@ -656,8 +686,15 @@ pub(crate) fn drive(
             // -> GetBeamAnchor 0130fb08 -> InAir.NarrowObject; ours lands on
             // its centre line in the beam clip set, no entry clip)
             let sight = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            // a post top first (retail CheckForPilotis 00d1109a, before
+            // GetBeamAnchor; ours snaps onto its centre, no Pilotis state)
             let beam = if p.vel.z <= 0.0 && human::in_air::grasp_allowed(p.fall_from - p.pos.z, p.catch_block) {
-                ground.beam_anchor(p.pos, sight).filter(|(a, _)| human::in_air::beam_catch_allowed(p.air.start_z, a.z))
+                let post = ground.pilotis(p.pos, sight).filter(|c| human::in_air::beam_catch_allowed(p.air.start_z, c.z));
+                if let (Some(c), true) = (post, crate::trace()) {
+                    eprintln!("air: pilotis at {:.2?}", c.to_array());
+                }
+                post.and_then(|c| ground.beam(c).map(|b| (c, b)))
+                    .or_else(|| ground.beam_anchor(p.pos, sight).filter(|(a, _)| human::in_air::beam_catch_allowed(p.air.start_z, a.z)))
             } else {
                 None
             };
@@ -744,7 +781,7 @@ pub(crate) fn drive(
             let running = (p.loco.speed >= 1.5 || idle.is_some()) && human::jump::freerun(&p.legs, dir, fwd);
             // freerun: up onto a ledge ahead
             // (never onto a haystack's top: running into one hides)
-            let haystack = |t: Vec3| clipset.hide.as_ref().is_some_and(|h| h.spots.iter().any(|s| s.seat.is_none() && s.outside(t) <= 0.0 && t.z <= s.top() + 0.5));
+            let haystack = |t: Vec3| clipset.hide.as_ref().is_some_and(|h| crate::hide::deep_target(&h.spots, t).is_some());
             let up = running.then(|| jump::target(ground, clips, p.pos, fwd, false)).flatten().filter(|u| !haystack(u.0));
             // drops < 0.53 m are stepped down, deeper ones fallen off
             let (mut to, ledge) = ground.move_on_edge(p.pos, jump::balance_on(beam, delta), human::ground::FALL_OFF_EDGE);

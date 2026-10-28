@@ -30,6 +30,10 @@ pub struct Ground {
     /// Guidance edges along walls, for climbing.
     pub(crate) holds: Vec<Hold>,
     pub(crate) hold_grid: HashMap<(i32, i32), Vec<u32>>,
+    /// Recent [`Ground::pilotis`] answers by their exact inputs (a pure
+    /// query; a client's prediction replays the same falling ticks after
+    /// every snapshot).
+    pub(crate) pilotis_memo: std::sync::Mutex<std::collections::VecDeque<([u32; 5], Option<Vec3>)>>,
 }
 
 /// Retail player body (`BipedComponent` of AC2MP_Generic_PlayerEntity):
@@ -71,7 +75,7 @@ fn ray_tri(o: Vec3, d: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
 
 impl Ground {
     pub fn load(archive: &Archive) -> anyhow::Result<Ground> {
-        let mut g = Ground { tris: Vec::new(), no_stand: Vec::new(), floor: HashMap::new(), wall: HashMap::new(), ledges: Vec::new(), ledge_grid: HashMap::new(), holds: Vec::new(), hold_grid: HashMap::new() };
+        let mut g = Ground { tris: Vec::new(), no_stand: Vec::new(), floor: HashMap::new(), wall: HashMap::new(), ledges: Vec::new(), ledge_grid: HashMap::new(), holds: Vec::new(), hold_grid: HashMap::new(), pilotis_memo: Default::default() };
         for e in archive.guidance_edges() {
             let wall = e.normals.iter().map(|n| Vec3::from(*n)).find(|n| n.z.abs() < 0.5 && n.truncate().length() > 0.5);
             if let Some(w) = wall {
