@@ -1323,4 +1323,17 @@ mod tests {
         assert!(check(Act::Kill, &a, &b, t.relation(0, 4), &rules, PAIR_SPACING).is_ok());
         assert!(check(Act::Kill, &a, &b, t.relation(1, 4), &rules, PAIR_SPACING).is_err());
     }
+
+    #[test]
+    fn looked_at_cone_range_sight() {
+        let pos = [Vec3::ZERO, Vec3::new(10.0, 1.0, 0.0), Vec3::new(10.0, 3.0, 0.0), Vec3::new(31.0, 0.0, 0.0)];
+        let all = [true; 4];
+        let clear = |_: usize, _: usize| true;
+        // 1 is nearest the view centre; 2 is at 16.7 deg (inside 20), 3 too far
+        assert_eq!(looked_at(0, &pos, 0.0, &all, &clear), Some(1));
+        assert_eq!(looked_at(0, &pos, 0.0, &[true, false, true, true], &clear), Some(2), "the dead are skipped");
+        assert_eq!(looked_at(0, &pos, 0.0, &all, &|_, c| c != 1), Some(2), "a wall hides 1");
+        assert_eq!(looked_at(0, &pos, 0.6, &all, &clear), None, "34 deg off: out of the cone");
+        assert_eq!(looked_at(0, &[Vec3::ZERO, Vec3::new(31.0, 0.0, 0.0)], 0.0, &[true; 2], &clear), None, "beyond 30 m");
+    }
 }

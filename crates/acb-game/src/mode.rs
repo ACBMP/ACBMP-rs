@@ -60,6 +60,12 @@ pub const START_DELAY: f32 = 3.0;
 /// Assassinate round length: "10 minutes" in the shipped mode description
 /// (UIString 0x4e102; the GBrick_Timer XML is not shipped).
 pub const ASSASSINATE_TIME: f32 = 600.0;
+/// Placeholder (Assassinate): killing a crowd NPC loses the killer's
+/// contract. Only UI strings point that way (spec R item "wrong kill breaks
+/// the contract"); `GBrick_ScoreKill` pays 0 for an NPC (0x0103832c), and
+/// 0x4e125 "Civilian kills give +#ScoreOrBonus# points to each of your
+/// opponents" names no mode (not ported).
+pub const NPC_KILL_LOSES_CONTRACT: bool = true;
 /// Escaping a chase: `GBrick_ScoreChase` XML default `ScoreEscape` 100.
 pub const ESCAPE_POINTS: u32 = 100;
 /// `GBrick_Escape::ReadFromXML` (Mac 0x00c17d32) defaults, seconds to fill
@@ -523,6 +529,19 @@ impl Match {
         self.died(victim);
         // +1: the clock part of this same tick already counts down once
         self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1) + 1);
+    }
+
+    /// Assassinate: player `p` killed a crowd NPC: its contract and its
+    /// acquisition are lost ([`NPC_KILL_LOSES_CONTRACT`]). Other modes: no
+    /// effect.
+    pub(crate) fn on_npc_kill(&mut self, p: usize) {
+        if self.mode != Mode::Assassinate || !NPC_KILL_LOSES_CONTRACT || p >= self.score.len() {
+            return;
+        }
+        for e in self.contracts.on_stunned(p) {
+            self.events.push(MatchEvent::Contract(e));
+        }
+        self.reset_acquire(p);
     }
 
     /// Player `p` touched down after a fall with `damage` % of max life
@@ -1200,5 +1219,63 @@ mod tests {
         assert_eq!(m.score, vec![0, STUN_POINTS]);
         assert_eq!(m.acquire[0], Acquire::default(), "the stunned acquirer starts over");
         assert_eq!(m.relation(1, 0), Relation::Other);
+    }
+
+    // --- Assassinate contract events (A3)
+
+    /// 0 holds a contract on 1 (and 2 on 1 when `three`).
+    fn asn_held(three: bool) -> (Match, Vec<Presence>) {
+        let mut m = asn(if three { 3 } else { 2 });
+        let mut who = asn_who();
+        if three {
+            // 2 at -x looking away
+            who.push(Presence { look: std::f32::consts::PI, ..Presence::at(Vec3::new(-5.0, 0.0, 0.0)) });
+        }
+        steps(&mut m, &who, 180);
+        assert_eq!(m.contracts.hunters[0].target, Some(1));
+        (m, who)
+    }
+
+    #[test]
+    fn assassinate_event_target_death_by_other_loses() {
+        let (mut m, _) = asn_held(true);
+        // 2 also holds 1 (set by hand: what matters is the death)
+        m.contracts.hunters[2].target = Some(1);
+        m.on_action(2, 1, crate::kill::WALK);
+        assert_eq!(m.score, vec![0, 0, KILL_POINTS]);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Fulfilled { hunter: 2, target: 1 })));
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: 0, target: 1 })));
+        assert_eq!(m.contracts.hunters[0].target, None);
+        assert!(m.acquire.iter().all(|a| a.focus != Some(1) && a.memory.iter().all(|&(p, _)| p != 1)));
+    }
+
+    #[test]
+    fn assassinate_event_stun_by_target_loses() {
+        let (mut m, _) = asn_held(false);
+        assert_eq!(m.relation(1, 0), Relation::Pursuer);
+        m.on_action(1, 0, crate::kill::STUN);
+        assert_eq!(m.score, vec![0, STUN_POINTS]);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: 0, target: 1 })));
+        assert_eq!(m.relation(0, 1), Relation::Other);
+        assert_eq!(m.acquire[0], Acquire::default());
+    }
+
+    #[test]
+    fn assassinate_event_npc_kill_loses() {
+        let (mut m, _) = asn_held(false);
+        m.on_npc_kill(0);
+        assert_eq!(m.events.last(), Some(&MatchEvent::Contract(ContractEvent::Lost { hunter: 0, target: 1 })));
+        assert_eq!(m.relation(0, 1), Relation::Other);
+        assert_eq!(m.score, vec![0, 0], "an NPC pays nothing");
+        // the duel ignores NPC kills
+        let mut d = m_duel_with_contract();
+        d.on_npc_kill(0);
+        assert_eq!(d.contracts.hunters[0].target, Some(1));
+    }
+
+    fn m_duel_with_contract() -> Match {
+        let mut d = m(2);
+        d.contracts.hunters[0].target = Some(1);
+        d
     }
 }

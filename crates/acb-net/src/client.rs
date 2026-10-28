@@ -420,7 +420,7 @@ impl Client {
             if e.kind == EventKind::KillRejected && e.a as usize == self.slot {
                 self.stats.rejected += 1;
             }
-            let mine = e.a as usize == self.slot || (matches!(e.kind, EventKind::Death | EventKind::Stunned | EventKind::ContractLost | EventKind::ContractFulfilled) && e.b as usize == self.slot) || matches!(e.kind, EventKind::MatchOver | EventKind::VipEscaped);
+            let mine = e.a as usize == self.slot || (matches!(e.kind, EventKind::Death | EventKind::Stunned | EventKind::ContractLost | EventKind::ContractFulfilled | EventKind::Acquiring | EventKind::AcquireStopped) && e.b as usize == self.slot) || matches!(e.kind, EventKind::MatchOver | EventKind::VipEscaped);
             if trace() || mine {
                 eprintln!("net: event {}", e.describe());
             }
@@ -562,6 +562,10 @@ impl Client {
             EventKind::ContractLost => format!("player {} lost you", e.a),
             EventKind::ContractFulfilled if e.a == me => format!("contract on player {} fulfilled", e.b),
             EventKind::ContractFulfilled => format!("killed by player {} (its target)", e.a),
+            EventKind::Acquiring if e.a == me => format!("acquiring player {}", e.b),
+            EventKind::Acquiring => format!("warning: player {} is acquiring you", e.a),
+            EventKind::AcquireStopped if e.a == me => format!("stopped acquiring player {}", e.b),
+            EventKind::AcquireStopped => format!("player {} stopped acquiring you", e.a),
             EventKind::MatchOver if e.a == crate::proto::NONE => "match over: draw".into(),
             EventKind::MatchOver if e.a == me => "match over: you win".into(),
             EventKind::MatchOver => format!("match over: player {} wins", e.a),
@@ -590,6 +594,22 @@ impl Client {
             }
             (None, None) => "no target".into(),
         };
+        // Assassinate: the look in progress, who is acquiring me, and the
+        // compass marks (every other living player, nearest first)
+        if let Some(a) = m.acquire.get(me) {
+            if let Some(f) = a.focus.filter(|&f| m.contracts.hunters[me].target != Some(f)) {
+                s += &format!(" | acquiring p{f} {:.0}%", (a.look as f32 / acb_game::rules::ACQUIRE_TICKS as f32).min(1.0) * 100.0);
+            }
+            let by = m.acquirers(me);
+            if !by.is_empty() {
+                s += &format!(" | being acquired by {}", by.iter().map(|p| format!("p{p}")).collect::<Vec<_>>().join(" "));
+            }
+            let mut marks: Vec<(f32, usize)> = m.potential_targets(me).into_iter().map(|q| ((pos(q) - pos(me)).truncate().length(), q)).collect();
+            marks.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            if !marks.is_empty() {
+                s += &format!(" | compass {}", marks.iter().map(|(d, q)| format!("p{q} {d:.0} m")).collect::<Vec<_>>().join(", "));
+            }
+        }
         if m.contracts.hunters.get(me).is_some_and(|h| h.target.is_some()) && m.chases.get(me).is_some_and(|c| c.is_none()) {
             s += &format!(" | threat {:.0}%", m.threat.get(me).copied().unwrap_or(0.0) * 100.0);
         }
