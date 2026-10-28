@@ -103,6 +103,7 @@ fn match_over_lossy_localhost() {
                 log: None,
                 duration: Some(7.0),
                 rules: None,
+                escort: None,
                 crowd: Default::default(),
             })
         })

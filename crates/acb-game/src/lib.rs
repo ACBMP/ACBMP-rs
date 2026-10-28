@@ -290,6 +290,9 @@ pub struct World {
     pub seen: std::collections::VecDeque<Vec<rules::Actor>>,
     /// Escort VIP ways per attacking team (static per map; not saved).
     pub vip_ways: Vec<(rules::Team, Arc<vip::WaySet>)>,
+    /// Escort team spawns (TeamIndex, position, yaw); team `t` starts every
+    /// round on TeamIndex `t + 1` (our reading, as [`World::escort`]).
+    pub team_spawns: Vec<(u32, Vec3, f32)>,
 }
 
 /// An Entity or EntityBuilder by name.
@@ -339,6 +342,7 @@ impl World {
             mode: None,
             seen: Default::default(),
             vip_ways: Vec::new(),
+            team_spawns: Vec::new(),
         };
         let characters = &setup.characters;
         if characters.is_empty() {
@@ -534,8 +538,37 @@ impl World {
         }
         teams.escorted = bodies.clone();
         teams.vips.clear();
+        self.team_spawns = archive
+            .player_spawns()
+            .into_iter()
+            .filter(|s| s.kind == 2)
+            .map(|s| {
+                let m = Mat4::from_cols_array(&s.matrix);
+                let f = m.y_axis.truncate();
+                (s.team, m.w_axis.truncate(), (-f.x).atan2(f.y))
+            })
+            .collect();
+        let team = teams.team.clone();
         self.mode = Some(mode::Match { vips: Some(vip::Vips::new(bodies)), ..mode::Match::escort(teams, config, spawns) });
+        self.place_teams(&team);
         Ok(())
+    }
+
+    /// Escort: puts every player on its team's spawn group (the k-th
+    /// player of team `t` on the k-th spawn of TeamIndex `t + 1`; a team
+    /// larger than its group shares the spawns round robin).
+    fn place_teams(&mut self, team: &[rules::Team]) {
+        let mut placed = Vec::new();
+        for (p, &t) in team.iter().enumerate().take(self.players.len()) {
+            let k = team[..p].iter().filter(|&&o| o == t).count();
+            let group: Vec<(Vec3, f32)> = self.team_spawns.iter().filter(|s| s.0 == t as u32 + 1).map(|s| (s.1, s.2)).collect();
+            if let Some(&(at, yaw)) = group.get(k % group.len().max(1)) {
+                placed.push((p, at, yaw));
+            }
+        }
+        for (p, at, yaw) in placed {
+            self.place_player(p, at, yaw);
+        }
     }
 
     /// VIP ways with `team` hunting (after [`World::escort`]).
@@ -705,9 +738,18 @@ impl World {
             };
             let back: Vec<(usize, Vec3, f32)> =
                 m.tick(&who, &los).into_iter().map(|(p, s)| { let (at, yaw) = m.spawns.get(s).copied().unwrap_or((pos[p], 0.0)); (p, at, yaw) }).collect();
+            // Escort: every round's play starts on the team spawns
+            let play_start = m.events.iter().any(|e| matches!(e, mode::MatchEvent::Round(rounds::RoundEvent::Phase { phase: rounds::Phase::Play, .. })));
+            let teams = match &m.mode {
+                mode::Mode::Escort(teams) if play_start => Some(teams.team.clone()),
+                _ => None,
+            };
             for (p, at, yaw) in back {
                 respawn(&mut self.players[p], &mut self.bodies);
                 self.place_player(p, at, yaw);
+            }
+            if let Some(team) = teams {
+                self.place_teams(&team);
             }
         }
         self.step_vips(&vip_kills);

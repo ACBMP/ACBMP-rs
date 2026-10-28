@@ -117,6 +117,8 @@ fn parse_keys(list: &str) -> anyhow::Result<HashSet<KeyCode>> {
                 "e" => KeyCode::KeyE,
                 "q" => KeyCode::KeyQ,
                 "f" => KeyCode::KeyF,
+                // test bot: an Escort hunter runs at the nearest targetable VIP pressing kill
+                "vip" => KeyCode::KeyV,
                 other => anyhow::bail!("unknown key {other}"),
             })
         })
@@ -283,6 +285,27 @@ struct App {
 }
 
 /// Controls from held and tapped keys and the camera yaw.
+/// `--input` key `vip`: while player `me` hunts in an Escort round, the
+/// camera yaw that runs it at the nearest targetable VIP.
+fn vip_chase(world: &World, me: usize) -> Option<f32> {
+    let m = world.mode.as_ref()?;
+    let acb_game::mode::Mode::Escort(teams) = &m.mode else { return None };
+    if teams.team.get(me) != Some(&teams.attacking_team) || !m.alive(me) {
+        return None;
+    }
+    let p = world.players.get(me)?.pos;
+    let v = m.vips.as_ref()?;
+    let targets = v.targets();
+    let to = v
+        .slots
+        .iter()
+        .zip(&v.bodies)
+        .filter(|(_, b)| targets.contains(b))
+        .filter_map(|(s, _)| s.as_ref().map(|x| x.walker.pos - p))
+        .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))?;
+    Some(to.y.atan2(to.x))
+}
+
 fn input_from(keys: &HashSet<KeyCode>, tapped: &HashSet<KeyCode>, cam_yaw: f32) -> PlayerInput {
     let k = |c| keys.contains(&c) || tapped.contains(&c);
     PlayerInput {
@@ -357,7 +380,7 @@ impl App {
         );
         let world = match self.connect.take() {
             Some(start) => {
-                let world = acb_net::game::load_world(&archive, &start.slots, self.builtins().as_ref(), start.rules, start.crowd)?;
+                let world = acb_net::game::load_match(&archive, &start.slots, self.builtins().as_ref(), start.rules, start.crowd, start.escort.as_ref())?;
                 eprintln!("net: match world with {} players, playing slot {}", world.players.len(), start.slot);
                 world
             }
@@ -438,13 +461,17 @@ impl App {
     fn run_ticks(&mut self) -> f32 {
         let Some(mut world) = self.world.take() else { return 1.0 };
         if let Some(mut net) = self.net.take() {
+            let chase = vip_chase(&world, net.slot);
             let (script, keys, tapped, yaw) = (&mut self.script, &mut self.keys, &mut self.tapped, self.orbit.yaw);
             let alpha = net.advance(&mut world, |tick| {
                 let time = tick as f32 / TICK_HZ as f32;
                 while script.first().is_some_and(|e| e.0 <= time) {
                     *keys = script.remove(0).1;
                 }
-                let i = input_from(keys, tapped, yaw);
+                let i = match chase {
+                    Some(cam_yaw) if keys.contains(&KeyCode::KeyV) => PlayerInput { forward: true, run: true, kill: true, cam_yaw, ..Default::default() },
+                    _ => input_from(keys, tapped, yaw),
+                };
                 tapped.clear();
                 i
             });

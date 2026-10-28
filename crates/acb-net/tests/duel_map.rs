@@ -117,6 +117,7 @@ fn duel_over_lossy_localhost() {
                 log: None,
                 duration: None,
                 rules: Some(RULES),
+                escort: None,
                 crowd: Default::default(),
             })
         })

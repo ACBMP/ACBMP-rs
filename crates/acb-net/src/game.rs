@@ -12,7 +12,7 @@ use acb_game::{Setup, World};
 use acb_world::Archive;
 use glam::Vec3;
 
-use crate::proto::{CrowdConfig, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_SEATED, F_VICTIM, NONE};
+use crate::proto::{CrowdConfig, EscortRules, EscortState, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, VipState, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_SEATED, F_VICTIM, NONE, NONE16};
 
 /// Builds a match world: slot `i` is player `i` on the map's player spawn
 /// `i` (or its `at`) plus `crowd.count` NPCs seeded from `crowd.seed`
@@ -20,6 +20,14 @@ use crate::proto::{CrowdConfig, Event, EventKind, GameState, NetPos, PlayerGame,
 /// spawns. Server and clients call this with the same slots and rules, so
 /// both start from the same state.
 pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>, rules: Option<MatchConfig>, crowd: CrowdConfig) -> anyhow::Result<World> {
+    load_match(archive, slots, builtins, rules, crowd, None)
+}
+
+/// [`load_world`], with `escort` (and `rules`) an Escort match instead of
+/// the duel: teams per slot, VIP bodies and ways, rounds with `escort`'s
+/// intro / recap around `rules.time_limit` of play, players on the team
+/// spawns.
+pub fn load_match(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>, rules: Option<MatchConfig>, crowd: CrowdConfig, escort: Option<&EscortRules>) -> anyhow::Result<World> {
     let mut cache: HashMap<String, Arc<acb_anim::character::Character>> = HashMap::new();
     let mut characters = Vec::new();
     for s in slots {
@@ -66,9 +74,110 @@ pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTr
                 (m.w_axis.truncate(), (-f.x).atan2(f.y))
             })
             .collect();
-        world.mode = Some(Match::new(slots.len(), cfg, spawns));
+        match escort {
+            Some(e) => {
+                anyhow::ensure!(e.team.len() == slots.len(), "escort: {} teams for {} slots", e.team.len(), slots.len());
+                let teams = acb_game::rules::Teams { team: e.team.clone(), attacking_team: e.attacking, vips: Vec::new(), escorted: Vec::new() };
+                world.escort(archive, builtins, teams, cfg, spawns)?;
+                if let Some(m) = &mut world.mode {
+                    let n = m.rounds.as_ref().map_or(2, |r| r.team_score.len());
+                    m.rounds = Some(acb_game::rounds::Rounds::new(n, e.intro, cfg.time_limit, e.recap));
+                }
+            }
+            None => world.mode = Some(Match::new(slots.len(), cfg, spawns)),
+        }
     }
     Ok(world)
+}
+
+fn phase_u8(p: acb_game::rounds::Phase) -> u8 {
+    use acb_game::rounds::Phase;
+    match p {
+        Phase::Intro => 0,
+        Phase::Play => 1,
+        Phase::Recap => 2,
+        Phase::Over => 3,
+    }
+}
+
+fn phase_of(v: u8) -> acb_game::rounds::Phase {
+    use acb_game::rounds::Phase;
+    match v {
+        0 => Phase::Intro,
+        1 => Phase::Play,
+        2 => Phase::Recap,
+        _ => Phase::Over,
+    }
+}
+
+/// Escort rounds, team totals and VIPs as a snapshot carries them.
+fn escort_state(m: &Match) -> Option<EscortState> {
+    let (acb_game::mode::Mode::Escort(teams), Some(r)) = (&m.mode, &m.rounds) else { return None };
+    let v = m.vips.as_ref();
+    let targets = v.map(|v| v.targets()).unwrap_or_default();
+    let vips = v
+        .map(|v| {
+            v.slots
+                .iter()
+                .zip(&v.bodies)
+                .map(|(s, b)| match s {
+                    Some(x) => VipState {
+                        alive: true,
+                        targetable: targets.contains(b),
+                        way: x.way.min(255) as u8,
+                        back: x.back,
+                        checkpoints: x.checkpoints.min(255) as u8,
+                        next: x.walker.next.min(u16::MAX as usize) as u16,
+                        pos: x.walker.pos.to_array(),
+                    },
+                    None => VipState::default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(EscortState {
+        round: r.round.min(255) as u8,
+        phase: phase_u8(r.phase),
+        left: r.left,
+        attacking: teams.attacking_team,
+        team_score: r.team_score.clone(),
+        respawn_in: v.and_then(|v| v.respawn_in).map_or(NONE16, |t| t.min(NONE16 as u32 - 1) as u16),
+        target_in: v.map_or(0, |v| v.target_in.min(u16::MAX as u32) as u16),
+        spawns: v.map_or(0, |v| v.spawns.min(255) as u8),
+        vips,
+    })
+}
+
+/// Puts the server's Escort state into `m` (VIPs the server has alive and
+/// we do not stay gone until the next spawn).
+fn apply_escort(m: &mut Match, e: &EscortState) {
+    if let acb_game::mode::Mode::Escort(teams) = &mut m.mode {
+        teams.attacking_team = e.attacking;
+    }
+    if let Some(r) = &mut m.rounds {
+        r.round = e.round as u32;
+        r.phase = phase_of(e.phase);
+        r.left = e.left;
+        for (t, s) in e.team_score.iter().enumerate().take(r.team_score.len()) {
+            r.team_score[t] = *s;
+        }
+    }
+    if let Some(v) = &mut m.vips {
+        v.respawn_in = (e.respawn_in != NONE16).then_some(e.respawn_in as u32);
+        v.target_in = e.target_in as u32;
+        v.spawns = e.spawns as u32;
+        for (slot, s) in v.slots.iter_mut().zip(&e.vips) {
+            if !s.alive {
+                *slot = None;
+            } else if let Some(x) = slot {
+                x.way = s.way as usize;
+                x.back = s.back;
+                x.checkpoints = s.checkpoints as u32;
+                x.walker.next = s.next as usize;
+                x.walker.pos = glam::Vec3::from_array(s.pos);
+            }
+        }
+    }
 }
 
 /// The match as a snapshot carries it.
@@ -93,6 +202,7 @@ pub fn game_state(m: &Match) -> GameState {
                 threat: (m.threat[i].clamp(0.0, 1.0) * 65535.0).round() as u16,
             })
             .collect(),
+        escort: escort_state(m),
     }
 }
 
@@ -115,11 +225,30 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) {
             _ => None,
         };
     }
+    if let Some(e) = &g.escort {
+        apply_escort(m, e);
+    }
 }
 
 /// The match decisions of the last tick as events.
 pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
+    use acb_game::rounds::RoundEvent;
+    use acb_game::vip::VipEvent;
     let ev = |kind, a: usize, b: usize| Event { tick, kind, a: a.min(255) as u8, b: b.min(255) as u8 };
+    let vips = m.vips.iter().flat_map(|v| v.events.iter()).filter_map(|e| match *e {
+        VipEvent::Spawned { vip, way, .. } => Some(ev(EventKind::VipSpawned, vip, way)),
+        VipEvent::Targetable => Some(ev(EventKind::VipTargetable, 0, 0)),
+        VipEvent::Killed { vip, killer, .. } => Some(ev(EventKind::VipKilled, vip, killer)),
+        VipEvent::Checkpoint { vip, n, .. } => Some(ev(EventKind::VipCheckpoint, vip, n as usize)),
+        VipEvent::WayEnd { vip, n, .. } => Some(ev(EventKind::VipWayEnd, vip, n as usize)),
+    });
+    let rounds = m.events.iter().filter_map(|e| match *e {
+        MatchEvent::TeamScore { team, points, .. } => Some(ev(EventKind::TeamScore, team as usize, (points / 10) as usize)),
+        MatchEvent::Round(RoundEvent::Phase { round, phase }) => Some(ev(EventKind::RoundPhase, round as usize, phase_u8(phase) as usize)),
+        MatchEvent::Round(RoundEvent::Swap { round, attacking }) => Some(ev(EventKind::RoundSwap, round as usize, attacking as usize)),
+        MatchEvent::Round(RoundEvent::Over { winner }) => Some(ev(EventKind::EscortOver, winner.map_or(255, |w| w as usize), 0)),
+        _ => None,
+    });
     m.events
         .iter()
         .filter_map(|e| match *e {
@@ -133,9 +262,11 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
             MatchEvent::Fall { player, damage, fatal } => Some(ev(if fatal { EventKind::FatalFall } else { EventKind::Fall }, player, damage as usize)),
             // reported by detect_events
             MatchEvent::Respawn { .. } => None,
-            // Escort team scores and rounds: not on the wire yet (Phase 4 E5)
+            // below
             MatchEvent::TeamScore { .. } | MatchEvent::Round(_) => None,
         })
+        .chain(rounds)
+        .chain(vips)
         .collect()
 }
 
