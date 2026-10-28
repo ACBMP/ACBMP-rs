@@ -65,6 +65,8 @@ pub struct Start {
     pub crowd: CrowdConfig,
     /// Escort teams and phases; pass to [`game::load_match`].
     pub escort: Option<crate::proto::EscortRules>,
+    /// An Assassinate match; pass to [`game::load_match`].
+    pub assassinate: bool,
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -188,7 +190,7 @@ impl Client {
                         eprintln!("net: lobby {joined}/{players}");
                     }
                 }
-                Some(Msg::Start { map, snapshot_every, slots, rules, crowd, escort }) => {
+                Some(Msg::Start { map, snapshot_every, slots, rules, crowd, escort, assassinate }) => {
                     let Some(slot) = slot else { continue };
                     anyhow::ensure!(map.eq_ignore_ascii_case(&cfg.map), "server started {map}");
                     let n = slots.len();
@@ -228,7 +230,7 @@ impl Client {
                         stats: ClientStats::default(),
                         over: None,
                     };
-                    return Ok((client, Start { slot, slots, snapshot_every, rules, crowd, escort }));
+                    return Ok((client, Start { slot, slots, snapshot_every, rules, crowd, escort, assassinate }));
                 }
                 _ => {}
             }

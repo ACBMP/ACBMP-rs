@@ -867,6 +867,164 @@ pub fn team_relation(of_team: Team, of_role: Role, other: Kind, attacking_team: 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Assassinate: contracts acquired by looking at a player
+
+/// `GBrick_ContractInitiator` `SelectingTime` default 3.0 s (Mac ReadFromXML
+/// 0x012d8f7a, +0x86c): looking this long at a player acquires it.
+pub const SELECTING_TIME: f32 = 3.0;
+/// `ChangeTargetFocusDelay` default 2.0 s (0x012d8f7a +0x894, used by
+/// `UpdateContractedTargets` 0x012f7c2e): an acquired player out of focus
+/// stays acquired this long, and re-focusing it within that is instant.
+pub const CHANGE_TARGET_FOCUS_DELAY: f32 = 2.0;
+/// [`SELECTING_TIME`] in ticks.
+pub const ACQUIRE_TICKS: u32 = 180;
+/// [`CHANGE_TARGET_FOCUS_DELAY`] in ticks.
+pub const MEMORY_TICKS: u32 = 120;
+/// Placeholder: how far a player can look at another to acquire it. Retail
+/// takes the camera's target/lock (`BhvAssassin::GetLockTarget`, the
+/// TargetingManager highlight) through `ValidateTargetForCameraWithNavAndRaycast`
+/// 0x0130d596, whose range we have not read; we use the compass range.
+pub const LOOK_RANGE: f32 = DETECTION_RANGE;
+/// Placeholder: half-angle of the look cone around the camera's forward
+/// (cos 20 deg); retail's camera target pick was not traced.
+pub const LOOK_CONE_COS: f32 = 0.939_692_6;
+
+/// The player `hunter` looks at this tick: the living other within
+/// [`LOOK_RANGE`] and [`LOOK_CONE_COS`] of the camera forward `look`
+/// ((cos, sin) of the input's `cam_yaw`) and in line of sight, closest to
+/// the view centre (ties: lowest index). `alive[i]` gates candidates.
+pub fn looked_at(hunter: usize, pos: &[Vec3], look: f32, alive: &[bool], los: &dyn Fn(usize, usize) -> bool) -> Option<usize> {
+    let fwd = Vec2::new(look.cos(), look.sin());
+    let mut best: Option<(usize, f32)> = None;
+    for (c, q) in pos.iter().enumerate() {
+        if c == hunter || !alive.get(c).copied().unwrap_or(false) {
+            continue;
+        }
+        let d = (*q - pos[hunter]).truncate();
+        let dist = d.length();
+        if dist > LOOK_RANGE || dist < 1e-4 {
+            continue;
+        }
+        let dot = fwd.dot(d / dist);
+        if dot < LOOK_CONE_COS || best.is_some_and(|(_, b)| b >= dot) || !los(hunter, c) {
+            continue;
+        }
+        best = Some((c, dot));
+    }
+    best.map(|(c, _)| c)
+}
+
+/// One player's acquisition (retail `GBrick_ContractInitiator` selection
+/// timer +0x844 and its ContractAquiringCounter list +0x9c).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Acquire {
+    /// The player being looked at.
+    pub focus: Option<usize>,
+    /// Ticks `focus` has been looked at without a break.
+    pub look: u32,
+    /// Acquired players out of focus and ticks left until they are
+    /// forgotten (the contract on one of them is lost then).
+    pub memory: Vec<(usize, u32)>,
+}
+
+/// What an acquisition tick decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcquireEvent {
+    /// `hunter` started looking at `target` (who is warned).
+    Acquiring { hunter: usize, target: usize },
+    /// `hunter` stopped looking at `target` before acquiring it.
+    Stopped { hunter: usize, target: usize },
+}
+
+impl Acquire {
+    /// Ticks still needed on `focus` (0: acquired or acquirable now).
+    pub fn left(&self, needed: u32) -> u32 {
+        needed.saturating_sub(self.look)
+    }
+
+    /// Whether `target` is being acquired (looked at, not yet held).
+    pub fn acquiring(&self, target: usize, held: Option<usize>) -> bool {
+        self.focus == Some(target) && held != Some(target) && self.look > 0
+    }
+
+    /// Forget everything (death, stun, escape).
+    pub fn reset(&mut self) {
+        *self = Acquire::default();
+    }
+
+    /// Drop `p` everywhere (it died or left).
+    pub fn forget(&mut self, p: usize) {
+        if self.focus == Some(p) {
+            self.focus = None;
+            self.look = 0;
+        }
+        self.memory.retain(|&(q, _)| q != p);
+    }
+}
+
+impl Contracts {
+    /// One Assassinate tick for `hunter`: `cand` is who it looks at
+    /// ([`looked_at`]), `high_profile` whether that one is in High Profile
+    /// (acquired at once: "Don't rush, or the contract will be filled
+    /// instantly", 0x4dbc4). Looking [`ACQUIRE_TICKS`] in a row makes the
+    /// candidate `hunter`'s target; looking away puts the target in memory
+    /// for [`MEMORY_TICKS`], after which the contract is lost. A player in
+    /// memory is re-acquired at once.
+    pub fn acquire(&mut self, hunter: usize, acq: &mut Acquire, cand: Option<usize>, high_profile: bool) -> (Vec<ContractEvent>, Vec<AcquireEvent>) {
+        let (mut out, mut warn) = (Vec::new(), Vec::new());
+        let held = self.hunters[hunter].target;
+        if acq.focus != cand {
+            if let Some(old) = acq.focus {
+                if self.hunters[hunter].target == Some(old) {
+                    acq.memory.push((old, MEMORY_TICKS));
+                } else if acq.look > 0 {
+                    warn.push(AcquireEvent::Stopped { hunter, target: old });
+                }
+            }
+            acq.focus = cand;
+            acq.look = 0;
+        }
+        // memory counts the ticks away, this one included (the one looked
+        // at is taken out below)
+        acq.memory.retain_mut(|(p, left)| {
+            if Some(*p) == cand {
+                return true;
+            }
+            *left -= 1;
+            if *left > 0 {
+                return true;
+            }
+            if held == Some(*p) {
+                self.hunters[hunter].target = None;
+                out.push(ContractEvent::Lost { hunter, target: *p });
+            }
+            false
+        });
+        let Some(c) = cand else { return (out, warn) };
+        let remembered = acq.memory.iter().position(|&(p, _)| p == c).map(|i| acq.memory.remove(i)).is_some();
+        let held = self.hunters[hunter].target == Some(c);
+        acq.look = acq.look.saturating_add(1);
+        if held {
+            return (out, warn);
+        }
+        let needed = if high_profile || remembered { 0 } else { ACQUIRE_TICKS };
+        if acq.look == 1 && needed > 0 {
+            warn.push(AcquireEvent::Acquiring { hunter, target: c });
+        }
+        if acq.look >= needed {
+            if let Some(old) = self.hunters[hunter].target.replace(c) {
+                if !acq.memory.iter().any(|&(p, _)| p == old) {
+                    acq.memory.push((old, MEMORY_TICKS));
+                }
+            }
+            self.hunters[hunter].wait = 0.0;
+            out.push(ContractEvent::Assigned { hunter, target: c });
+        }
+        (out, warn)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

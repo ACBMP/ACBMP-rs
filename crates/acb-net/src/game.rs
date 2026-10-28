@@ -12,7 +12,7 @@ use acb_game::{Setup, World};
 use acb_world::Archive;
 use glam::Vec3;
 
-use crate::proto::{CrowdConfig, EscortRules, EscortState, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, VipState, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_SEATED, F_VICTIM, NONE, NONE16};
+use crate::proto::{AcquireState, CrowdConfig, EscortRules, EscortState, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, VipState, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_SEATED, F_VICTIM, NONE, NONE16};
 
 /// Builds a match world: slot `i` is player `i` on the map's player spawn
 /// `i` (or its `at`) plus `crowd.count` NPCs seeded from `crowd.seed`
@@ -20,14 +20,14 @@ use crate::proto::{CrowdConfig, EscortRules, EscortState, Event, EventKind, Game
 /// spawns. Server and clients call this with the same slots and rules, so
 /// both start from the same state.
 pub fn load_world(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>, rules: Option<MatchConfig>, crowd: CrowdConfig) -> anyhow::Result<World> {
-    load_match(archive, slots, builtins, rules, crowd, None)
+    load_match(archive, slots, builtins, rules, crowd, None, false)
 }
 
 /// [`load_world`], with `escort` (and `rules`) an Escort match instead of
 /// the duel: teams per slot, VIP bodies and ways, rounds with `escort`'s
 /// intro / recap around `rules.time_limit` of play, players on the team
-/// spawns.
-pub fn load_match(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>, rules: Option<MatchConfig>, crowd: CrowdConfig, escort: Option<&EscortRules>) -> anyhow::Result<World> {
+/// spawns. `assassinate` (and `rules`, no `escort`): an Assassinate match.
+pub fn load_match(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTracks>, rules: Option<MatchConfig>, crowd: CrowdConfig, escort: Option<&EscortRules>, assassinate: bool) -> anyhow::Result<World> {
     let mut cache: HashMap<String, Arc<acb_anim::character::Character>> = HashMap::new();
     let mut characters = Vec::new();
     for s in slots {
@@ -84,6 +84,7 @@ pub fn load_match(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTr
                     m.rounds = Some(acb_game::rounds::Rounds::new(n, e.intro, cfg.time_limit, e.recap));
                 }
             }
+            None if assassinate => world.mode = Some(Match::assassinate(slots.len(), cfg, spawns)),
             None => world.mode = Some(Match::new(slots.len(), cfg, spawns)),
         }
     }
@@ -221,6 +222,15 @@ pub fn game_state(m: &Match) -> GameState {
             })
             .collect(),
         escort: escort_state(m),
+        acquire: m
+            .acquire
+            .iter()
+            .map(|a| AcquireState {
+                focus: a.focus.map_or(NONE, |x| x as u8),
+                look: a.look.min(u16::MAX as u32) as u16,
+                memory: a.memory.iter().map(|&(p, left)| (p as u8, left.min(u16::MAX as u32) as u16)).collect(),
+            })
+            .collect(),
     }
 }
 
@@ -243,6 +253,11 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) -> Vec<usize> {
             (Some(phase), Some(target)) => Some(acb_game::mode::Chase { target, coef: p.escape as f32 / 65535.0, phase }),
             _ => None,
         };
+    }
+    for (a, s) in m.acquire.iter_mut().zip(&g.acquire) {
+        a.focus = (s.focus != NONE).then_some(s.focus as usize);
+        a.look = s.look as u32;
+        a.memory = s.memory.iter().map(|&(p, left)| (p as usize, left as u32)).collect();
     }
     g.escort.as_ref().map(|e| apply_escort(m, e)).unwrap_or_default()
 }
@@ -267,6 +282,7 @@ pub fn revive_vips(world: &mut acb_game::World) -> usize {
 
 /// The match decisions of the last tick as events.
 pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
+    use acb_game::rules::AcquireEvent;
     use acb_game::rounds::RoundEvent;
     use acb_game::vip::VipEvent;
     let ev = |kind, a: usize, b: usize| Event { tick, kind, a: a.min(255) as u8, b: b.min(255) as u8 };
@@ -301,6 +317,8 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
             MatchEvent::Respawn { .. } => None,
             // below
             MatchEvent::TeamScore { .. } | MatchEvent::Round(_) => None,
+            MatchEvent::Acquire(AcquireEvent::Acquiring { hunter, target }) => Some(ev(EventKind::Acquiring, hunter, target)),
+            MatchEvent::Acquire(AcquireEvent::Stopped { hunter, target }) => Some(ev(EventKind::AcquireStopped, hunter, target)),
         })
         .chain(rounds)
         .chain(vips)

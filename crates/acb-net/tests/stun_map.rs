@@ -101,6 +101,7 @@ fn stun_the_pursuer() {
                 duration: None,
                 rules: Some(RULES),
                 escort: None,
+                assassinate: false,
                 crowd: Default::default(),
             })
         })

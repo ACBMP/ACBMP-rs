@@ -114,6 +114,7 @@ fn crowd_over_lossy_localhost() {
                 rules: Some(acb_net::mode::MatchConfig { time_limit: 60.0, score_limit: 1000, respawn_delay: 5.0, start_delay: 3.0 }),
                 crowd: CROWD,
                 escort: None,
+                assassinate: false,
             })
         })
     };

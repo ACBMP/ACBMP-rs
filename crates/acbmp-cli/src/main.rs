@@ -344,8 +344,9 @@ enum Cmd {
         #[arg(long)]
         duration: Option<f32>,
         /// duel (Wanted contracts, scores, respawns; any player count), escort (teamvip: two
-        /// teams, VIPs, 2 rounds with an attacker swap; --time-limit is each round's play) or
-        /// free (no match rules)
+        /// teams, VIPs, 2 rounds with an attacker swap; --time-limit is each round's play),
+        /// assassinate (free-for-all, a contract is acquired by looking at a player for 3 s;
+        /// 600 s) or free (no match rules)
         #[arg(long, default_value = "duel")]
         mode: String,
         /// Escort: seconds before each round's play (retail 8)
@@ -360,9 +361,9 @@ enum Cmd {
         /// Escort: the team hunting the VIPs in round 1
         #[arg(long, default_value_t = 0)]
         attacking: u8,
-        /// Match length, seconds
-        #[arg(long, default_value_t = 300.0)]
-        time_limit: f32,
+        /// Match length, seconds (default 300; assassinate 600)
+        #[arg(long)]
+        time_limit: Option<f32>,
         /// The first to this score wins (0: none)
         #[arg(long, default_value_t = 1000)]
         score_limit: u32,
@@ -385,9 +386,10 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, mode, intro, recap, teams, attacking, time_limit, score_limit, respawn, start_delay, crowd, crowd_seed } => {
             let rules = match mode.as_str() {
-                "duel" | "escort" => Some(acb_net::mode::MatchConfig { time_limit, score_limit, respawn_delay: respawn, start_delay }),
+                "duel" | "escort" => Some(acb_net::mode::MatchConfig { time_limit: time_limit.unwrap_or(300.0), score_limit, respawn_delay: respawn, start_delay }),
+                "assassinate" => Some(acb_net::mode::MatchConfig { time_limit: time_limit.unwrap_or(acb_net::mode::ASSASSINATE_TIME), score_limit, respawn_delay: respawn, start_delay }),
                 "free" => None,
-                m => anyhow::bail!("--mode {m}: duel, escort or free"),
+                m => anyhow::bail!("--mode {m}: duel, escort, assassinate or free"),
             };
             let escort = if mode == "escort" {
                 let team: Vec<u8> = teams.split(',').filter(|t| !t.trim().is_empty()).map(|t| t.trim().parse()).collect::<Result<_, _>>()?;
@@ -406,7 +408,7 @@ fn main() -> anyhow::Result<()> {
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let netsim = acb_net::link::NetSim::parse(&netsim)?;
-            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, rules, crowd: acb_net::proto::CrowdConfig { count: crowd, seed: crowd_seed }, escort })?;
+            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, rules, crowd: acb_net::proto::CrowdConfig { count: crowd, seed: crowd_seed }, escort, assassinate: mode == "assassinate" })?;
         }
         Cmd::Ls { forge } => {
             let forge = Forge::open(forge)?;

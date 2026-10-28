@@ -9,7 +9,7 @@
 
 use glam::Vec3;
 
-use crate::rules::{Contracts, ContractEvent, Relation, Rules, Teams};
+use crate::rules::{Acquire, AcquireEvent, Contracts, ContractEvent, Relation, Rules, Teams};
 
 /// `GBrick_ScoreKill` XML default `TargetKilled` (Mac 0x0103832c).
 pub const KILL_POINTS: u32 = 100;
@@ -57,6 +57,9 @@ pub fn vip_rule(spawns: &[Vec3], mates: &[Vec3], enemies: &[Vec3]) -> Option<usi
 /// Placeholder: no contracts during the first seconds (retail's intro;
 /// `GBrick_Delay` `DelayDuration` 0x00d3d70a, XML only, default 0).
 pub const START_DELAY: f32 = 3.0;
+/// Assassinate round length: "10 minutes" in the shipped mode description
+/// (UIString 0x4e102; the GBrick_Timer XML is not shipped).
+pub const ASSASSINATE_TIME: f32 = 600.0;
 /// Escaping a chase: `GBrick_ScoreChase` XML default `ScoreEscape` 100.
 pub const ESCAPE_POINTS: u32 = 100;
 /// `GBrick_Escape::ReadFromXML` (Mac 0x00c17d32) defaults, seconds to fill
@@ -216,6 +219,9 @@ pub struct Presence {
     pub speed: f32,
     /// Jumping or falling.
     pub in_air: bool,
+    /// Camera yaw of the player's input (forward (cos, sin), see
+    /// [`crate::PlayerInput::cam_yaw`]): where it looks (Assassinate).
+    pub look: f32,
 }
 
 impl Presence {
@@ -245,6 +251,9 @@ pub enum MatchEvent {
     TeamScore { team: crate::rules::Team, points: u32, reason: ScoreReason },
     /// Escort: round phases, the attacking-team swap, the match end.
     Round(crate::rounds::RoundEvent),
+    /// Assassinate: a player started or stopped looking at another (the
+    /// looked-at player is warned).
+    Acquire(AcquireEvent),
 }
 
 /// Which rule set a [`Match`] runs.
@@ -258,6 +267,9 @@ pub enum Mode {
     /// rounds come later (Phase 4 E2..E5) through [`Teams::vips`] and
     /// [`Teams::attacking_team`].
     Escort(Teams),
+    /// Assassinate: free-for-all, a player acquires its target by looking
+    /// at it ([`crate::rules::Contracts::acquire`]); no lottery.
+    Assassinate,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +301,8 @@ pub struct Match {
     pub vips: Option<crate::vip::Vips>,
     /// Escort: rounds and team totals (Duel: `None`).
     pub rounds: Option<crate::rounds::Rounds>,
+    /// Assassinate: per player, its acquisition (others: empty).
+    pub acquire: Vec<Acquire>,
 }
 
 /// Seconds to whole ticks.
@@ -376,6 +390,65 @@ impl Match {
             events: Vec::new(),
             vips: None,
             rounds: None,
+            acquire: Vec::new(),
+        }
+    }
+
+    /// An Assassinate match ([`Mode::Assassinate`]; `config.time_limit`
+    /// should be [`ASSASSINATE_TIME`]).
+    pub fn assassinate(players: usize, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
+        Match { mode: Mode::Assassinate, acquire: vec![Acquire::default(); players], ..Match::new(players, config, spawns) }
+    }
+
+    /// Assassinate: the players acquiring `p` (looking at it, not yet
+    /// holding it): `p`'s warning.
+    pub fn acquirers(&self, p: usize) -> Vec<usize> {
+        (0..self.acquire.len()).filter(|&h| self.acquire[h].acquiring(p, self.contracts.hunters[h].target)).collect()
+    }
+
+    /// Assassinate: the players `p`'s compass marks as potential targets
+    /// (every other living player; 0x4e102 "Potential targets are marked
+    /// on your compass").
+    pub fn potential_targets(&self, p: usize) -> Vec<usize> {
+        if self.mode != Mode::Assassinate {
+            return Vec::new();
+        }
+        (0..self.score.len()).filter(|&q| q != p && self.alive(q)).collect()
+    }
+
+    /// Assassinate: `p` loses everything it was acquiring or held in
+    /// memory (stunned, escaped from, died).
+    fn reset_acquire(&mut self, p: usize) {
+        if let Some(a) = self.acquire.get_mut(p) {
+            a.reset();
+        }
+    }
+
+    /// Assassinate: `p` died: its acquisition is gone and nobody looks at
+    /// it or remembers it any more.
+    fn died(&mut self, p: usize) {
+        self.reset_acquire(p);
+        for a in &mut self.acquire {
+            a.forget(p);
+        }
+    }
+
+    /// Assassinate: every living player's acquisition tick (after the start
+    /// delay, like the duel's lottery).
+    fn acquire_tick(&mut self, who: &[Presence], los: &dyn Fn(usize, usize) -> bool) {
+        let pos: Vec<Vec3> = who.iter().map(|w| w.pos).collect();
+        let alive: Vec<bool> = (0..self.score.len()).map(|p| self.alive(p)).collect();
+        for h in 0..self.acquire.len().min(who.len()) {
+            if !alive[h] {
+                continue;
+            }
+            let cand = crate::rules::looked_at(h, &pos, who[h].look, &alive, los);
+            let hp = cand.is_some_and(|c| who[c].running);
+            let mut a = std::mem::take(&mut self.acquire[h]);
+            let (contracts, warn) = self.contracts.acquire(h, &mut a, cand, hp);
+            self.acquire[h] = a;
+            self.events.extend(warn.into_iter().map(MatchEvent::Acquire));
+            self.events.extend(contracts.into_iter().map(MatchEvent::Contract));
         }
     }
 
@@ -396,7 +469,16 @@ impl Match {
                 _ => teams.relation(of, body),
             }
         } else if body < self.contracts.hunters.len() {
-            self.contracts.relation(of, body)
+            let rel = self.contracts.relation(of, body);
+            // Assassinate: a player being acquired may stun its acquirer
+            // ("takes time and warns the target, allowing them to stun
+            // you", draft 0x4dbc4/0x4dea8)
+            let acquiring = self.acquire.get(body).is_some_and(|a| a.acquiring(of, self.contracts.hunters[body].target));
+            match rel {
+                Relation::Other if acquiring => Relation::Pursuer,
+                Relation::Target if acquiring => Relation::Mutual,
+                r => r,
+            }
         } else {
             Relation::Npc
         }
@@ -428,6 +510,7 @@ impl Match {
                 for e in self.contracts.on_stunned(victim) {
                     self.events.push(MatchEvent::Contract(e));
                 }
+                self.reset_acquire(victim);
             }
             return;
         }
@@ -437,6 +520,7 @@ impl Match {
         for e in self.contracts.on_death(victim, Some(killer)) {
             self.events.push(MatchEvent::Contract(e));
         }
+        self.died(victim);
         // +1: the clock part of this same tick already counts down once
         self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1) + 1);
     }
@@ -457,6 +541,7 @@ impl Match {
             for e in self.contracts.on_death(p, None) {
                 self.events.push(MatchEvent::Contract(e));
             }
+            self.died(p);
             self.respawn[p] = Some(ticks(self.config.respawn_delay).max(1) + 1);
         }
     }
@@ -518,6 +603,7 @@ impl Match {
                         for e in self.contracts.on_stunned(h) {
                             self.events.push(MatchEvent::Contract(e));
                         }
+                        self.reset_acquire(h);
                     }
                 }
             }
@@ -588,6 +674,9 @@ impl Match {
             for e in self.contracts.update(crate::DT, pos) {
                 self.events.push(MatchEvent::Contract(e));
             }
+        }
+        if self.ticks >= ticks(self.config.start_delay) && self.mode == Mode::Assassinate {
+            self.acquire_tick(who, los);
         }
         if self.rounds.is_some() {
             self.tick_rounds();
@@ -959,5 +1048,157 @@ mod tests {
                 (8 * s + 2, RoundEvent::Over { winner: Some(1) }),
             ]
         );
+    }
+
+    // --- Assassinate (A1/A2)
+
+    fn asn(n: usize) -> Match {
+        let spawns = vec![(Vec3::ZERO, 0.0), (Vec3::new(50.0, 0.0, 0.0), 0.0), (Vec3::new(0.0, 40.0, 0.0), 0.0)];
+        Match::assassinate(n, MatchConfig { time_limit: ASSASSINATE_TIME, score_limit: 1000, respawn_delay: 1.0, start_delay: 0.0 }, spawns)
+    }
+
+    /// Player 0 at the origin looking along +x (`look` 0) at player 1 5 m
+    /// away; player 1 looks away.
+    fn asn_who() -> Vec<Presence> {
+        vec![Presence::at(Vec3::ZERO), Presence { look: -std::f32::consts::FRAC_PI_2, ..Presence::at(Vec3::new(5.0, 0.0, 0.0)) }]
+    }
+
+    /// A kill by `k` on `v` standing 1 m behind it, through the match's
+    /// relation (what `World::step` hands `rules::check`).
+    fn kill_ok(m: &Match, k: usize, v: usize) -> bool {
+        use crate::rules::{check, Act, Actor, Stance, PAIR_SPACING};
+        let a = Actor { pos: Vec3::new(-1.0, 0.0, 0.0), yaw: -std::f32::consts::FRAC_PI_2, stance: Stance::Ground, speed: 0.0 };
+        let b = Actor { pos: Vec3::ZERO, yaw: -std::f32::consts::FRAC_PI_2, stance: Stance::Ground, speed: 0.0 };
+        check(Act::Kill, &a, &b, m.relation(k, v), &m.rules(), PAIR_SPACING).is_ok()
+    }
+
+    fn steps(m: &mut Match, who: &[Presence], n: u32) {
+        for _ in 0..n {
+            m.tick(who, &|_, _| true);
+        }
+    }
+
+    #[test]
+    fn assassinate_no_kill_before_acquisition() {
+        let mut m = asn(3);
+        assert_eq!(m.mode, Mode::Assassinate);
+        assert_eq!(m.config.time_limit, 600.0);
+        // nobody looks at anybody: no lottery, no contract, ever
+        let who = vec![Presence { look: 3.0, ..Presence::at(Vec3::ZERO) }, Presence { look: std::f32::consts::FRAC_PI_2, ..Presence::at(Vec3::new(5.0, 0.0, 0.0)) }, Presence { look: 3.0, ..Presence::at(Vec3::new(0.0, 5.0, 0.0)) }];
+        steps(&mut m, &who, 600);
+        for k in 0..3 {
+            for v in 0..3 {
+                if k != v {
+                    assert!(!kill_ok(&m, k, v), "{k} -> {v}");
+                }
+            }
+        }
+        assert!(m.contracts.hunters.iter().all(|h| h.target.is_none()));
+        // a kill outside the rules (e.g. a desync) still scores nothing
+        m.on_action(0, 1, crate::kill::WALK);
+        assert_eq!(m.score, vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn assassinate_acquire_at_tick_180() {
+        let mut m = asn(2);
+        let who = asn_who();
+        steps(&mut m, &who, 1);
+        assert_eq!(m.events, vec![MatchEvent::Acquire(AcquireEvent::Acquiring { hunter: 0, target: 1 })]);
+        assert_eq!(m.acquirers(1), vec![0], "the target is warned");
+        steps(&mut m, &who, 178);
+        assert_eq!(m.acquire[0].look, 179);
+        assert!(!kill_ok(&m, 0, 1), "tick 179: refused");
+        steps(&mut m, &who, 1);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Assigned { hunter: 0, target: 1 })));
+        assert!(kill_ok(&m, 0, 1), "tick 180: granted");
+        assert_eq!(m.relation(0, 1), Relation::Target);
+        assert!(m.acquirers(1).is_empty());
+        assert!(!kill_ok(&m, 1, 0), "one-way: 1 never looked at 0");
+        m.on_action(0, 1, crate::kill::WALK);
+        assert_eq!(m.score, vec![KILL_POINTS, 0]);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Fulfilled { hunter: 0, target: 1 })));
+        assert_eq!(m.acquire[0], Acquire::default(), "nobody looks at the dead");
+    }
+
+    #[test]
+    fn assassinate_high_profile_at_once() {
+        let mut m = asn(2);
+        let mut who = asn_who();
+        who[1].running = true;
+        steps(&mut m, &who, 1);
+        assert_eq!(m.events, vec![MatchEvent::Contract(ContractEvent::Assigned { hunter: 0, target: 1 })], "no warning: filled instantly");
+        assert!(kill_ok(&m, 0, 1));
+    }
+
+    #[test]
+    fn assassinate_memory_120_ticks() {
+        let mut m = asn(2);
+        let mut who = asn_who();
+        steps(&mut m, &who, 180);
+        assert_eq!(m.relation(0, 1), Relation::Target);
+        // look away 119 ticks and back: still held, no new wait
+        who[0].look = std::f32::consts::PI;
+        steps(&mut m, &who, 119);
+        assert_eq!(m.relation(0, 1), Relation::Target);
+        who[0].look = 0.0;
+        steps(&mut m, &who, 1);
+        assert_eq!(m.relation(0, 1), Relation::Target);
+        assert!(m.acquire[0].memory.is_empty());
+        // away 120 ticks: lost, and the next look takes the full 180 again
+        who[0].look = std::f32::consts::PI;
+        steps(&mut m, &who, 119);
+        assert_eq!(m.relation(0, 1), Relation::Target);
+        steps(&mut m, &who, 1);
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: 0, target: 1 })));
+        assert_eq!(m.relation(0, 1), Relation::Other);
+        who[0].look = 0.0;
+        steps(&mut m, &who, 179);
+        assert_eq!(m.relation(0, 1), Relation::Other);
+        steps(&mut m, &who, 1);
+        assert_eq!(m.relation(0, 1), Relation::Target);
+    }
+
+    #[test]
+    fn assassinate_switch_keeps_old_target_warm() {
+        let mut m = asn(3);
+        // 1 at +x, 2 at +y; 0 acquires 1, then 2, then 1 again
+        let mut who = vec![Presence::at(Vec3::ZERO), Presence { look: std::f32::consts::FRAC_PI_2, ..Presence::at(Vec3::new(5.0, 0.0, 0.0)) }, Presence { look: 3.0, ..Presence::at(Vec3::new(0.0, 5.0, 0.0)) }];
+        steps(&mut m, &who, 180);
+        assert_eq!(m.contracts.hunters[0].target, Some(1));
+        who[0].look = std::f32::consts::FRAC_PI_2;
+        steps(&mut m, &who, 100);
+        assert_eq!(m.contracts.hunters[0].target, Some(1), "held from memory while acquiring 2");
+        assert_eq!(m.acquirers(2), vec![0]);
+        steps(&mut m, &who, 20);
+        assert_eq!(m.contracts.hunters[0].target, None, "120 ticks away from 1: lost");
+        steps(&mut m, &who, 60);
+        assert_eq!(m.contracts.hunters[0].target, Some(2), "180 ticks on 2");
+        // back to 1: the full time again; 2 now waits in memory
+        who[0].look = 0.0;
+        steps(&mut m, &who, 180);
+        assert_eq!(m.contracts.hunters[0].target, Some(1));
+        // 2 runs (High Profile): at once; 1 is remembered, re-focused within
+        // 120 ticks it is back at once
+        who[2].running = true;
+        who[0].look = std::f32::consts::FRAC_PI_2;
+        steps(&mut m, &who, 1);
+        assert_eq!(m.contracts.hunters[0].target, Some(2));
+        who[0].look = 0.0;
+        steps(&mut m, &who, 1);
+        assert_eq!(m.contracts.hunters[0].target, Some(1), "1 still remembered: instant");
+    }
+
+    #[test]
+    fn assassinate_target_may_stun_acquirer() {
+        let mut m = asn(2);
+        let who = asn_who();
+        assert_eq!(m.relation(1, 0), Relation::Other);
+        steps(&mut m, &who, 60);
+        assert_eq!(m.relation(1, 0), Relation::Pursuer, "warned target sees its acquirer as a pursuer");
+        m.on_action(1, 0, crate::kill::STUN);
+        assert_eq!(m.score, vec![0, STUN_POINTS]);
+        assert_eq!(m.acquire[0], Acquire::default(), "the stunned acquirer starts over");
+        assert_eq!(m.relation(1, 0), Relation::Other);
     }
 }

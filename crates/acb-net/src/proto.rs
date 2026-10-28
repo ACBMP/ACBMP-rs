@@ -12,7 +12,9 @@ pub const MAGIC: [u8; 2] = *b"AB";
 /// 4: crowd size and seed in `Start`.
 /// 7: Escort: team rules in `Start`, rounds / team scores / VIPs in
 /// `GameState`, Escort events.
-pub const VERSION: u8 = 8;
+/// 9: Assassinate: a mode flag in `Start`, acquisitions in `GameState`,
+/// acquire events.
+pub const VERSION: u8 = 9;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -265,6 +267,10 @@ pub enum EventKind {
     VipWayEnd = 24,
     /// Escort: VIP of team `a` escaped, round `b` ends (protectors win it).
     VipEscaped = 25,
+    /// Assassinate: a = player looking, b = the player it starts acquiring.
+    Acquiring = 26,
+    /// Assassinate: a = player, b = the player it stopped acquiring.
+    AcquireStopped = 27,
 }
 
 impl EventKind {
@@ -296,6 +302,8 @@ impl EventKind {
             23 => VipCheckpoint,
             24 => VipWayEnd,
             25 => VipEscaped,
+            26 => Acquiring,
+            27 => AcquireStopped,
             _ => return None,
         })
     }
@@ -400,6 +408,8 @@ impl Event {
             EventKind::VipCheckpoint => format!("tick {} VIP {} passes checkpoint {}", self.tick, self.a, self.b),
             EventKind::VipEscaped => format!("tick {} VIP escaped: team {} wins round {}", self.tick, self.a, self.b as u32 + 1),
             EventKind::VipWayEnd => format!("tick {} VIP {} reaches its way's end ({} checkpoints)", self.tick, self.a, self.b),
+            EventKind::Acquiring => format!("tick {} player {} acquiring player {}", self.tick, self.a, self.b),
+            EventKind::AcquireStopped => format!("tick {} player {} stopped acquiring player {}", self.tick, self.a, self.b),
         }
     }
 }
@@ -437,6 +447,19 @@ pub struct GameState {
     pub players: Vec<PlayerGame>,
     /// Escort only.
     pub escort: Option<EscortState>,
+    /// Assassinate only: every player's acquisition (empty otherwise).
+    pub acquire: Vec<AcquireState>,
+}
+
+/// One player's Assassinate acquisition (4 + 3 per remembered player bytes).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AcquireState {
+    /// Player it looks at ([`NONE`]).
+    pub focus: u8,
+    /// Ticks it has looked.
+    pub look: u16,
+    /// Acquired players out of focus, ticks left.
+    pub memory: Vec<(u8, u16)>,
 }
 
 /// One VIP slot as a snapshot carries it (17 bytes).
@@ -556,6 +579,16 @@ impl GameState {
             }
             None => w.u8(0),
         }
+        w.u8(self.acquire.len() as u8);
+        for a in &self.acquire {
+            w.u8(a.focus);
+            w.u16(a.look);
+            w.u8(a.memory.len() as u8);
+            for &(p, left) in &a.memory {
+                w.u8(p);
+                w.u16(left);
+            }
+        }
     }
 
     fn read(r: &mut Reader, players: u8) -> Option<GameState> {
@@ -563,7 +596,15 @@ impl GameState {
         let over = r.u8()? != 0;
         let players = (0..players).map(|_| Some(PlayerGame { target: r.u8()?, score: r.u16()?, respawn: r.u16()?, cooldown: r.u16()?, health: r.u8()?, chase: r.u8()?, escape: r.u16()?, threat: r.u16()? })).collect::<Option<_>>()?;
         let escort = if r.u8()? != 0 { Some(EscortState::read(r)?) } else { None };
-        Some(GameState { ticks_left, over, players, escort })
+        let n = r.u8()?;
+        let acquire = (0..n)
+            .map(|_| {
+                let (focus, look, k) = (r.u8()?, r.u16()?, r.u8()?);
+                let memory = (0..k).map(|_| Some((r.u8()?, r.u16()?))).collect::<Option<_>>()?;
+                Some(AcquireState { focus, look, memory })
+            })
+            .collect::<Option<_>>()?;
+        Some(GameState { ticks_left, over, players, escort, acquire })
     }
 }
 
@@ -674,7 +715,7 @@ pub enum Msg {
     Lobby { joined: u8, players: u8, echo_ms: u32 },
     /// `rules`: the match everyone runs (`None`: free play); `crowd`: the
     /// NPCs everyone simulates (part of the deterministic sim).
-    Start { map: String, snapshot_every: u8, slots: Vec<Slot>, rules: Option<MatchConfig>, crowd: CrowdConfig, escort: Option<EscortRules> },
+    Start { map: String, snapshot_every: u8, slots: Vec<Slot>, rules: Option<MatchConfig>, crowd: CrowdConfig, escort: Option<EscortRules>, assassinate: bool },
     Snapshot(Snapshot),
     Over { reason: String },
 }
@@ -735,7 +776,7 @@ impl Msg {
                 w.u8(*players);
                 w.u32(*echo_ms);
             }
-            Msg::Start { map, snapshot_every, slots, rules, crowd, escort } => {
+            Msg::Start { map, snapshot_every, slots, rules, crowd, escort, assassinate } => {
                 w.u8(T_START);
                 w.str(map);
                 w.u8(*snapshot_every);
@@ -771,6 +812,7 @@ impl Msg {
                     }
                     None => w.u8(0),
                 }
+                w.u8(*assassinate as u8);
             }
             Msg::Snapshot(s) => {
                 w.u8(T_SNAPSHOT);
@@ -851,7 +893,8 @@ impl Msg {
                 } else {
                     None
                 };
-                Msg::Start { map, snapshot_every, slots, rules, crowd, escort }
+                let assassinate = r.u8()? != 0;
+                Msg::Start { map, snapshot_every, slots, rules, crowd, escort, assassinate }
             }
             T_SNAPSHOT => {
                 let tick = r.u32()?;
@@ -1117,6 +1160,7 @@ mod tests {
                         VipState::default(),
                     ],
                 }),
+                acquire: vec![AcquireState { focus: 1, look: 179, memory: vec![] }, AcquireState { focus: NONE, look: 0, memory: vec![(0, 119), (2, 1)] }],
             }),
         }
     }
@@ -1140,6 +1184,7 @@ mod tests {
                 rules: None,
                 crowd: CrowdConfig::default(),
                 escort: None,
+                assassinate: true,
             },
             Msg::Snapshot(Snapshot { game: None, ..s.clone() }),
             Msg::Start {
@@ -1149,6 +1194,7 @@ mod tests {
                 rules: Some(MatchConfig { time_limit: 120.0, score_limit: 500, respawn_delay: 5.0, start_delay: 3.0 }),
                 crowd: CrowdConfig { count: 40, seed: 0xdead_beef },
                 escort: Some(EscortRules { team: vec![0, 1, 0, 1], attacking: 0, intro: 2.0, recap: 3.0 }),
+                assassinate: false,
             },
             Msg::Snapshot(s),
             Msg::Over { reason: "done".into() },
