@@ -69,7 +69,11 @@ prints every tick's player state to stderr, and `ACBMP_TRACE=csv:run.csv`
 writes it as CSV (one row per 60 Hz tick, same columns as the retail captures).
 `acbmp ways <map.forge> [--hunters 1..4] [--points]` lists the generated
 Escort VIP ways (length, checkpoints, distance of the start from the hunter
-team spawns); Escort itself is not playable yet.
+team spawns). Escort itself is not playable yet: the VIP bodies (two crowd
+walkers on those ways, killed by hunters, respawning 5 s after both die and
+targetable 10 s later) only run in the game library and its tests
+(`ACBMP_TRACE=1 cargo test --release -p acb-game --test escort_map -- --nocapture`
+prints the `vip:` walk/kill/respawn trace).
 
 ### Retail captures (kit)
 
