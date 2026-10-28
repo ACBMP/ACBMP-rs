@@ -1105,3 +1105,20 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
 - StepOff (00cef704, push 00d129e8: 0.4 m out, 0.4 m up, 0.2 s; clearance ray down >= 0.8 m): only contacts with collision material type 2 (no-stand) step off; default material never does. Our collision has no materials, so `human::in_air::step_off` is a pure decision, not wired.
 - ForwardFromIdle (00f6720c): freerun jumps may leave from standing (or a start action < 0.75), no 1.5 m/s needed. Blocked at a wall counts as standing (speed 0), so the parapet gate jumps at once; its stick release moved to 0.78 s (ending -10.09 -0.36 6.59, on the top).
 - JumpImpulsion exits after 0.2 s anticipation (00f80e88; 00f3159c/00f31634/00fddfdc/00fde04a): `human::jump::impulsion_exit`; unreachable while there is no standing jump.
+
+## Escort on the network, E5 (2026-10-28, phase4-escort-net)
+- Proto v7. `Start.escort: Option<EscortRules{team per slot, attacking, intro, recap}>` (play length =
+  `MatchConfig::time_limit`); `GameState.escort: Option<EscortState>`: round, phase, ticks left, attacking
+  team, team totals, VIP respawn/target timers, spawn count, per VIP slot alive/targetable/back/way/
+  checkpoints/next waypoint/pos (f32). Events 16..24: TeamScore, RoundPhase, RoundSwap, EscortOver,
+  VipSpawned, VipTargetable, VipKilled, VipCheckpoint, VipWayEnd (VIP events read from `Vips::events`).
+- Clients build the same Escort world (`game::load_match`), so the VIP cycle is simulated, not sent; the
+  state is compared (match desync) and the server's wins (`apply_escort`; a VIP the server has alive and
+  we do not is not recreated, its walk state is not fully on the wire: yaw, way pool).
+- Team spawns (our reading): team t's k-th player on the k-th spawn of TeamIndex t + 1, at `World::escort`
+  (intro) and on every round's Play start (`World::place_teams`); same group VIP ways avoid when t hunts.
+- `acbmp serve --mode escort [--teams 0,1,0,1] [--attacking 0] [--intro 8] [--recap 8]`.
+  Viewer test input `vip` (hunter runs at nearest targetable VIP with kill). `tools/escort.sh`: 2v2,
+  5 % loss, 75 ms each way: 3 VIP kills, each once (server and all clients), swap after round 1,
+  0 desync / 0 match desync on 4 clients.
+- Open: Escort HUD (E6), respawn near own VIP / far for hunters (GetBestSpawnPoint_VIPrule), round length.
