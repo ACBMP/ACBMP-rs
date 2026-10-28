@@ -107,11 +107,14 @@ pub struct Air {
     pub delay: Option<f32>,
     /// Wall-reception checks passed so far (retail InAirData +0x3a4).
     pub wall_hits: u8,
+    /// The drop after a (re)spawn (retail InAirData +0x3b0 ==
+    /// [`crate::human::haystack::RESPAWN_DROP`]): no haystack entry.
+    pub respawn: bool,
 }
 
 impl Air {
     pub fn start(z: f32, delay: Option<f32>) -> Air {
-        Air { start_z: z, time: 0.0, delay, wall_hits: 0 }
+        Air { start_z: z, time: 0.0, delay, wall_hits: 0, respawn: false }
     }
 
     pub fn tick(&mut self, dt: f32) {

@@ -94,6 +94,49 @@ impl Spot {
     pub fn top(&self) -> f32 {
         self.frame.w_axis.z + self.max.z
     }
+
+    /// Does the segment `a -> b` (world) cross the box (slab test in box
+    /// space)? Stands in for retail's clearance ray cast against the
+    /// haystack's collision (`CheckClearanceRayCast` 00fc42a7, layer 5).
+    pub fn segment_hits(&self, a: Vec3, b: Vec3) -> bool {
+        let (a, b) = (self.local(a), self.local(b));
+        let d = b - a;
+        let (mut t0, mut t1) = (0.0f32, 1.0f32);
+        for k in 0..3 {
+            if d[k].abs() < 1e-9 {
+                if a[k] < self.min[k] || a[k] > self.max[k] {
+                    return false;
+                }
+                continue;
+            }
+            let (u, v) = ((self.min[k] - a[k]) / d[k], (self.max[k] - a[k]) / d[k]);
+            t0 = t0.max(u.min(v));
+            t1 = t1.min(u.max(v));
+        }
+        t0 <= t1
+    }
+
+    /// Is `t` a deep haystack target: inside the box footprint, at most
+    /// 0.5 m above its top (a jump target aimed into it)?
+    pub fn holds_target(&self, t: Vec3) -> bool {
+        self.seat.is_none() && self.outside(t) <= 0.0 && t.z <= self.top() + 0.5
+    }
+}
+
+/// The haystack a targeted jump to `target` is aimed into, if any (retail
+/// HumanInAir +0x420, the deep haystack target).
+pub fn deep_target(spots: &[Spot], target: Vec3) -> Option<usize> {
+    spots.iter().position(|s| s.holds_target(target))
+}
+
+/// Retail leap-of-faith haystack entry (`CheckForHayStacks` 01319100): the
+/// step `prev -> cur` of a jump aimed into spot `i`, its ray
+/// ([`crate::human::haystack::leap_ray`]) crossing the box, the feet near
+/// the target's height.
+pub fn leap_entry(spots: &[Spot], i: usize, target: Vec3, prev: Vec3, cur: Vec3) -> bool {
+    let s = &spots[i];
+    let hit = crate::human::haystack::leap_ray(prev, cur).is_some_and(|(a, b)| s.segment_hits(a, b));
+    crate::human::haystack::leap_enters(hit, cur.z, target.z)
 }
 
 /// Every haystack the map places (forge 0).
@@ -413,6 +456,32 @@ mod tests {
 
     fn spot() -> Spot {
         Spot { entity: 1, frame: Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)), min: Vec3::new(-1.4, -0.9, 0.0), max: Vec3::new(1.4, 0.9, 1.6), kind: 0, seat: None }
+    }
+
+    #[test]
+    fn leap_into_deep_target() {
+        let s = [spot()];
+        // a jump aimed into the box (top at 1.6)
+        let t = Vec3::new(10.0, 0.0, 1.0);
+        assert_eq!(deep_target(&s, t), Some(0));
+        assert_eq!(deep_target(&s, Vec3::new(10.0, 0.0, 2.2)), None);
+        assert_eq!(deep_target(&s, Vec3::new(12.0, 0.0, 1.0)), None);
+        // falling 0.3 m a tick above the top: the 3x ray (0.9 m) reaches it
+        assert!(leap_entry(&s, 0, t, Vec3::new(10.0, 0.0, 2.4), Vec3::new(10.0, 0.0, 2.1)));
+        // the ray falls short higher up
+        assert!(!leap_entry(&s, 0, t, Vec3::new(10.0, 0.0, 3.0), Vec3::new(10.0, 0.0, 2.7)));
+        // crossing the box but more than 2 m above the target
+        assert!(!leap_entry(&s, 0, Vec3::new(10.0, 0.0, -1.0), Vec3::new(10.0, 0.0, 1.5), Vec3::new(10.0, 0.0, 1.2)));
+        // no step, no ray
+        assert!(!leap_entry(&s, 0, t, Vec3::new(10.0, 0.0, 1.2), Vec3::new(10.0, 0.0, 1.2)));
+    }
+
+    #[test]
+    fn segment_box() {
+        let s = spot();
+        assert!(s.segment_hits(Vec3::new(7.0, 0.0, 0.5), Vec3::new(13.0, 0.0, 0.5)));
+        assert!(!s.segment_hits(Vec3::new(7.0, 0.0, 0.5), Vec3::new(8.0, 0.0, 0.5)));
+        assert!(!s.segment_hits(Vec3::new(7.0, 0.0, 2.0), Vec3::new(13.0, 0.0, 2.0)));
     }
 
     #[test]
