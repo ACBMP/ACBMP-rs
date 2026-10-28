@@ -600,8 +600,8 @@ impl App {
             let s = n.stats;
             let l = n.link_stats();
             eprintln!(
-                "net: tick {} confirmed {} rtt {:.0} ms; {} snapshots, {} checked ({} exact, {} desync), {} corrections, {} rollbacks, {} rejected; sent {} recv {} dropped {}",
-                w.tick, n.confirmed_tick, n.rtt * 1000.0, s.snapshots, s.checked, s.exact, s.desyncs, s.corrections, s.rollbacks, s.rejected, l.sent, l.recv, l.dropped
+                "net: tick {} confirmed {} rtt {:.0} ms; {} snapshots, {} checked ({} exact, {} desync, {} of {} match desync), {} corrections, {} rollbacks, {} rejected; sent {} recv {} dropped {}",
+                w.tick, n.confirmed_tick, n.rtt * 1000.0, s.snapshots, s.checked, s.exact, s.desyncs, s.game_desyncs, s.game_checked, s.corrections, s.rollbacks, s.rejected, l.sent, l.recv, l.dropped
             );
             if let Some(h) = n.hud(w) {
                 eprintln!("hud: {h}");
