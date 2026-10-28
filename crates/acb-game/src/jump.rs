@@ -539,6 +539,9 @@ impl Ground {
 /// Probe spacing of [`Ground::beam_anchor`], metres (ours).
 const BEAM_GRID: f32 = 0.05;
 
+/// [`Ground::pilotis`] answers kept (a few ticks of falls of every player).
+const PILOTIS_MEMO: usize = 256;
+
 /// A narrow top under feet at `p`: its long axis (unit; zero on a post,
 /// narrow both ways) and the offset from `p` to its centre line.
 #[derive(Clone, Copy, Debug)]
@@ -551,28 +554,20 @@ impl Ground {
     /// The beam (railing, narrow wall top, post) the feet at `p` stand
     /// on, if the top under them is narrower than [`NARROW`] across.
     pub fn beam(&self, p: Vec3) -> Option<Beam> {
-        let z = self.floor_below(p + Vec3::Z * 0.15)?;
-        if (z - p.z).abs() > 0.05 {
-            return None;
-        }
-        // floor `e` m out along `d` still counts as the same top: within
-        // 12 cm plus a walkable slope's rise (stairs and ramps are not
-        // beams; a railing or wall top drops away by far more)
-        let on = |d: Vec2, e: f32| {
-            let tol = 0.12 + SLOPE * e;
-            self.floor_below((p.truncate() + d * e).extend(z + 0.05 + tol)).is_some_and(|f| (f - z).abs() <= tol)
-        };
-        let half = NARROW * 0.5;
-        if [Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y].iter().all(|&d| on(d, half)) {
-            return None;
-        }
-        // width across each of 8 directions, 2 cm probes
-        let ext = |d: Vec2| (1..=50).map(|i| i as f32 * 0.02).find(|&e| !on(d, e)).unwrap_or(1.0);
+        let z = self.beam_top(p)?;
+        let on = |d: Vec2, e: f32| self.beam_on(p, z, d, e);
+        // width across each of 8 directions, 2 cm probes. Only widths
+        // under NARROW decide anything (the narrowest pair, the long axis
+        // test), so a probe stops at NARROW and the second side of a pair
+        // is skipped once the first reaches it: same result, far fewer
+        // rays (a fall runs it for many candidates of its pilotis scan)
+        let ext = |d: Vec2| (1..=50).map(|i| i as f32 * 0.02).find(|&e| e >= NARROW || !on(d, e)).unwrap_or(1.0);
         let widths: Vec<(Vec2, f32, f32)> = (0..8)
             .map(|i| {
                 let a = i as f32 * std::f32::consts::PI / 8.0;
                 let d = Vec2::new(a.cos(), a.sin());
-                (d, ext(d), ext(-d))
+                let a = ext(d);
+                (d, a, if a >= NARROW { NARROW } else { ext(-d) })
             })
             .collect();
         let &(across, a, b) = widths.iter().min_by(|x, y| (x.1 + x.2).total_cmp(&(y.1 + y.2)))?;
@@ -583,6 +578,26 @@ impl Ground {
         let axis = Vec2::new(-across.y, across.x);
         let long = ext(axis) + ext(-axis);
         Some(Beam { axis: if long < NARROW { Vec2::ZERO } else { axis }, centre })
+    }
+
+    /// Floor `e` m out from `p` along `d` still counts as the same top
+    /// (height `z`): within 12 cm plus a walkable slope's rise (stairs and
+    /// ramps are not beams; a railing or wall top drops away by far more).
+    fn beam_on(&self, p: Vec3, z: f32, d: Vec2, e: f32) -> bool {
+        let tol = 0.12 + SLOPE * e;
+        self.floor_below((p.truncate() + d * e).extend(z + 0.05 + tol)).is_some_and(|f| (f - z).abs() <= tol)
+    }
+
+    /// The cheap first part of [`Self::beam`]: the top height under `p`,
+    /// unless it is not at the feet or the top reaches NARROW / 2 out on
+    /// all four sides (no beam).
+    fn beam_top(&self, p: Vec3) -> Option<f32> {
+        let z = self.floor_below(p + Vec3::Z * 0.15)?;
+        if (z - p.z).abs() > 0.05 {
+            return None;
+        }
+        let half = NARROW * 0.5;
+        (![Vec2::X, Vec2::Y, -Vec2::X, -Vec2::Y].iter().all(|&d| self.beam_on(p, z, d, half))).then_some(z)
     }
 
     /// Retail `GetBeamAnchor` (0130fb08) for a fall: the beam with its top
@@ -627,7 +642,22 @@ impl Ground {
     /// probed on the floor, 2 cm steps; retail asks the guidance hole
     /// detector) with nothing over it: the post centre, top height.
     pub fn pilotis(&self, feet: Vec3, sight: Vec2) -> Option<Vec3> {
-        use crate::human::in_air::{pilotis, PILOTIS_BOX_HALF as H, PILOTIS_BOX_Z as Z, PILOTIS_CLEAR_FROM, PILOTIS_CLEAR_TO};
+        let key = [feet.x.to_bits(), feet.y.to_bits(), feet.z.to_bits(), sight.x.to_bits(), sight.y.to_bits()];
+        if let Some(&(_, c)) = self.pilotis_memo.lock().ok().and_then(|m| m.iter().find(|e| e.0 == key).copied()).as_ref() {
+            return c;
+        }
+        let c = self.pilotis_scan(feet, sight);
+        if let Ok(mut m) = self.pilotis_memo.lock() {
+            if m.len() >= PILOTIS_MEMO {
+                m.pop_front();
+            }
+            m.push_back((key, c));
+        }
+        c
+    }
+
+    fn pilotis_scan(&self, feet: Vec3, sight: Vec2) -> Option<Vec3> {
+        use crate::human::in_air::{pilotis, PILOTIS_BOX_HALF as H, PILOTIS_BOX_Z as Z, PILOTIS_CLEAR_FROM, PILOTIS_CLEAR_TO, PILOTIS_MAX_WIDTH};
         let side = Vec2::new(sight.y, -sight.x);
         let (ni, nj) = ((H.x / BEAM_GRID).round() as i32, (H.y / BEAM_GRID).round() as i32);
         let mut cands: Vec<(f32, Vec3)> = Vec::new();
@@ -636,23 +666,31 @@ impl Ground {
                 let q = feet.truncate() + side * (BEAM_GRID * i as f32) + sight * (BEAM_GRID * j as f32);
                 if let Some(f) = self.floor_below(q.extend(feet.z + Z.1)).filter(|&f| f >= feet.z + Z.0) {
                     let q = q.extend(f);
-                    if self.beam(q).is_some_and(|b| b.axis == Vec2::ZERO) {
-                        cands.push(((q - feet).length_squared(), q));
-                    }
+                    cands.push(((q - feet).length_squared(), q));
                 }
             }
         }
+        // nearest first; the (costly) post test only until one passes
         cands.sort_by(|a, b| a.0.total_cmp(&b.0));
         // the last point still on the top `from` stands on, going along `d`
+        // (probed out to 0.70 m: a side reaching further makes the top
+        // wider than PILOTIS_MAX_WIDTH, which `pilotis` refuses anyway)
         let edge = |from: Vec3, d: Vec2| {
             let on = |e: f32| self.floor_below((from.truncate() + d * e).extend(from.z + 0.17)).is_some_and(|f| (f - from.z).abs() <= 0.12);
-            let e = (1..=50).map(|i| i as f32 * 0.02).find(|&e| !on(e))?;
+            let e = (1..=35).map(|i| i as f32 * 0.02).find(|&e| !on(e))?;
             Some((from.truncate() + d * (e - 0.01)).extend(from.z))
         };
+        // the tests of a candidate cheapest first (all must pass): not a
+        // wide top, the edges and their widths, then the full post test
         cands.into_iter().find_map(|(_, q)| {
+            self.beam_top(q)?;
             let (e0, e1) = (edge(q, -sight)?, edge(q, sight)?);
+            if (e0.truncate() - e1.truncate()).length() > PILOTIS_MAX_WIDTH {
+                return None;
+            }
             let m = (e0 + e1) * 0.5;
             let c = pilotis(feet, [e0, e1, edge(m, side)?, edge(m, -side)?])?;
+            self.beam(q).filter(|b| b.axis == Vec2::ZERO)?;
             let over = self.floor_below(c + Vec3::Z * PILOTIS_CLEAR_TO).is_some_and(|f| f > c.z + PILOTIS_CLEAR_FROM);
             (!over).then_some(c)
         })
