@@ -71,8 +71,14 @@ across a gap, F + W leaps to a hold above; Shift + A/D at the end of an edge
 also side-jumps. A fall grabs a hold up to 1.2 m ahead only in its first
 2 m (retail); after that you go down. Drops under 0.53 m are stepped down,
 deeper ones fallen off, unless something blocks the space just past the
-edge (a railing, a wall, a low overhang: you stay on the edge). Walk or run into a haystack (touch it, facing it and
-pushing towards it; or drop onto it) to hide; any move key leaves. Running
+edge (a railing, a wall, a low overhang: you stay on the edge). A short
+fall (its first 2 m) next to a railing or beam lands on it, in the beam
+stance. Walk or run into a haystack (touch it, facing it and pushing
+towards it) to hide; in the air you go in when you touch it or when the
+1.8 m from your feet up crosses it (dropping or jumping onto or past
+it). Any move key leaves. Falling onto a surface whose collision material
+forbids standing pushes you off it (retail StepOff; on San Donato only one
+small cap, near 14.9 22.1 3.7). Running
 into a wall you can't climb stops you (retail obstacle collision); leaping
 face first into a wall turns your back to it and you slide down it. Bushes count as haystacks too (one is right
 behind the first San Donato spawn): sunk into one with the legs out of sight
