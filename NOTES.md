@@ -1218,3 +1218,26 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
     0 desyncs.
   - A6 HUD: acquire progress, a "being acquired" blink, the radar curve; README Playtesting. Gate: the --capture
     hud line.
+
+## Assassinate A0: localization (2026-10-28, phase4-assassinate-a0)
+- Decoder: `anvil_forge::loc` (format in its module doc: big-endian; a pair grammar of u16 nodes, sections of
+  string tables, 1/2/3-byte node codes; read from CompressedLocalizationData::DecodeHeader 0x00326e60 and
+  GetLocalizedStringRaw 0x0033f140). `Archive::localization(package)` in acb-world, CLI `acbmp loc DataPC.forge
+  [0x<id>|text]`. `UIString.OasisLineID` is the string id. English: 10703 strings. Tests: loc unit test,
+  acb-world/tests/localization.rs (map). No dump is committed; regenerate with `acbmp loc`.
+- GameMode Assassinate: Name 0x4bd31, Description 0x4e102 (shipped). The text says FFA 6-8 players, 10 minutes,
+  "Potential targets are marked on your compass", "To secure a contract, you must lock on a target".
+  Unreferenced drafts 0x4dbc4/0x4dea8/0x4deac: acquiring a contract "takes time and warns the target", the target
+  may stun the acquirer meanwhile, "Don't rush, or the contract will be filled instantly" (= 0 s in High
+  Profile), and killing an Informer NPC reveals a target (no Informer in the shipped text). The drafts disagree on
+  who is immune during the acquisition (0x4dbc4: the target cannot kill the acquirer; 0x4dea8: the target cannot
+  be killed).
+- Verdicts on the spec's R items: acquire-by-lock confirmed (0x4e102), compass kept (radar reading
+  contradicted, 0x4e102), round length 600 s (not the duel's 300), the 0xED5A0706 flag marks DLC modes
+  (0x4e053: Alhambra DLC = Escort + Assassinate; vip also has it). Wrong-kill contract loss: no text; 0x4e125
+  "Civilian kills give +#ScoreOrBonus# points to each of your opponents" (mode not named). Pursuer cap, focus
+  memory 2 s, spawns: no text, still open. "RELEASE YOUR CONTRACT" 0x4e260 = CancelWithY.
+- Escort (teamvip): Description 0x4bd3d: hunters "can only stun the PROTECTORS"; protectors "score each time a VIP
+  reaches a Checkpoint" (team wording; does not settle team vs per-protector, so the E7 note stands). No escape
+  round end in the text, but round banners exist: 0x4be8e all VIPs killed, 0x4be8f protectors killed all hunters,
+  0x4be90 "DEFENDERS HAVE PROTECTED THE VIP". The escape placeholder stays; 0x4be90 fits an escape or a time-out.
