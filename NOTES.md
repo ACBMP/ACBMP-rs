@@ -1149,3 +1149,30 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
 - InAir->HayStack (`CheckForHayStacks` 01319100): air entry on contact or when the feet..feet+1.8 m segment crosses the detection box (`DetectHayStack` 01318f9a), rising or falling: `human::haystack::air_enters`. Not ported: ignore timer (00ec45f0), state +0x3b0==9 veto, the prev-pos ray-cast branch, `IsNearDeepHayStackTarget` 0130aa50.
 - InAir->NarrowObject (`CheckForDefaultGrasp` 0132017a, `GetBeamAnchor` 0130fb08, box half 0.55 side / 0.4 sight / 0.35 up at +0.15): `Ground::beam_anchor`, gated by the 2 m grasp rule and a 0.3 m drop (ours). Drop at 38.25,-54.6,2.2 catches the railing at 38.60 -54.60 1.01 (60/144 fps). Not ported: pilotis grab, TargetedLedgeGrab beam landing; retail probe point offset unknown (ours feet).
 - StepOff wired: CollisionMaterial layout (FastLoad 00344b40 = reflected order) +8 SoundType, +0xc GraphicalType, +0x10 AIType, +0x14 Friction, +0x18 Restitution. AIType 2 = `AIType_StepOff`. `Archive::material_ai_type`, `Ground` per-triangle no_stand, `Ground::step_contacts` (feet sphere r 0.4), fall branch after the beam check. San Donato: only `Restricted_BounceOff_WoodSolid_NoCam`, 11 triangles at ~14.9 22.1 3.0-3.7; a drop there steps off along (-0.57, 0.82) and lands below (60/144 fps). Clearance ray from our feet (retail origin unverified).
+
+## Escort rules, E7 (2026-10-28, phase4-escort-rules)
+- Respawn (retail, confirmed): `GetBestSpawnPoint_VIPrule` 0x011750e4 (rule 6 of `Server_GetBestSpawnPoint`
+  0x011770c4) -> `mode::vip_rule` + `Match::pick_spawn` in Escort. Per free spawn: nearest enemy and nearest mate
+  (2000 m when none, `BuildSpawnPointListFromEntities` 0x01174c46); `SortByVIPdistance` 0x0110fad8: if either spawn
+  has an enemy within 35 m (`VIP_RULE_ENEMY_RADIUS`), the one further from enemies first, else the one nearer to
+  mates. Entities: living other players (teammates mates, other team enemies, `AddPlayersInEntityInfo` 0x0116f1fc);
+  VIPs (`AddVIPsInEntityInfo` 0x0116f55c) are mates when the player's team is GameInfo+0x514, which
+  `IsAProtector` 0x0113c264 shows is the protecting team, else enemies. Spawns already taken the same tick are
+  skipped (retail IsCurrentlyUsedForSpawning). Ours: linear scan for the first instead of std::sort (ties: lowest
+  index). PLACEHOLDER: the SpawnType asked for (XML): we use the standard spawns as before; type 2 would limit it to
+  the own team group. Duel respawn unchanged. escort.sh unchanged ([270, 130]): its respawns all fall on round 2's
+  play start, where `place_teams` re-places everyone.
+- Round end on VIP escape: PLACEHOLDER (`rounds::ROUND_ENDS_ON_ESCAPE`). No caller in the binary sets a round victory
+  condition (GBrick_Round::Update 0x00fa3d52 passes 0; ConvertToMPEngineMessageType 0x00f2e514 maps conditions 1..10
+  to MPEMT 6..15, WIN/LOSE_VIPEscaped among them); SpawnVIPs::Update has no way-end case, and
+  `Quazal::VIPdata::OnUpdate` 0x0125c33a searches the waypoint modulo the way length (retail ways may be loops).
+  Ours: a VIP's WayEnd still pays protect_points to the protectors, then `Rounds::escape` ends the play on the next
+  tick (`RoundEvent::Escaped {round, team}`, net event 25 VipEscaped, shown to every client). escort.sh rounds are
+  too short for a VIP to reach a way's end (155+ m at 1.4 m/s).
+- VIP re-create (retail model confirmed): VIPdata::OnUpdate re-adds a VIP the master's replicated data has and the
+  local list lacks (and removes one it has dropped). Ours: proto v8 adds `VipState::yaw` and `EscortState::pool`;
+  `game::apply_escort` re-creates a missing VIP slot from the snapshot (way, back, checkpoints, waypoint, pos, yaw;
+  walk phase our spread) and `revive_vips` puts living VIP bodies that are still scripted (lost or mispredicted kill)
+  back on their feet; `ClientStats::vip_recreated`, log `net: VIP re-created`. Test game::lost_vip_is_recreated.
+- Noted, not changed: VIPdata::OnUpdate sends the checkpoint score (U2A_NotifySpecialScore) to every member of the
+  protecting team, i.e. retail gives each protector a personal share (E4 placeholder says team only).

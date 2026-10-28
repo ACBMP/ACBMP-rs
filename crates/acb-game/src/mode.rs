@@ -25,6 +25,35 @@ pub const BONUS_HIDDEN: u32 = 200;
 /// mode XML has it (`GBrick_Respawn::ReadFromXML` 0x00ec1870 reads
 /// `RespawnTime`, whole seconds, default 0); the kill clips run ~3 s.
 pub const RESPAWN_DELAY: f32 = 5.0;
+/// `stSpawnPointMatesData::SortByVIPdistance` 0x0110fad8: a spawn whose
+/// nearest enemy is this close (or closer) loses to one further from
+/// enemies; beyond it the spawn nearest to mates wins.
+pub const VIP_RULE_ENEMY_RADIUS: f32 = 35.0;
+/// `BuildSpawnPointListFromEntities` 0x01174c46: distance to a kind of
+/// entity when there is none.
+pub const VIP_RULE_NO_ENTITY: f32 = 2000.0;
+
+/// Retail Escort respawn (`MultiSpawnManager::GetBestSpawnPoint_VIPrule`
+/// 0x011750e4, rule 6 of `Server_GetBestSpawnPoint` 0x011770c4): every
+/// free spawn gets its distance to the nearest enemy and to the nearest
+/// mate ([`VIP_RULE_NO_ENTITY`] when none), and the first after sorting by
+/// `SortByVIPdistance` wins: if either of two spawns has an enemy within
+/// [`VIP_RULE_ENEMY_RADIUS`], the one further from enemies comes first,
+/// else the one nearer to mates. Callers count living teammates and, for
+/// protectors, the VIPs as mates; the other team and, for hunters, the
+/// VIPs as enemies (`AddVIPsInEntityInfo` 0x0116f55c). So protectors come
+/// back next to their VIPs, hunters at least 35 m from them. We scan for
+/// the first instead of sorting (same result whenever the order is
+/// consistent; ties: lowest index). `None`: no spawns.
+pub fn vip_rule(spawns: &[Vec3], mates: &[Vec3], enemies: &[Vec3]) -> Option<usize> {
+    let near = |s: Vec3, set: &[Vec3]| set.iter().map(|q| q.distance(s)).fold(VIP_RULE_NO_ENTITY, f32::min);
+    let d: Vec<(f32, f32)> = spawns.iter().map(|&s| (near(s, enemies), near(s, mates))).collect();
+    let before = |a: (f32, f32), b: (f32, f32)| {
+        if a.0 <= VIP_RULE_ENEMY_RADIUS || b.0 <= VIP_RULE_ENEMY_RADIUS { a.0 > b.0 } else { a.1 < b.1 }
+    };
+    (0..d.len()).reduce(|best, i| if before(d[i], d[best]) { i } else { best })
+}
+
 /// Placeholder: no contracts during the first seconds (retail's intro;
 /// `GBrick_Delay` `DelayDuration` 0x00d3d70a, XML only, default 0).
 pub const START_DELAY: f32 = 3.0;
@@ -320,6 +349,13 @@ impl Match {
             for &t in &protecting {
                 self.award_team(t, points, reason);
             }
+            // PLACEHOLDER (rounds::ROUND_ENDS_ON_ESCAPE): the VIP escaped
+            if matches!(e, VipEvent::WayEnd { .. }) {
+                let team = protecting.first().copied().unwrap_or(0);
+                if let Some(ev) = self.rounds.as_mut().and_then(|r| r.escape(team)) {
+                    self.events.push(MatchEvent::Round(ev));
+                }
+            }
         }
     }
 
@@ -488,9 +524,34 @@ impl Match {
         }
     }
 
-    /// The spawn for `p`: the one furthest from the nearest other living
-    /// player (ties: lowest index).
-    pub fn pick_spawn(&self, p: usize, pos: &[Vec3]) -> usize {
+    /// The spawn for `p`: Escort uses the retail VIP rule ([`vip_rule`]);
+    /// the duel the one furthest from the nearest other living player
+    /// (ties: lowest index). `used`: spawns already taken this tick.
+    pub fn pick_spawn(&self, p: usize, pos: &[Vec3], used: &[usize]) -> usize {
+        if let Mode::Escort(teams) = &self.mode {
+            let mine = teams.team.get(p).copied();
+            let protector = mine.is_some_and(|t| t != teams.attacking_team);
+            let (mut mates, mut enemies) = (Vec::new(), Vec::new());
+            // AddPlayersInEntityInfo 0x0116f1fc: living others, teammates
+            // kind 0, the other team kind 1
+            for (j, q) in pos.iter().enumerate() {
+                if j == p || !self.alive(j) {
+                    continue;
+                }
+                if teams.team.get(j).copied() == mine { mates.push(*q) } else { enemies.push(*q) }
+            }
+            // AddVIPsInEntityInfo 0x0116f55c: VIPs are mates of the
+            // protecting team (GameInfo+0x514), enemies of the hunters
+            if let Some(v) = &self.vips {
+                for x in v.slots.iter().flatten() {
+                    if protector { mates.push(x.walker.pos) } else { enemies.push(x.walker.pos) }
+                }
+            }
+            let free: Vec<usize> = (0..self.spawns.len()).filter(|s| !used.contains(s)).collect();
+            let free = if free.is_empty() { (0..self.spawns.len()).collect() } else { free };
+            let points: Vec<Vec3> = free.iter().map(|&s| self.spawns[s].0).collect();
+            return vip_rule(&points, &mates, &enemies).map_or(0, |i| free[i]);
+        }
         let others: Vec<Vec3> = pos.iter().enumerate().filter(|&(j, _)| j != p && self.alive(j)).map(|(_, q)| *q).collect();
         let score = |s: &(Vec3, f32)| others.iter().map(|q| q.distance(s.0)).fold(f32::INFINITY, f32::min);
         (0..self.spawns.len()).max_by(|&a, &b| score(&self.spawns[a]).total_cmp(&score(&self.spawns[b])).then(b.cmp(&a))).unwrap_or(0)
@@ -513,7 +574,8 @@ impl Match {
                 *r -= 1;
                 if *r == 0 {
                     self.respawn[p] = None;
-                    let s = self.pick_spawn(p, pos);
+                    let used: Vec<usize> = back.iter().map(|&(_, s)| s).collect();
+                    let s = self.pick_spawn(p, pos, &used);
                     self.contracts.respawn(p);
                     self.health[p] = FULL_HEALTH;
                     self.events.push(MatchEvent::Respawn { player: p, spawn: s });
@@ -557,6 +619,7 @@ impl Match {
                 }
                 RoundEvent::Phase { .. } | RoundEvent::Swap { .. } => teams.vips.clear(),
                 RoundEvent::Over { .. } => self.over = true,
+                RoundEvent::Escaped { .. } => {}
             }
             self.events.push(MatchEvent::Round(e));
         }
@@ -771,6 +834,48 @@ mod tests {
         assert_eq!(m.score[2], STUN_POINTS);
     }
 
+    /// Retail VIP rule (`SortByVIPdistance` 0x0110fad8): beyond 35 m of
+    /// every enemy the spawn nearest to a mate wins; inside, the one
+    /// furthest from enemies.
+    #[test]
+    fn vip_rule_near_mates_far_from_enemies() {
+        let v = |x: f32| Vec3::new(x, 0.0, 0.0);
+        let spawns = [v(10.0), v(50.0), v(-60.0)];
+        // protector: its VIP at 0 is a mate, a hunter at 100 an enemy
+        assert_eq!(vip_rule(&spawns, &[v(0.0)], &[v(100.0)]), Some(0));
+        // hunter: VIP at 0 and a protector at 5 are enemies, a mate at -80;
+        // 10 has an enemy within 35 m, -60 is nearer the mate than 50
+        assert_eq!(vip_rule(&spawns, &[v(-80.0)], &[v(0.0), v(5.0)]), Some(2));
+        // every spawn within 35 m of an enemy: the furthest from them
+        assert_eq!(vip_rule(&[v(10.0), v(30.0), v(-20.0)], &[v(30.0)], &[v(0.0)]), Some(1));
+        // nobody around (all at the 2000 m default): the first
+        assert_eq!(vip_rule(&spawns, &[], &[]), Some(0));
+        assert_eq!(vip_rule(&[], &[], &[]), None);
+    }
+
+    /// Escort respawns: a protector comes back by its VIP, a hunter away
+    /// from it; a spawn taken the same tick is skipped.
+    #[test]
+    fn escort_respawn_by_role() {
+        let v = |x: f32| Vec3::new(x, 0.0, 0.0);
+        let spawns = vec![(v(5.0), 0.0), (v(60.0), 0.0), (v(120.0), 0.0)];
+        let cfg = MatchConfig { time_limit: 10.0, score_limit: 0, respawn_delay: 1.0, start_delay: 0.0 };
+        let mut m = Match::escort(Teams::alternating(4), cfg, spawns);
+        let mut vips = crate::vip::Vips::new(vec![10, 11]);
+        let walker = crate::vip::Walker { pos: v(0.0), yaw: 0.0, next: 1 };
+        vips.slots[0] = Some(crate::vip::Vip { way: 0, back: false, walker, checkpoints: 0, phase: 0.0 });
+        m.vips = Some(vips);
+        // team 0 hunts; players 0, 2 hunters, 1, 3 protectors, far away
+        let pos = [v(200.0), v(300.0), v(200.0), v(300.0)];
+        // protector 1: by its VIP (mates: VIP at 0, player 3 at 300)
+        assert_eq!(m.pick_spawn(1, &pos, &[]), 0);
+        // ... unless that spawn is taken this tick
+        assert_eq!(m.pick_spawn(1, &pos, &[0]), 1);
+        // hunter 0: enemies VIP at 0 and protectors at 300, mate at 200:
+        // all spawns beyond 35 m of enemies but 5 -> nearest the mate
+        assert_eq!(m.pick_spawn(0, &pos, &[]), 2);
+    }
+
     /// E4 gate: a scripted round pair in ticks (intro 1 s, play 4 s, recap
     /// 1 s): kills, VIP kills and VIP way events give the expected team
     /// totals, teams swap roles for round 2, nothing scores outside play.
@@ -815,14 +920,14 @@ mod tests {
         m.on_vip_events(&[checkpoint(2), VipEvent::WayEnd { vip: 1, way: 0, n: 2 }]);
         assert_eq!(team_score(&m), vec![100, 350]);
         assert!(m.events.contains(&MatchEvent::TeamScore { team: 1, points: 220, reason: ScoreReason::Protect }));
+        // the VIP escaped: play ends on the next tick (rounds::ROUND_ENDS_ON_ESCAPE)
+        assert!(m.events.contains(&MatchEvent::Round(RoundEvent::Escaped { round: 0, team: 1 })));
+        tick(&mut m);
         // recap: still nothing scores
-        while m.ticks < ticks(5.0) + 1 {
-            tick(&mut m);
-        }
         assert_eq!(m.rounds.as_ref().unwrap().phase, Phase::Recap);
         m.on_vip_events(&[killed(1, 2)]);
         assert_eq!(team_score(&m), vec![100, 350]);
-        while m.ticks < ticks(7.0) + 1 {
+        while m.ticks < ticks(3.0) + 2 {
             tick(&mut m);
         }
         // round 2: team 1 hunts; the VIP cycle restarted
@@ -844,13 +949,14 @@ mod tests {
             rounds_log,
             vec![
                 (s + 1, RoundEvent::Phase { round: 0, phase: Phase::Play }),
-                (5 * s + 1, RoundEvent::Phase { round: 0, phase: Phase::Recap }),
-                (6 * s + 1, RoundEvent::Swap { round: 1, attacking: 1 }),
-                (6 * s + 1, RoundEvent::Phase { round: 1, phase: Phase::Intro }),
-                (7 * s + 1, RoundEvent::Phase { round: 1, phase: Phase::Play }),
-                (11 * s + 1, RoundEvent::Phase { round: 1, phase: Phase::Recap }),
-                (12 * s + 1, RoundEvent::Phase { round: 1, phase: Phase::Over }),
-                (12 * s + 1, RoundEvent::Over { winner: Some(1) }),
+                // escaped one tick into play
+                (s + 2, RoundEvent::Phase { round: 0, phase: Phase::Recap }),
+                (2 * s + 2, RoundEvent::Swap { round: 1, attacking: 1 }),
+                (2 * s + 2, RoundEvent::Phase { round: 1, phase: Phase::Intro }),
+                (3 * s + 2, RoundEvent::Phase { round: 1, phase: Phase::Play }),
+                (7 * s + 2, RoundEvent::Phase { round: 1, phase: Phase::Recap }),
+                (8 * s + 2, RoundEvent::Phase { round: 1, phase: Phase::Over }),
+                (8 * s + 2, RoundEvent::Over { winner: Some(1) }),
             ]
         );
     }

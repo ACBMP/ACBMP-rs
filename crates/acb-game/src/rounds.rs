@@ -30,6 +30,15 @@ pub const RECAP_DURATION: f32 = 8.0;
 /// PLACEHOLDER: playing time of one round, seconds. Not in the shipped
 /// data (teamvip XML missing); needs a retail capture.
 pub const ROUND_LENGTH: f32 = 300.0;
+/// PLACEHOLDER: a VIP that reaches its way's end escapes and ends the
+/// round's play (the protectors win it; they score `protect_points` as
+/// before). Retail has the outcome messages (MPEMT_ENDROUND_WIN_VIPEscaped
+/// / LOSE_VIPEscaped, `GBrick_Round::ConvertToMPEngineMessageType`
+/// 0x00f2e514 maps victory conditions 1..10), but no caller sets one in
+/// the binary we could find (`GBrick_Round::Update` 0x00fa3d52 passes 0,
+/// `GBrick_SpawnVIPs::Update` 0x0130c150 has no way-end case), and the way
+/// data did not ship.
+pub const ROUND_ENDS_ON_ESCAPE: bool = true;
 
 /// Protectors' points when a VIP passes a checkpoint, `n` = checkpoints that
 /// VIP passed so far (`GetScoreVIPCheckpoint`: min(n * bonus, max - base)).
@@ -66,6 +75,10 @@ pub enum RoundEvent {
     Swap { round: u32, attacking: Team },
     /// The last round's recap ended; `winner` is `None` on a draw.
     Over { winner: Option<Team> },
+    /// Round `round`'s play ended early: a VIP of `team` (the protectors)
+    /// escaped (retail MPEMT_ENDROUND_WIN_VIPEscaped for them,
+    /// LOSE_VIPEscaped for the hunters).
+    Escaped { round: u32, team: Team },
 }
 
 /// Rounds of an Escort match and the team totals.
@@ -127,6 +140,17 @@ impl Rounds {
         true
     }
 
+    /// A VIP of `team` escaped: the play ends on the next tick (see
+    /// [`ROUND_ENDS_ON_ESCAPE`]). Returns the event, `None` when not playing
+    /// or already ending.
+    pub fn escape(&mut self, team: Team) -> Option<RoundEvent> {
+        if !ROUND_ENDS_ON_ESCAPE || !self.playing() || self.left == 0 {
+            return None;
+        }
+        self.left = 0;
+        Some(RoundEvent::Escaped { round: self.round, team })
+    }
+
     /// One tick; `attacking` is the attacking team, swapped here at the
     /// start of every round after the first.
     pub fn tick(&mut self, attacking: &mut Team) -> Vec<RoundEvent> {
@@ -179,6 +203,21 @@ mod tests {
         assert_eq!(protect_points(0), 200);
         assert_eq!(protect_points(3), 230);
         assert_eq!(protect_points(99), 500);
+    }
+
+    #[test]
+    fn escape_ends_play_on_the_next_tick() {
+        let mut r = Rounds::new(2, 0.0, 100.0, 1.0);
+        let mut att: Team = 0;
+        assert_eq!(r.tick(&mut att), vec![RoundEvent::Phase { round: 0, phase: Phase::Play }]);
+        assert!(r.add(1, 230));
+        assert_eq!(r.escape(1), Some(RoundEvent::Escaped { round: 0, team: 1 }));
+        // a second VIP the same tick does not end it twice
+        assert_eq!(r.escape(1), None);
+        assert_eq!(r.tick(&mut att), vec![RoundEvent::Phase { round: 0, phase: Phase::Recap }]);
+        assert!(!r.add(1, 10));
+        assert_eq!(r.escape(1), None);
+        assert_eq!(r.team_score, vec![0, 230]);
     }
 
     #[test]

@@ -41,7 +41,13 @@ Escort (teamvip, 2v2 up to 4v4, two rounds with the attacking team swapped):
 Slots alternate teams (0, 1, 0, 1; `--teams 0,0,1,1` to choose), team 0 hunts
 first (`--attacking 1`). Every round starts with all players on their team's
 spawn group, then two VIPs walk their ways: hunters kill them (100 each),
-the protecting team scores checkpoints and way ends. `--time-limit S` is each
+the protecting team scores checkpoints and way ends. A VIP that reaches its
+way's end escapes: the round's play ends at once and its protectors win it
+(`VIP escaped: team T wins round R`; our rule, retail unconfirmed). Killed
+players respawn by the retail VIP rule: protectors on the free spawn nearest
+their VIPs and teammates, hunters at least 35 m from VIPs and protectors (near
+their teammates). A client whose VIP state drifted gets the server's VIPs
+re-created (`net: VIP re-created` in its log). `--time-limit S` is each
 round's play (default 300 s, a placeholder), `--intro S` / `--recap S` the 8 s
 phases around it. The server prints the team totals at the end. To play
 locally, start the server with `--players 2` (or 4) and run that many

@@ -322,8 +322,8 @@ pub fn choose_way(pool: &mut Vec<usize>, ways: &[Way], killers: &[Vec3]) -> Opti
 pub struct Vip {
     pub way: usize,
     /// Walking the way goal to start. Our reading: retail has no shipped
-    /// data for what a VIP does at its way's end (the round may end on it,
-    /// MPEMT_ENDROUND_*_VIPEscaped); ours turns round and walks it back.
+    /// data for what a VIP does at its way's end; ours escapes there (the
+    /// play ends, `rounds::ROUND_ENDS_ON_ESCAPE`) and turns round.
     pub back: bool,
     pub walker: Walker,
     /// Checkpoints passed since it spawned (the `n` of the checkpoint event).

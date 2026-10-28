@@ -129,6 +129,7 @@ fn escort_state(m: &Match) -> Option<EscortState> {
                         checkpoints: x.checkpoints.min(255) as u8,
                         next: x.walker.next.min(u16::MAX as usize) as u16,
                         pos: x.walker.pos.to_array(),
+                        yaw: x.walker.yaw,
                     },
                     None => VipState::default(),
                 })
@@ -144,13 +145,16 @@ fn escort_state(m: &Match) -> Option<EscortState> {
         respawn_in: v.and_then(|v| v.respawn_in).map_or(NONE16, |t| t.min(NONE16 as u32 - 1) as u16),
         target_in: v.map_or(0, |v| v.target_in.min(u16::MAX as u32) as u16),
         spawns: v.map_or(0, |v| v.spawns.min(255) as u8),
+        pool: v.map(|v| v.pool.iter().map(|&w| w.min(255) as u8).collect()).unwrap_or_default(),
         vips,
     })
 }
 
-/// Puts the server's Escort state into `m` (VIPs the server has alive and
-/// we do not stay gone until the next spawn).
-fn apply_escort(m: &mut Match, e: &EscortState) {
+/// Puts the server's Escort state into `m`. A VIP the server has alive
+/// and we do not is re-created from its slot state (way, waypoint, pos,
+/// yaw); returns those VIPs' bodies (the caller resets them).
+fn apply_escort(m: &mut Match, e: &EscortState) -> Vec<usize> {
+    let mut recreated = Vec::new();
     if let acb_game::mode::Mode::Escort(teams) = &mut m.mode {
         teams.attacking_team = e.attacking;
     }
@@ -166,18 +170,32 @@ fn apply_escort(m: &mut Match, e: &EscortState) {
         v.respawn_in = (e.respawn_in != NONE16).then_some(e.respawn_in as u32);
         v.target_in = e.target_in as u32;
         v.spawns = e.spawns as u32;
-        for (slot, s) in v.slots.iter_mut().zip(&e.vips) {
+        v.pool = e.pool.iter().map(|&w| w as usize).collect();
+        for (i, (slot, s)) in v.slots.iter_mut().zip(&e.vips).enumerate() {
             if !s.alive {
                 *slot = None;
-            } else if let Some(x) = slot {
-                x.way = s.way as usize;
-                x.back = s.back;
-                x.checkpoints = s.checkpoints as u32;
-                x.walker.next = s.next as usize;
-                x.walker.pos = glam::Vec3::from_array(s.pos);
+                continue;
+            }
+            let walker = acb_game::vip::Walker { pos: glam::Vec3::from_array(s.pos), yaw: s.yaw, next: s.next as usize };
+            match slot {
+                Some(x) => {
+                    x.way = s.way as usize;
+                    x.back = s.back;
+                    x.checkpoints = s.checkpoints as u32;
+                    x.walker = walker;
+                }
+                // the server has it alive and we lost it: re-create it
+                // (retail Quazal::VIPdata::OnUpdate 0x0125c33a re-adds a VIP
+                // the master's data has and the local list lacks)
+                None => {
+                    let phase = (i as f32 * 0.37).fract();
+                    *slot = Some(acb_game::vip::Vip { way: s.way as usize, back: s.back, walker, checkpoints: s.checkpoints as u32, phase });
+                    recreated.push(v.bodies[i]);
+                }
             }
         }
     }
+    recreated
 }
 
 /// The match as a snapshot carries it.
@@ -207,7 +225,8 @@ pub fn game_state(m: &Match) -> GameState {
 }
 
 /// Puts the server's match state into `m` (after a mismatch).
-pub fn apply_game_state(m: &mut Match, g: &GameState) {
+/// Returns the VIP bodies re-created (see [`apply_escort`]).
+pub fn apply_game_state(m: &mut Match, g: &GameState) -> Vec<usize> {
     m.ticks = acb_game::mode::ticks(m.config.time_limit).saturating_sub(g.ticks_left);
     m.over = g.over;
     for (i, p) in g.players.iter().enumerate().take(m.score.len()) {
@@ -225,9 +244,25 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) {
             _ => None,
         };
     }
-    if let Some(e) = &g.escort {
-        apply_escort(m, e);
+    g.escort.as_ref().map(|e| apply_escort(m, e)).unwrap_or_default()
+}
+
+/// The bodies of living VIPs that are not walking (re-created, or a kill
+/// we predicted and the server did not have): back on their feet.
+pub fn revive_vips(world: &mut acb_game::World) -> usize {
+    let Some(v) = world.mode.as_ref().and_then(|m| m.vips.as_ref()) else { return 0 };
+    let living: Vec<usize> = v.slots.iter().zip(&v.bodies).filter(|(s, _)| s.is_some()).map(|(_, &b)| b).collect();
+    let mut n = 0;
+    for b in living {
+        if let Some(body) = world.bodies.get_mut(b) {
+            if body.scripted.is_some() {
+                body.scripted = None;
+                body.agent = None;
+                n += 1;
+            }
+        }
     }
+    n
 }
 
 /// The match decisions of the last tick as events.
@@ -242,11 +277,13 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
         VipEvent::Checkpoint { vip, n, .. } => Some(ev(EventKind::VipCheckpoint, vip, n as usize)),
         VipEvent::WayEnd { vip, n, .. } => Some(ev(EventKind::VipWayEnd, vip, n as usize)),
     });
+    // after the VIP events of the tick (the escape follows the way end)
     let rounds = m.events.iter().filter_map(|e| match *e {
         MatchEvent::TeamScore { team, points, .. } => Some(ev(EventKind::TeamScore, team as usize, (points / 10) as usize)),
         MatchEvent::Round(RoundEvent::Phase { round, phase }) => Some(ev(EventKind::RoundPhase, round as usize, phase_u8(phase) as usize)),
         MatchEvent::Round(RoundEvent::Swap { round, attacking }) => Some(ev(EventKind::RoundSwap, round as usize, attacking as usize)),
         MatchEvent::Round(RoundEvent::Over { winner }) => Some(ev(EventKind::EscortOver, winner.map_or(255, |w| w as usize), 0)),
+        MatchEvent::Round(RoundEvent::Escaped { round, team }) => Some(ev(EventKind::VipEscaped, team as usize, round as usize)),
         _ => None,
     });
     m.events
@@ -536,5 +573,36 @@ mod tests {
         assert_eq!(buf.late, 1);
         assert_eq!(buf.through, 3);
         assert_eq!(buf.take(3), input(3));
+    }
+
+    /// A client that lost a VIP the server still has (desync) gets it back
+    /// from the snapshot: same slot state, its body reported for reset; a
+    /// VIP the server has dead goes.
+    #[test]
+    fn lost_vip_is_recreated() {
+        use acb_game::vip::{Vip, Vips, Walker};
+        let cfg = MatchConfig { time_limit: 10.0, score_limit: 0, respawn_delay: 1.0, start_delay: 0.0 };
+        let make = || {
+            let mut m = Match::escort(acb_game::rules::Teams::alternating(2), cfg, vec![(Vec3::ZERO, 0.0)]);
+            m.vips = Some(Vips::new(vec![7, 8]));
+            m
+        };
+        let mut server = make();
+        let v = server.vips.as_mut().unwrap();
+        v.pool = vec![3, 1];
+        v.slots[1] = Some(Vip { way: 2, back: true, walker: Walker { pos: Vec3::new(1.0, 2.0, 3.0), yaw: 0.5, next: 4 }, checkpoints: 2, phase: 0.1 });
+        let mut client = make();
+        client.vips.as_mut().unwrap().slots[0] = server.vips.as_ref().unwrap().slots[1].clone();
+        let g = game_state(&server);
+        assert_ne!(game_state(&client), g);
+        assert_eq!(apply_game_state(&mut client, &g), vec![8]);
+        assert_eq!(game_state(&client), g);
+        let c = client.vips.as_ref().unwrap();
+        assert!(c.slots[0].is_none());
+        let x = c.slots[1].as_ref().unwrap();
+        assert_eq!((x.way, x.back, x.checkpoints, x.walker.next, x.walker.yaw), (2, true, 2, 4, 0.5));
+        assert_eq!(c.pool, vec![3, 1]);
+        // in step again: nothing more to re-create
+        assert!(apply_game_state(&mut client, &g).is_empty());
     }
 }
