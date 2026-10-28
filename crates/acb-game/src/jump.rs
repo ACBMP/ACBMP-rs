@@ -536,6 +536,9 @@ impl Ground {
     }
 }
 
+/// Probe spacing of [`Ground::beam_anchor`], metres (ours).
+const BEAM_GRID: f32 = 0.05;
+
 /// A narrow top under feet at `p`: its long axis (unit; zero on a post,
 /// narrow both ways) and the offset from `p` to its centre line.
 #[derive(Clone, Copy, Debug)]
@@ -580,6 +583,39 @@ impl Ground {
         let axis = Vec2::new(-across.y, across.x);
         let long = ext(axis) + ext(-axis);
         Some(Beam { axis: if long < NARROW { Vec2::ZERO } else { axis }, centre })
+    }
+
+    /// Retail `GetBeamAnchor` (0130fb08) for a fall: the beam with its top
+    /// in the [`crate::human::in_air::BEAM_BOX_HALF`] box around `feet` +
+    /// [`crate::human::in_air::BEAM_BOX_UP`] (side / `sight` (unit) / up),
+    /// nearest the feet: the anchor (the feet projected onto its centre
+    /// line, top height) and the beam. Posts (no long axis) are freestep targets in retail.
+    pub fn beam_anchor(&self, feet: Vec3, sight: Vec2) -> Option<(Vec3, Beam)> {
+        use crate::human::in_air::{BEAM_BOX_HALF as H, BEAM_BOX_UP};
+        let side = Vec2::new(sight.y, -sight.x);
+        let mid = feet.z + BEAM_BOX_UP;
+        let mut cands: Vec<(f32, Vec3)> = Vec::new();
+        // 0.1 m grid over the box footprint (ours: retail asks its beam
+        // descriptions, we probe the floor)
+        let (ni, nj) = ((H.x / BEAM_GRID).round() as i32, (H.y / BEAM_GRID).round() as i32);
+        for i in -ni..=ni {
+            for j in -nj..=nj {
+                let q = feet.truncate() + side * (BEAM_GRID * i as f32) + sight * (BEAM_GRID * j as f32);
+                if let Some(f) = self.floor_below(q.extend(mid + H.z)).filter(|&f| f >= mid - H.z) {
+                    cands.push(((q.extend(f) - feet).length_squared(), q.extend(f)));
+                }
+            }
+        }
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        cands.into_iter().take(3).find_map(|(_, q)| {
+            let b = self.beam(q).filter(|b| b.axis != Vec2::ZERO)?;
+            // the feet projected onto the centre line (retail
+            // PointSegmentProjection), if the top is still there
+            let c = q.truncate() + b.centre;
+            let a = c + b.axis * (feet.truncate() - c).dot(b.axis);
+            let on = self.floor_below(a.extend(q.z + 0.15)).is_some_and(|f| (f - q.z).abs() <= 0.05);
+            Some((if on { a } else { c }.extend(q.z), b))
+        })
     }
 
     /// Walking on a beam: a move mostly along it stays on its centre
