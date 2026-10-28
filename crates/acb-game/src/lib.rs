@@ -17,6 +17,7 @@ pub mod kill;
 pub mod locomotion;
 pub mod mode;
 pub mod action;
+pub mod bonus;
 pub mod player;
 pub mod rounds;
 pub mod rules;
