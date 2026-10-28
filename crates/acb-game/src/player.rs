@@ -571,7 +571,7 @@ pub(crate) fn drive(
         // retail InAir order (human::in_air::ORDER): a hold in reach is
         // grabbed (below, in the fall) before a haystack is entered
         let grasp = air && ground.is_some_and(|g| air_grasp(p, g, clipset).is_some());
-        let entry = if grasp { None } else { crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), facing, air, p.vel.z) };
+        let entry = if grasp { None } else { crate::hide::entry(&hide.spots, p.pos, dir.normalize_or_zero(), facing, air) };
         if let Some(i) = entry {
             if crate::trace() {
                 eprintln!("hide: enter spot {i} from {:.2} {:.2} {:.2}{}", p.pos.x, p.pos.y, p.pos.z, if air { " (air)" } else { "" });
