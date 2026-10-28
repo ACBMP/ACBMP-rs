@@ -18,6 +18,7 @@ pub mod locomotion;
 pub mod mode;
 pub mod action;
 pub mod player;
+pub mod rounds;
 pub mod rules;
 pub mod state;
 pub mod vip;
@@ -547,8 +548,15 @@ impl World {
     /// the targetable ones.
     fn step_vips(&mut self, kills: &[(usize, usize)]) {
         let Some(m) = &mut self.mode else { return };
+        // intro / recap: VIPs neither spawn nor walk (play starts a fresh cycle)
+        let playing = m.playing();
         let mode::Mode::Escort(teams) = &mut m.mode else { return };
         let Some(v) = &mut m.vips else { return };
+        if !playing {
+            v.events.clear();
+            teams.vips.clear();
+            return;
+        }
         let (Some(crowd), Some(ways)) = (&self.crowd, self.vip_ways.iter().find(|(t, _)| *t == teams.attacking_team).map(|(_, w)| w.clone())) else { return };
         v.events.clear();
         for &(killer, body) in kills {
@@ -573,6 +581,13 @@ impl World {
                         eprintln!("vip {s} body {} way {}{} at {:.2} {:.2} {:.2} next {} checkpoints {}", v.bodies[s], x.way, if x.back { " back" } else { "" }, p.x, p.y, p.z, x.walker.next, x.checkpoints);
                     }
                 }
+            }
+        }
+        let events = v.events.clone();
+        m.on_vip_events(&events);
+        if trace() {
+            for e in m.events.iter().filter(|e| matches!(e, mode::MatchEvent::TeamScore { .. } | mode::MatchEvent::Round(_))) {
+                eprintln!("escort: t {:.3} {e:?} teams {:?}", self.time, m.rounds.as_ref().map(|r| &r.team_score));
             }
         }
     }

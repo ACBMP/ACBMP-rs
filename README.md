@@ -73,9 +73,13 @@ writes it as CSV (one row per 60 Hz tick, same columns as the retail captures).
 Escort VIP ways (length, checkpoints, distance of the start from the hunter
 team spawns). Escort itself is not playable yet: the VIP bodies (two crowd
 walkers on those ways, killed by hunters, respawning 5 s after both die and
-targetable 10 s later) only run in the game library and its tests
+targetable 10 s later) and Escort scoring (VIP and enemy kills 100,
+checkpoints and way ends for the protecting team, team totals over two rounds
+with the attacking team swapped, 8 s intro and recap; round length 5 min is a
+placeholder) only run in the game library and its tests
 (`ACBMP_TRACE=1 cargo test --release -p acb-game --test escort_map -- --nocapture`
-prints the `vip:` walk/kill/respawn trace).
+prints the `vip:` walk/kill/respawn trace and `escort:` team scores). No HUD
+or network for Escort yet.
 
 ### Retail captures (kit)
 

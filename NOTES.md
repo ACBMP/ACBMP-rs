@@ -1082,3 +1082,20 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   ACBMP_TRACE=1 prints `vip:` events and per-second VIP positions.
 - Open: kill from a standing stop behind a walking VIP times out (walk-in at walk pace never closes); no net sync of
   Vips (E5); no attacking-team swap/score (E4); VIP skins/reaction pack not modelled.
+
+## Escort scoring and rounds, E4 (2026-10-28, escort-score)
+- rounds.rs: `Rounds` (intro/play/recap in ticks, round, phase, team_score, round_score), `RoundEvent {Phase, Swap,
+  Over}`, `checkpoint_points(n)` = min(n*10, 300) and `protect_points(n)` = min(200 + n*10, 500) (GBrick_ScoreVIP
+  defaults, GetScoreVIPCheckpoint / GetScoreProtectVIP), VIP_KILLED_POINTS / ENEMY_KILLED_POINTS 100, ROUNDS 2,
+  INTRO_DURATION / RECAP_DURATION 8 s (GBrick_Round defaults).
+- PLACEHOLDERS (not in shipped data; need a retail capture): ROUND_LENGTH 300 s (Match::escort uses config.time_limit
+  per round), what `n` counts (ours: checkpoints that VIP passed), that WayEnd pays protect_points, checkpoint/protect
+  points go to the protecting team only (no personal share), totals summed over both rounds (CumulativeScores unclear).
+- Match: `rounds: Option<Rounds>` (Escort only), `award` (personal + team while playing), `on_vip_events` (Killed ->
+  killer, Checkpoint / WayEnd -> protecting team, `MatchEvent::TeamScore`), `tick_rounds` (no time/score limit in
+  Escort; Play start resets `Vips` so each round starts a fresh cycle on the new attacker's ways; Swap flips
+  `Teams::attacking_team`; Over sets `over`). Intro/recap: relation Other for players and VIPs (no kills), VIPs do not
+  spawn or walk. `VipEvent::WayEnd` gained `n`. Duel path unchanged (`rounds` None).
+- Gate: mode::tests::escort_round_pair_scores_and_swaps (team totals 210 / 450, swap at 6 s + 1 tick, winner team 1);
+  escort_map: hunter 0 / team 0 = 200 after two VIP kills. Not done: players re-placed at team spawns at round start,
+  ResetAbilityCD (no abilities), round end on VIP escape, net (E5), HUD (E6).

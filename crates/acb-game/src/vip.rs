@@ -342,8 +342,9 @@ pub enum VipEvent {
     Killed { vip: usize, body: usize, killer: usize, way: usize },
     /// Retail GameModeEvent 0xf sub 1: VIP, way, waypoint, n passed so far.
     Checkpoint { vip: usize, way: usize, checkpoint: usize, n: u32 },
-    /// The VIP reached its way's end (it turns round; see [`Vip::back`]).
-    WayEnd { vip: usize, way: usize },
+    /// The VIP reached its way's end (it turns round; see [`Vip::back`]);
+    /// `n` checkpoints passed so far.
+    WayEnd { vip: usize, way: usize, n: u32 },
 }
 
 /// The VIP cycle (`GBrick_SpawnVIPs::Update` 0x0130c150): NbVIPs spawn on
@@ -450,7 +451,7 @@ impl Vips {
                 }
             }
             if v.walker.arrived(way) {
-                self.events.push(VipEvent::WayEnd { vip, way: v.way });
+                self.events.push(VipEvent::WayEnd { vip, way: v.way, n: v.checkpoints });
                 v.back = !v.back;
                 let yaw = v.walker.yaw;
                 v.walker = Walker::new(ways.get(v.way, v.back));

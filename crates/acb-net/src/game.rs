@@ -133,6 +133,8 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
             MatchEvent::Fall { player, damage, fatal } => Some(ev(if fatal { EventKind::FatalFall } else { EventKind::Fall }, player, damage as usize)),
             // reported by detect_events
             MatchEvent::Respawn { .. } => None,
+            // Escort team scores and rounds: not on the wire yet (Phase 4 E5)
+            MatchEvent::TeamScore { .. } | MatchEvent::Round(_) => None,
         })
         .collect()
 }
