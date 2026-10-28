@@ -46,8 +46,8 @@ round's play (default 300 s, a placeholder), `--intro S` / `--recap S` the 8 s
 phases around it. The server prints the team totals at the end. To play
 locally, start the server with `--players 2` (or 4) and run that many
 viewers with `--connect 127.0.0.1:7777` (`--port` sets another) on the same
-machine. The Escort HUD is the window title (and the `hud tick` lines of
-`ACBMP_TRACE=1` clients), e.g. `team 0 hunter | VIP 12.3 m | [team 0 100]
+machine. The Escort HUD is drawn as text across the top of the screen (also
+the window title and the `hud tick` lines of `ACBMP_TRACE=1` clients), e.g. `team 0 hunter | VIP 12.3 m | [team 0 100]
 team 1 10 | round 1/2 play 0:35 | +100 points`: your team and role (hunter or
 protector), the distance to the nearest VIP (targetable ones when hunting,
 living ones when protecting; `VIPs in N s` while they respawn), team totals
@@ -92,8 +92,10 @@ means hidden, not stuck; any move key hops out. Walking slowly among the crowd b
 or walk (low profile) next to a bench seat and press F to sit (blended);
 E kills a passer-by from the bench, a fresh move key stands up.
 
-HUD: there is no on-screen text yet. Target, distance, compass fill, who is
-hunting you, score, time and the last event are in the window title.
+HUD: drawn as text at the top of the screen (and in the window title):
+target, distance, compass fill, who is hunting you, score, time and the last
+event. In Escort, hunters also get a gold arrow in a ring under the text
+pointing to the nearest targetable VIP relative to the camera (up = ahead).
 
 Useful extras: `--at x,y,z,yaw` starts the player somewhere else (see
 `tools/gates.sh` for spots next to the climbs and jumps), `ACBMP_TRACE=1`
@@ -132,7 +134,7 @@ last `player at x y z` line, or the `--at` you started from. Scripted repros
 are best: `--input "0=w,shift 1.5= 2=d"` (keys from each time in seconds) plus
 `--at` replays exactly, at any frame rate.
 
-Known gaps (Phase 2): no on-screen HUD; respawn (5 s) and start (3 s) delays
+Known gaps (Phase 2): the HUD is plain text (no retail widgets or compass art); respawn (5 s) and start (3 s) delays
 are placeholders; blending uses retail's group polygons but our crowd forms
 its groups by distance (retail groups not traced); bench kill placement is
 our stand-in (clips lack a Reference track), ledge kills and beam-end edge animations are missing; chase start uses

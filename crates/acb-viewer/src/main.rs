@@ -14,6 +14,8 @@
 //! predicted locally and reconciled with the server, the others are drawn
 //! ~100 ms behind the newest server tick (`acb_net::client`).
 
+mod hud;
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -249,6 +251,7 @@ struct Gfx {
     scene: Scene,
     /// Per `world.bodies`.
     skins: Vec<Skin>,
+    hud: hud::Overlay,
 }
 
 struct App {
@@ -418,7 +421,8 @@ impl App {
             self.orbit = Orbit { yaw: self.fly.yaw, pitch: -0.25, dist: 3.5, pull: 0.0 };
         }
         self.world = Some(world);
-        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, skins });
+        let hud = hud::Overlay::new(renderer.device(), format);
+        self.gfx = Some(Gfx { window, surface, config, depth, renderer, scene, skins, hud });
         self.render_time = 0.0;
         Ok(())
     }
@@ -461,6 +465,19 @@ impl App {
     }
 
     /// The player this viewer drives.
+    /// The on-screen HUD (net matches only): the `ClientNet::hud` line and,
+    /// for Escort hunters, an arrow to the nearest targetable VIP relative
+    /// to the camera yaw. Reads the world, never changes it.
+    fn hud_verts(&self, w: u32, h: u32) -> Vec<hud::Vert> {
+        let (Some(n), Some(world)) = (&self.net, &self.world) else { return Vec::new() };
+        let Some(text) = n.hud(world) else { return Vec::new() };
+        let bearing = vip_chase(world, n.slot).map(|a| {
+            let b = (a - self.orbit.yaw).rem_euclid(std::f32::consts::TAU);
+            if b > std::f32::consts::PI { b - std::f32::consts::TAU } else { b }
+        });
+        hud::build(&text, bearing, w, h)
+    }
+
     fn me(&self) -> usize {
         self.net.as_ref().map_or(0, |n| n.slot)
     }
@@ -595,7 +612,8 @@ impl App {
         }
         let Some(g) = &self.gfx else { return };
         let camera = self.camera(g);
-        let rgba = acb_render::render_to_rgba(&g.renderer, &g.scene, &camera, g.config.width, g.config.height);
+        let mut rgba = acb_render::render_to_rgba(&g.renderer, &g.scene, &camera, g.config.width, g.config.height);
+        hud::rasterize(&self.hud_verts(g.config.width, g.config.height), &mut rgba, g.config.width, g.config.height);
         match write_png(path, g.config.width, g.config.height, &rgba) {
             Ok(()) => eprintln!("wrote {}", path.display()),
             Err(e) => eprintln!("capture failed: {e:#}"),
@@ -637,6 +655,10 @@ impl App {
         let view = frame.texture.create_view(&Default::default());
         let mut enc = g.renderer.device().create_command_encoder(&Default::default());
         g.renderer.render(&mut enc, &view, &g.depth, (g.config.width, g.config.height), &g.scene, &camera);
+        let (w, h) = (g.config.width, g.config.height);
+        let verts = self.hud_verts(w, h);
+        let Some(g) = &mut self.gfx else { return };
+        g.hud.draw(g.renderer.device(), g.renderer.queue(), &mut enc, &view, &verts, w, h);
         g.renderer.queue().submit([enc.finish()]);
         g.renderer.queue().present(frame);
 
