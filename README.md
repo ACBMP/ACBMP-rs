@@ -33,6 +33,23 @@ changes the match length, `--mode free` drops the match rules, `--crowd N`
 (and `--crowd-seed S`) adds N wandering NPCs that every client simulates
 too (blending works online; clients need no flag, the server sends it).
 
+Escort (teamvip, 2v2 up to 4v4, two rounds with the attacking team swapped):
+
+    ./target/release/acbmp serve $M/DataPC_AC2MP_SanDonato.forge --players 4 --mode escort
+    # clients exactly as for the duel (four of them)
+
+Slots alternate teams (0, 1, 0, 1; `--teams 0,0,1,1` to choose), team 0 hunts
+first (`--attacking 1`). Every round starts with all players on their team's
+spawn group, then two VIPs walk their ways: hunters kill them (100 each),
+the protecting team scores checkpoints and way ends. `--time-limit S` is each
+round's play (default 300 s, a placeholder), `--intro S` / `--recap S` the 8 s
+phases around it. The server prints the team totals at the end. There is no
+Escort HUD yet: role, round and team scores show only in the server log and
+the `net: event` lines of `ACBMP_TRACE=1` clients (the window HUD still shows
+the duel clock). `tools/escort.sh` runs a 2v2 on one machine with 5 % loss and
+150 ms round trip; its viewers use the test input `--input "0=vip"` (while
+your team hunts, run at the nearest VIP pressing kill).
+
 Controls (on foot):
 
 | Key | Action |
@@ -72,15 +89,11 @@ prints every tick's player state to stderr, and `ACBMP_TRACE=csv:run.csv`
 writes it as CSV (one row per 60 Hz tick, same columns as the retail captures).
 `acbmp ways <map.forge> [--hunters 1..4] [--points]` lists the generated
 Escort VIP ways (length, checkpoints, distance of the start from the hunter
-team spawns). Escort itself is not playable yet: the VIP bodies (two crowd
-walkers on those ways, killed by hunters, respawning 5 s after both die and
-targetable 10 s later) and Escort scoring (VIP and enemy kills 100,
-checkpoints and way ends for the protecting team, team totals over two rounds
-with the attacking team swapped, 8 s intro and recap; round length 5 min is a
-placeholder) only run in the game library and its tests
+team spawns). The VIP cycle (two crowd walkers on those ways, respawning 5 s
+after both die and targetable 10 s later) also runs offline in the game
+library's tests
 (`ACBMP_TRACE=1 cargo test --release -p acb-game --test escort_map -- --nocapture`
-prints the `vip:` walk/kill/respawn trace and `escort:` team scores). No HUD
-or network for Escort yet.
+prints the `vip:` walk/kill/respawn trace and `escort:` team scores).
 
 ### Retail captures (kit)
 

@@ -39,6 +39,9 @@ pub struct ServeConfig {
     pub rules: Option<acb_game::mode::MatchConfig>,
     /// NPCs every peer simulates (0: none).
     pub crowd: CrowdConfig,
+    /// With `rules`: an Escort match instead of the duel (`team` empty:
+    /// slots alternate teams 0, 1, 0, 1, ...).
+    pub escort: Option<crate::proto::EscortRules>,
 }
 
 /// Ticks of applied inputs a snapshot repeats at most.
@@ -152,12 +155,21 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
         .map(|(i, p)| Slot { name: p.name.clone(), character: p.character.clone(), at: cfg.at.get(i).copied().flatten() })
         .collect();
     let t = Instant::now();
-    let mut world = game::load_world(&archive, &slots, builtins.as_ref(), cfg.rules, cfg.crowd)?;
+    let escort = cfg.escort.clone().map(|mut e| {
+        if e.team.is_empty() {
+            e.team = (0..slots.len()).map(|i| (i % 2) as u8).collect();
+        }
+        e
+    });
+    let mut world = game::load_match(&archive, &slots, builtins.as_ref(), cfg.rules, cfg.crowd, escort.as_ref())?;
+    if let Some(e) = &escort {
+        eprintln!("serve: escort teams {:?}, team {} attacks first, {} VIP bodies", e.team, e.attacking, world.mode.as_ref().and_then(|m| m.vips.as_ref()).map_or(0, |v| v.bodies.len()));
+    }
     if let Some(m) = &world.mode {
         eprintln!("serve: match {:?} on {} player spawns", m.config, m.spawns.len());
     }
     eprintln!("serve: world with {} players loaded in {:.1}s", world.players.len(), t.elapsed().as_secs_f64());
-    let start = Msg::Start { map: map_name.clone(), snapshot_every: cfg.snapshot_every as u8, slots: slots.clone(), rules: cfg.rules, crowd: cfg.crowd }.encode();
+    let start = Msg::Start { map: map_name.clone(), snapshot_every: cfg.snapshot_every as u8, slots: slots.clone(), rules: cfg.rules, crowd: cfg.crowd, escort }.encode();
     let mut last_start = Instant::now() - Duration::from_secs(1);
     let wait = Instant::now();
     while !peers.iter().all(|p| p.ready) {
@@ -301,6 +313,15 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
 /// The scores line: `result: a 300, b 100 (a wins)`.
 fn match_result(world: &World, peers: &[Peer]) -> String {
     let Some(m) = &world.mode else { return "free play".into() };
+    if let (acb_game::mode::Mode::Escort(teams), Some(r)) = (&m.mode, &m.rounds) {
+        let scores: Vec<String> = peers.iter().enumerate().map(|(i, p)| format!("{} {} (team {})", p.name, m.score[i], teams.team[i])).collect();
+        let best = r.team_score.iter().copied().max().unwrap_or(0);
+        let leaders: Vec<usize> = (0..r.team_score.len()).filter(|&t| r.team_score[t] == best).collect();
+        let verdict = if leaders.len() == 1 { format!("team {} wins", leaders[0]) } else { "draw".into() };
+        let per_round: Vec<String> = r.round_score.iter().map(|s| format!("{s:?}")).collect();
+        let secs = m.ticks as f32 / acb_game::TICK_HZ as f32;
+        return format!("escort result after {secs:.1} s: teams {:?} (rounds {}), players {} ({verdict})", r.team_score, per_round.join(" "), scores.join(", "));
+    }
     let scores: Vec<String> = peers.iter().enumerate().map(|(i, p)| format!("{} {}", p.name, m.score[i])).collect();
     let best = m.score.iter().copied().max().unwrap_or(0);
     let leaders: Vec<&str> = peers.iter().enumerate().filter(|(i, _)| m.score[*i] == best).map(|(_, p)| p.name.as_str()).collect();

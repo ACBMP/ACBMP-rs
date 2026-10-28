@@ -327,9 +327,23 @@ enum Cmd {
         /// Stop after this many seconds of play
         #[arg(long)]
         duration: Option<f32>,
-        /// duel (Wanted contracts, scores, respawns; any player count) or free (no match rules)
+        /// duel (Wanted contracts, scores, respawns; any player count), escort (teamvip: two
+        /// teams, VIPs, 2 rounds with an attacker swap; --time-limit is each round's play) or
+        /// free (no match rules)
         #[arg(long, default_value = "duel")]
         mode: String,
+        /// Escort: seconds before each round's play (retail 8)
+        #[arg(long, default_value_t = acb_game::rounds::INTRO_DURATION)]
+        intro: f32,
+        /// Escort: seconds of score recap after each round's play (retail 8)
+        #[arg(long, default_value_t = acb_game::rounds::RECAP_DURATION)]
+        recap: f32,
+        /// Escort: team of every slot, e.g. 0,1,0,1 (default: alternating by slot)
+        #[arg(long, default_value = "")]
+        teams: String,
+        /// Escort: the team hunting the VIPs in round 1
+        #[arg(long, default_value_t = 0)]
+        attacking: u8,
         /// Match length, seconds
         #[arg(long, default_value_t = 300.0)]
         time_limit: f32,
@@ -353,11 +367,19 @@ enum Cmd {
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
-        Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, mode, time_limit, score_limit, respawn, start_delay, crowd, crowd_seed } => {
+        Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, mode, intro, recap, teams, attacking, time_limit, score_limit, respawn, start_delay, crowd, crowd_seed } => {
             let rules = match mode.as_str() {
-                "duel" => Some(acb_net::mode::MatchConfig { time_limit, score_limit, respawn_delay: respawn, start_delay }),
+                "duel" | "escort" => Some(acb_net::mode::MatchConfig { time_limit, score_limit, respawn_delay: respawn, start_delay }),
                 "free" => None,
-                m => anyhow::bail!("--mode {m}: duel or free"),
+                m => anyhow::bail!("--mode {m}: duel, escort or free"),
+            };
+            let escort = if mode == "escort" {
+                let team: Vec<u8> = teams.split(',').filter(|t| !t.trim().is_empty()).map(|t| t.trim().parse()).collect::<Result<_, _>>()?;
+                anyhow::ensure!(team.is_empty() || team.len() == players, "--teams: {} teams for {players} players", team.len());
+                anyhow::ensure!(team.iter().chain([&attacking]).all(|&t| t < 4), "--teams / --attacking: teams 0..3 (4 team spawn groups)");
+                Some(acb_net::proto::EscortRules { team, attacking, intro, recap })
+            } else {
+                None
             };
             let at = at
                 .iter()
@@ -368,7 +390,7 @@ fn main() -> anyhow::Result<()> {
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let netsim = acb_net::link::NetSim::parse(&netsim)?;
-            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, rules, crowd: acb_net::proto::CrowdConfig { count: crowd, seed: crowd_seed } })?;
+            acb_net::server::run(acb_net::server::ServeConfig { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, rules, crowd: acb_net::proto::CrowdConfig { count: crowd, seed: crowd_seed }, escort })?;
         }
         Cmd::Ls { forge } => {
             let forge = Forge::open(forge)?;

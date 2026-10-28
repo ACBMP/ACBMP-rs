@@ -10,7 +10,9 @@ use glam::Vec3;
 pub const MAGIC: [u8; 2] = *b"AB";
 /// 2: match rules in `Start`, match state in `Snapshot`, match events.
 /// 4: crowd size and seed in `Start`.
-pub const VERSION: u8 = 6;
+/// 7: Escort: team rules in `Start`, rounds / team scores / VIPs in
+/// `GameState`, Escort events.
+pub const VERSION: u8 = 7;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -243,6 +245,24 @@ pub enum EventKind {
     Fall = 14,
     /// a = player, b = fall damage %: died.
     FatalFall = 15,
+    /// Escort: a = team, b = points / 10.
+    TeamScore = 16,
+    /// Escort: a = round (0-based), b = phase (0 intro, 1 play, 2 recap, 3 over).
+    RoundPhase = 17,
+    /// Escort: a = round, b = the attacking team from now on.
+    RoundSwap = 18,
+    /// Escort: a = winning team (0xff: draw).
+    EscortOver = 19,
+    /// Escort: a = VIP slot, b = its way.
+    VipSpawned = 20,
+    /// Escort: the VIPs became hunter targets.
+    VipTargetable = 21,
+    /// Escort: a = VIP slot, b = the player who killed it.
+    VipKilled = 22,
+    /// Escort: a = VIP slot, b = checkpoints passed so far.
+    VipCheckpoint = 23,
+    /// Escort: a = VIP slot, b = checkpoints passed: it reached its way's end.
+    VipWayEnd = 24,
 }
 
 impl EventKind {
@@ -264,6 +284,15 @@ impl EventKind {
             13 => Escaped,
             14 => Fall,
             15 => FatalFall,
+            16 => TeamScore,
+            17 => RoundPhase,
+            18 => RoundSwap,
+            19 => EscortOver,
+            20 => VipSpawned,
+            21 => VipTargetable,
+            22 => VipKilled,
+            23 => VipCheckpoint,
+            24 => VipWayEnd,
             _ => return None,
         })
     }
@@ -357,6 +386,16 @@ impl Event {
             EventKind::Escaped => format!("tick {} player {} escaped player {}", self.tick, self.b, self.a),
             EventKind::Fall => format!("tick {} player {} fell: {} % damage", self.tick, self.a, self.b),
             EventKind::FatalFall => format!("tick {} player {} fell to its death ({} %)", self.tick, self.a, self.b),
+            EventKind::TeamScore => format!("tick {} team {} scores {}", self.tick, self.a, self.b as u32 * 10),
+            EventKind::RoundPhase => format!("tick {} round {} {}", self.tick, self.a as u32 + 1, ["intro", "play", "recap", "over"].get(self.b as usize).unwrap_or(&"?")),
+            EventKind::RoundSwap => format!("tick {} round {}: team {} attacks", self.tick, self.a as u32 + 1, self.b),
+            EventKind::EscortOver if self.a == u8::MAX => format!("tick {} escort over: draw", self.tick),
+            EventKind::EscortOver => format!("tick {} escort over: team {} wins", self.tick, self.a),
+            EventKind::VipSpawned => format!("tick {} VIP {} spawns on way {}", self.tick, self.a, self.b),
+            EventKind::VipTargetable => format!("tick {} VIPs targetable", self.tick),
+            EventKind::VipKilled => format!("tick {} VIP {} killed by player {}", self.tick, self.a, self.b),
+            EventKind::VipCheckpoint => format!("tick {} VIP {} passes checkpoint {}", self.tick, self.a, self.b),
+            EventKind::VipWayEnd => format!("tick {} VIP {} reaches its way's end ({} checkpoints)", self.tick, self.a, self.b),
         }
     }
 }
@@ -387,11 +426,100 @@ pub struct PlayerGame {
 }
 
 /// The match part of a snapshot (5 + 13 per player bytes).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct GameState {
     pub ticks_left: u32,
     pub over: bool,
     pub players: Vec<PlayerGame>,
+    /// Escort only.
+    pub escort: Option<EscortState>,
+}
+
+/// One VIP slot as a snapshot carries it (17 bytes).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct VipState {
+    /// Spawned and not killed.
+    pub alive: bool,
+    /// Hunters may kill it.
+    pub targetable: bool,
+    pub way: u8,
+    /// Walking its way back.
+    pub back: bool,
+    pub checkpoints: u8,
+    /// Next way point.
+    pub next: u16,
+    pub pos: [f32; 3],
+}
+
+/// Escort rounds, team totals and the VIP cycle (13 + 4 per team + 17 per
+/// VIP bytes).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EscortState {
+    /// 0-based.
+    pub round: u8,
+    /// 0 intro, 1 play, 2 recap, 3 over.
+    pub phase: u8,
+    /// Ticks left in the phase.
+    pub left: u32,
+    pub attacking: u8,
+    pub team_score: Vec<u32>,
+    /// Ticks until all VIPs respawn ([`NONE16`]: not counting down).
+    pub respawn_in: u16,
+    /// Ticks until the VIPs become targets.
+    pub target_in: u16,
+    /// VIP spawns so far.
+    pub spawns: u8,
+    pub vips: Vec<VipState>,
+}
+
+/// No timer.
+pub const NONE16: u16 = u16::MAX;
+
+impl EscortState {
+    fn write(&self, w: &mut Writer) {
+        w.u8(self.round);
+        w.u8(self.phase);
+        w.u32(self.left);
+        w.u8(self.attacking);
+        w.u16(self.respawn_in);
+        w.u16(self.target_in);
+        w.u8(self.spawns);
+        w.u8(self.team_score.len() as u8);
+        self.team_score.iter().for_each(|s| w.u32(*s));
+        w.u8(self.vips.len() as u8);
+        for v in &self.vips {
+            w.u8(v.alive as u8 | (v.targetable as u8) << 1 | (v.back as u8) << 2);
+            w.u8(v.way);
+            w.u8(v.checkpoints);
+            w.u16(v.next);
+            v.pos.iter().for_each(|x| w.f32(*x));
+        }
+    }
+
+    fn read(r: &mut Reader) -> Option<EscortState> {
+        let (round, phase, left, attacking, respawn_in, target_in, spawns) = (r.u8()?, r.u8()?, r.u32()?, r.u8()?, r.u16()?, r.u16()?, r.u8()?);
+        let n = r.u8()?;
+        let team_score = (0..n).map(|_| r.u32()).collect::<Option<_>>()?;
+        let n = r.u8()?;
+        let vips = (0..n)
+            .map(|_| {
+                let f = r.u8()?;
+                Some(VipState { alive: f & 1 != 0, targetable: f & 2 != 0, back: f & 4 != 0, way: r.u8()?, checkpoints: r.u8()?, next: r.u16()?, pos: [r.f32()?, r.f32()?, r.f32()?] })
+            })
+            .collect::<Option<_>>()?;
+        Some(EscortState { round, phase, left, attacking, team_score, respawn_in, target_in, spawns, vips })
+    }
+}
+
+/// Escort match setup in `Start`: the team of every slot, the team hunting
+/// first and the phase lengths around each round's play
+/// ([`MatchConfig::time_limit`] is the play length).
+#[derive(Clone, Debug, PartialEq)]
+pub struct EscortRules {
+    pub team: Vec<u8>,
+    pub attacking: u8,
+    pub intro: f32,
+    pub recap: f32,
 }
 
 impl GameState {
@@ -408,13 +536,21 @@ impl GameState {
             w.u16(p.escape);
             w.u16(p.threat);
         }
+        match &self.escort {
+            Some(e) => {
+                w.u8(1);
+                e.write(w);
+            }
+            None => w.u8(0),
+        }
     }
 
     fn read(r: &mut Reader, players: u8) -> Option<GameState> {
         let ticks_left = r.u32()?;
         let over = r.u8()? != 0;
         let players = (0..players).map(|_| Some(PlayerGame { target: r.u8()?, score: r.u16()?, respawn: r.u16()?, cooldown: r.u16()?, health: r.u8()?, chase: r.u8()?, escape: r.u16()?, threat: r.u16()? })).collect::<Option<_>>()?;
-        Some(GameState { ticks_left, over, players })
+        let escort = if r.u8()? != 0 { Some(EscortState::read(r)?) } else { None };
+        Some(GameState { ticks_left, over, players, escort })
     }
 }
 
@@ -525,7 +661,7 @@ pub enum Msg {
     Lobby { joined: u8, players: u8, echo_ms: u32 },
     /// `rules`: the match everyone runs (`None`: free play); `crowd`: the
     /// NPCs everyone simulates (part of the deterministic sim).
-    Start { map: String, snapshot_every: u8, slots: Vec<Slot>, rules: Option<MatchConfig>, crowd: CrowdConfig },
+    Start { map: String, snapshot_every: u8, slots: Vec<Slot>, rules: Option<MatchConfig>, crowd: CrowdConfig, escort: Option<EscortRules> },
     Snapshot(Snapshot),
     Over { reason: String },
 }
@@ -586,7 +722,7 @@ impl Msg {
                 w.u8(*players);
                 w.u32(*echo_ms);
             }
-            Msg::Start { map, snapshot_every, slots, rules, crowd } => {
+            Msg::Start { map, snapshot_every, slots, rules, crowd, escort } => {
                 w.u8(T_START);
                 w.str(map);
                 w.u8(*snapshot_every);
@@ -611,6 +747,17 @@ impl Msg {
                 }
                 w.u16(crowd.count);
                 w.u32(crowd.seed);
+                match escort {
+                    Some(e) => {
+                        w.u8(1);
+                        w.u8(e.team.len() as u8);
+                        e.team.iter().for_each(|t| w.u8(*t));
+                        w.u8(e.attacking);
+                        w.f32(e.intro);
+                        w.f32(e.recap);
+                    }
+                    None => w.u8(0),
+                }
             }
             Msg::Snapshot(s) => {
                 w.u8(T_SNAPSHOT);
@@ -684,7 +831,14 @@ impl Msg {
                 }
                 let rules = if r.u8()? != 0 { Some(read_config(&mut r)?) } else { None };
                 let crowd = CrowdConfig { count: r.u16()?, seed: r.u32()? };
-                Msg::Start { map, snapshot_every, slots, rules, crowd }
+                let escort = if r.u8()? != 0 {
+                    let n = r.u8()?;
+                    let team = (0..n).map(|_| r.u8()).collect::<Option<_>>()?;
+                    Some(EscortRules { team, attacking: r.u8()?, intro: r.f32()?, recap: r.f32()? })
+                } else {
+                    None
+                };
+                Msg::Start { map, snapshot_every, slots, rules, crowd, escort }
             }
             T_SNAPSHOT => {
                 let tick = r.u32()?;
@@ -916,6 +1070,15 @@ mod tests {
                 Event { tick: 122, kind: EventKind::Escaped, a: 1, b: 0 },
                 Event { tick: 122, kind: EventKind::Fall, a: 2, b: 30 },
                 Event { tick: 123, kind: EventKind::FatalFall, a: 2, b: 200 },
+                Event { tick: 124, kind: EventKind::TeamScore, a: 1, b: 22 },
+                Event { tick: 124, kind: EventKind::RoundPhase, a: 0, b: 2 },
+                Event { tick: 124, kind: EventKind::RoundSwap, a: 1, b: 1 },
+                Event { tick: 125, kind: EventKind::EscortOver, a: NONE, b: 0 },
+                Event { tick: 125, kind: EventKind::VipSpawned, a: 1, b: 3 },
+                Event { tick: 125, kind: EventKind::VipTargetable, a: 0, b: 0 },
+                Event { tick: 126, kind: EventKind::VipKilled, a: 0, b: 2 },
+                Event { tick: 126, kind: EventKind::VipCheckpoint, a: 1, b: 4 },
+                Event { tick: 126, kind: EventKind::VipWayEnd, a: 1, b: 5 },
             ],
             game: Some(GameState {
                 ticks_left: 17_999,
@@ -925,6 +1088,20 @@ mod tests {
                     PlayerGame { target: NONE, score: 0, respawn: 0, cooldown: 300, health: 100, chase: NONE, escape: 0, threat: 65_535 },
                     PlayerGame { target: 0, score: 1200, respawn: 299, cooldown: 0, health: 0, chase: NONE, escape: 0, threat: 12_345 },
                 ],
+                escort: Some(EscortState {
+                    round: 1,
+                    phase: 1,
+                    left: 1234,
+                    attacking: 1,
+                    team_score: vec![200, 450],
+                    respawn_in: NONE16,
+                    target_in: 77,
+                    spawns: 3,
+                    vips: vec![
+                        VipState { alive: true, targetable: false, way: 2, back: true, checkpoints: 3, next: 17, pos: [1.5, -2.25, 0.125] },
+                        VipState::default(),
+                    ],
+                }),
             }),
         }
     }
@@ -947,6 +1124,7 @@ mod tests {
                 slots: vec![Slot { name: "a".into(), character: "c".into(), at: Some([1.0, 2.0, 3.0, 4.0]) }, Slot { name: "b".into(), character: "d".into(), at: None }],
                 rules: None,
                 crowd: CrowdConfig::default(),
+                escort: None,
             },
             Msg::Snapshot(Snapshot { game: None, ..s.clone() }),
             Msg::Start {
@@ -955,6 +1133,7 @@ mod tests {
                 slots: vec![],
                 rules: Some(MatchConfig { time_limit: 120.0, score_limit: 500, respawn_delay: 5.0, start_delay: 3.0 }),
                 crowd: CrowdConfig { count: 40, seed: 0xdead_beef },
+                escort: Some(EscortRules { team: vec![0, 1, 0, 1], attacking: 0, intro: 2.0, recap: 3.0 }),
             },
             Msg::Snapshot(s),
             Msg::Over { reason: "done".into() },
