@@ -31,7 +31,7 @@ pub const GRASP_HAND_HEIGHT: f32 = 0.38;
 /// `HumanInAir` Main -> NarrowObject (`TestMainToNarrowObjectMain`
 /// 012cc888, flag +0x3a0 bit1): set by `CheckForDefaultGrasp` (0132017a)
 /// when `GetBeamAnchor` (0130fb08) finds a beam (narrow-object entry type
-/// 3; pilotis entry 4 is [`pilotis`], targeted beam landings 8 are not ported). The
+/// 3; pilotis entry 4 is [`pilotis`], targeted beam landings 8 [`arrival`]). The
 /// beam is searched in a box of these half extents (side, sight, up),
 /// metres (0130fb08: 0.55, 0.4, 0.35) ...
 pub const BEAM_BOX_HALF: Vec3 = Vec3::new(0.55, 0.4, 0.35);
@@ -85,6 +85,47 @@ pub fn pilotis(probe: Vec3, edges: [Vec3; 4]) -> Option<Vec3> {
     let across = (flat(edges[2]) - flat(edges[3])).length();
     (near <= PILOTIS_EDGE_REACH && along <= PILOTIS_MAX_WIDTH && across <= PILOTIS_MAX_WIDTH)
         .then(|| edges.iter().copied().sum::<Vec3>() * 0.25)
+}
+
+/// `HumanInAir::CheckForTargetedLedgeGrab` (0131c1e4): a targeted jump has
+/// arrived when the hand / feet target is closer than this, metres (0.01);
+/// what follows depends on the target foothold's type (InAirData +0x2d0).
+pub const TARGET_ARRIVED: f32 = 0.01;
+/// Foothold types (InAirData +0x2d0) the arrival dispatches on: hangs
+/// (1 and 0x20000; with a contact the fall goes on flat), a ladder
+/// (0x2000), a beam top (0x100) and a fourth (0x200, not identified).
+pub const FOOTHOLD_HANG: [u32; 2] = [1, 0x20000];
+pub const FOOTHOLD_LADDER: u32 = 0x2000;
+pub const FOOTHOLD_BEAM: u32 = 0x100;
+/// The narrow-object entry type a targeted beam landing sets (NarrowObjectData
+/// +200 = 8, then InAir -> NarrowObject via flag +0x3a0 bit1).
+pub const NARROW_ENTRY_TARGETED_BEAM: u32 = 8;
+
+/// What a targeted jump does on arrival (0131c1e4 dispatch).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrival {
+    Hang,
+    Ladder,
+    /// Onto a beam: the NarrowObject (beam) state, its landing clip picked
+    /// by [`beam_landing_left`].
+    Beam,
+    Other,
+}
+
+pub fn arrival(foothold: u32) -> Arrival {
+    match foothold {
+        f if FOOTHOLD_HANG.contains(&f) => Arrival::Hang,
+        FOOTHOLD_LADDER => Arrival::Ladder,
+        FOOTHOLD_BEAM => Arrival::Beam,
+        _ => Arrival::Other,
+    }
+}
+
+/// `Human::GetFrontFoot` (00cbb628) for the beam landing clip: the left
+/// landing (front foot 1) when the left foot is ahead (entity space,
+/// `forward_l > forward_r`), else the right one (a tie picks the right).
+pub fn beam_landing_left(forward_l: f32, forward_r: f32) -> bool {
+    forward_l > forward_r
 }
 
 /// The default grasp gate: the fall so far (`fall`, metres from its highest
@@ -280,6 +321,18 @@ pub fn step_off_dir(contacts: &[StepContact]) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targeted_arrival() {
+        assert_eq!(arrival(1), Arrival::Hang);
+        assert_eq!(arrival(0x20000), Arrival::Hang);
+        assert_eq!(arrival(0x2000), Arrival::Ladder);
+        assert_eq!(arrival(0x100), Arrival::Beam);
+        assert_eq!(arrival(0x200), Arrival::Other);
+        assert!(beam_landing_left(0.2, 0.1));
+        assert!(!beam_landing_left(0.1, 0.2));
+        assert!(!beam_landing_left(0.1, 0.1));
+    }
 
     #[test]
     fn pilotis_post() {

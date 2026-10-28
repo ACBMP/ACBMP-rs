@@ -654,7 +654,15 @@ pub(crate) fn drive(
                     }
                     return;
                 }
-                p.loco.set_beam(clips, sk, ground.beam(at).is_some());
+                // retail CheckForTargetedLedgeGrab (0131c1e4) arrival on a
+                // beam foothold (0x100): NarrowObject, entry type 8 (ours:
+                // the beam clip set, the target already settled on its
+                // centre line; no beam landing clip)
+                let on_beam = ground.beam(at).is_some();
+                if on_beam && crate::trace() {
+                    eprintln!("air: targeted beam landing at {:.2?} ({:?})", at.to_array(), human::in_air::arrival(human::in_air::FOOTHOLD_BEAM));
+                }
+                p.loco.set_beam(clips, sk, on_beam);
                 p.loco.land(0.0, dir != Vec2::ZERO);
             }
         } else if p.loco.airborne() {
