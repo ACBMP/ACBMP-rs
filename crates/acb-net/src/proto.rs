@@ -12,7 +12,7 @@ pub const MAGIC: [u8; 2] = *b"AB";
 /// 4: crowd size and seed in `Start`.
 /// 7: Escort: team rules in `Start`, rounds / team scores / VIPs in
 /// `GameState`, Escort events.
-pub const VERSION: u8 = 7;
+pub const VERSION: u8 = 8;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -263,6 +263,8 @@ pub enum EventKind {
     VipCheckpoint = 23,
     /// Escort: a = VIP slot, b = checkpoints passed: it reached its way's end.
     VipWayEnd = 24,
+    /// Escort: VIP of team `a` escaped, round `b` ends (protectors win it).
+    VipEscaped = 25,
 }
 
 impl EventKind {
@@ -293,6 +295,7 @@ impl EventKind {
             22 => VipKilled,
             23 => VipCheckpoint,
             24 => VipWayEnd,
+            25 => VipEscaped,
             _ => return None,
         })
     }
@@ -395,6 +398,7 @@ impl Event {
             EventKind::VipTargetable => format!("tick {} VIPs targetable", self.tick),
             EventKind::VipKilled => format!("tick {} VIP {} killed by player {}", self.tick, self.a, self.b),
             EventKind::VipCheckpoint => format!("tick {} VIP {} passes checkpoint {}", self.tick, self.a, self.b),
+            EventKind::VipEscaped => format!("tick {} VIP escaped: team {} wins round {}", self.tick, self.a, self.b as u32 + 1),
             EventKind::VipWayEnd => format!("tick {} VIP {} reaches its way's end ({} checkpoints)", self.tick, self.a, self.b),
         }
     }
@@ -449,6 +453,8 @@ pub struct VipState {
     /// Next way point.
     pub next: u16,
     pub pos: [f32; 3],
+    /// Facing, so a client can re-create a VIP it lost.
+    pub yaw: f32,
 }
 
 /// Escort rounds, team totals and the VIP cycle (13 + 4 per team + 17 per
@@ -469,6 +475,8 @@ pub struct EscortState {
     pub target_in: u16,
     /// VIP spawns so far.
     pub spawns: u8,
+    /// Ways free to spawn on, in pool order.
+    pub pool: Vec<u8>,
     pub vips: Vec<VipState>,
 }
 
@@ -484,6 +492,8 @@ impl EscortState {
         w.u16(self.respawn_in);
         w.u16(self.target_in);
         w.u8(self.spawns);
+        w.u8(self.pool.len() as u8);
+        self.pool.iter().for_each(|x| w.u8(*x));
         w.u8(self.team_score.len() as u8);
         self.team_score.iter().for_each(|s| w.u32(*s));
         w.u8(self.vips.len() as u8);
@@ -493,21 +503,24 @@ impl EscortState {
             w.u8(v.checkpoints);
             w.u16(v.next);
             v.pos.iter().for_each(|x| w.f32(*x));
+            w.f32(v.yaw);
         }
     }
 
     fn read(r: &mut Reader) -> Option<EscortState> {
         let (round, phase, left, attacking, respawn_in, target_in, spawns) = (r.u8()?, r.u8()?, r.u32()?, r.u8()?, r.u16()?, r.u16()?, r.u8()?);
         let n = r.u8()?;
+        let pool = (0..n).map(|_| r.u8()).collect::<Option<_>>()?;
+        let n = r.u8()?;
         let team_score = (0..n).map(|_| r.u32()).collect::<Option<_>>()?;
         let n = r.u8()?;
         let vips = (0..n)
             .map(|_| {
                 let f = r.u8()?;
-                Some(VipState { alive: f & 1 != 0, targetable: f & 2 != 0, back: f & 4 != 0, way: r.u8()?, checkpoints: r.u8()?, next: r.u16()?, pos: [r.f32()?, r.f32()?, r.f32()?] })
+                Some(VipState { alive: f & 1 != 0, targetable: f & 2 != 0, back: f & 4 != 0, way: r.u8()?, checkpoints: r.u8()?, next: r.u16()?, pos: [r.f32()?, r.f32()?, r.f32()?], yaw: r.f32()? })
             })
             .collect::<Option<_>>()?;
-        Some(EscortState { round, phase, left, attacking, team_score, respawn_in, target_in, spawns, vips })
+        Some(EscortState { round, phase, left, attacking, team_score, respawn_in, target_in, spawns, pool, vips })
     }
 }
 
@@ -1079,6 +1092,7 @@ mod tests {
                 Event { tick: 126, kind: EventKind::VipKilled, a: 0, b: 2 },
                 Event { tick: 126, kind: EventKind::VipCheckpoint, a: 1, b: 4 },
                 Event { tick: 126, kind: EventKind::VipWayEnd, a: 1, b: 5 },
+                Event { tick: 127, kind: EventKind::VipEscaped, a: 1, b: 0 },
             ],
             game: Some(GameState {
                 ticks_left: 17_999,
@@ -1097,8 +1111,9 @@ mod tests {
                     respawn_in: NONE16,
                     target_in: 77,
                     spawns: 3,
+                    pool: vec![2, 0],
                     vips: vec![
-                        VipState { alive: true, targetable: false, way: 2, back: true, checkpoints: 3, next: 17, pos: [1.5, -2.25, 0.125] },
+                        VipState { alive: true, targetable: false, way: 2, back: true, checkpoints: 3, next: 17, pos: [1.5, -2.25, 0.125], yaw: -0.75 },
                         VipState::default(),
                     ],
                 }),

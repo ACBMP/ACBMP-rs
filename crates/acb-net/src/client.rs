@@ -84,6 +84,8 @@ pub struct ClientStats {
     /// Snapshot match states compared / different (overwritten).
     pub game_checked: u64,
     pub game_desyncs: u64,
+    /// Match desyncs that re-created or revived a VIP.
+    pub vip_recreated: u64,
 }
 
 pub struct Client {
@@ -416,7 +418,7 @@ impl Client {
             if e.kind == EventKind::KillRejected && e.a as usize == self.slot {
                 self.stats.rejected += 1;
             }
-            let mine = e.a as usize == self.slot || (matches!(e.kind, EventKind::Death | EventKind::Stunned | EventKind::ContractLost | EventKind::ContractFulfilled) && e.b as usize == self.slot) || e.kind == EventKind::MatchOver;
+            let mine = e.a as usize == self.slot || (matches!(e.kind, EventKind::Death | EventKind::Stunned | EventKind::ContractLost | EventKind::ContractFulfilled) && e.b as usize == self.slot) || matches!(e.kind, EventKind::MatchOver | EventKind::VipEscaped);
             if trace() || mine {
                 eprintln!("net: event {}", e.describe());
             }
@@ -501,7 +503,12 @@ impl Client {
             if self.stats.game_desyncs < 20 {
                 eprintln!("net: match desync tick {t}: ours {ours:?} server {server:?}");
             }
-            game::apply_game_state(m, server);
+            let recreated = game::apply_game_state(m, server);
+            let revived = game::revive_vips(world);
+            if !recreated.is_empty() || revived > 0 {
+                self.stats.vip_recreated += 1;
+                eprintln!("net: VIP re-created at tick {t}: bodies {recreated:?}, {revived} revived");
+            }
         }
     }
 
