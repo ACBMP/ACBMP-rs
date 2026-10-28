@@ -306,6 +306,15 @@ fn vip_chase(world: &World, me: usize) -> Option<f32> {
     Some(to.y.atan2(to.x))
 }
 
+/// Lighting added to living Escort VIPs so they stand out of the crowd.
+const VIP_TINT: Vec3 = Vec3::new(0.45, 0.32, 0.0);
+
+/// Body indices of the living Escort VIPs (empty outside Escort).
+fn living_vips(world: &World) -> Vec<usize> {
+    let Some(v) = world.mode.as_ref().and_then(|m| m.vips.as_ref()) else { return Vec::new() };
+    v.bodies.iter().zip(&v.slots).filter(|(_, s)| s.is_some()).map(|(&b, _)| b).collect()
+}
+
 fn input_from(keys: &HashSet<KeyCode>, tapped: &HashSet<KeyCode>, cam_yaw: f32) -> PlayerInput {
     let k = |c| keys.contains(&c) || tapped.contains(&c);
     PlayerInput {
@@ -516,7 +525,10 @@ impl App {
     fn animate(&mut self, dt: f32) {
         let alpha = self.run_ticks();
         let (Some(g), Some(w)) = (&mut self.gfx, &self.world) else { return };
+        let vips = living_vips(w);
         for (i, (b, skin)) in w.bodies.iter().zip(&mut g.skins).enumerate() {
+            let tint = vips.contains(&i).then_some(VIP_TINT);
+            skin.handles.iter().flatten().for_each(|&h| g.scene.set_skinned_tint(h, tint));
             // remote players: their server ticks, ~100 ms behind
             let remote = self.net.as_ref().and_then(|n| w.players.iter().position(|p| p.body == i).and_then(|j| n.remote_view(j)));
             let (world, pose) = remote.unwrap_or_else(|| b.interpolated(alpha));

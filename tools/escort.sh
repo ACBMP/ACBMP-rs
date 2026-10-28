@@ -5,7 +5,8 @@
 # 75 ms each way = 150 ms round trip). Every viewer runs the `vip` test bot: while its team
 # hunts it runs at the nearest targetable VIP pressing kill. Rounds are shortened (intro and
 # recap 2 s). Expect: each "VIP n killed" once in the server log and every 100 points of a
-# VIP kill once, "round 2: team 1 attacks", 0 desync and 0 match desync on all four clients.
+# VIP kill once, "round 2: team 1 attacks", 0 desync and 0 match desync on all four clients,
+# and per client a few Escort HUD lines (role, VIP distance, team scores, round/phase/clock).
 # Run from the repo root after cargo build --release.
 export ACBMP_SCHEMAS=~/Music/anvilforge-py/src/anvilforge/schemas ACBMP_MULTI=~/Music/ACB/multi ACBMP_EXE=~/Music/ACB/ACBMP.exe
 M=~/Music/ACB/multi; O=${ESCORT_OUT:-$(mktemp -d)}; mkdir -p $O
@@ -21,4 +22,4 @@ wait
 echo "logs in $O"
 grep -E 'serve: (escort|result|sent|tick .* (VIP .* killed|round|team .* scores|escort over))' $O/serve.txt | head -40
 echo "VIP kills (server): $(grep -c 'serve: tick .* VIP .* killed' $O/serve.txt), VIP kill scores: $(grep -cE 'serve: tick .* scores 100$' $O/serve.txt)"
-for n in a b c d; do echo "== $n: $(grep -c '^net: event .* VIP .* killed' $O/$n.txt) VIP kill events"; grep -E '^net: tick|match over' $O/$n.txt | head -3; done
+for n in a b c d; do echo "== $n: $(grep -c '^net: event .* VIP .* killed' $O/$n.txt) VIP kill events"; grep -E '^net: tick|match over' $O/$n.txt | head -3; grep -E '^hud tick .*round' $O/$n.txt | awk 'NR%15==1' | head -3; grep '^hud: ' $O/$n.txt; done

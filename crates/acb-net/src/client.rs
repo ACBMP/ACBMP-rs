@@ -569,6 +569,9 @@ impl Client {
         let m = world.mode.as_ref()?;
         let me = self.slot;
         let pos = |p: usize| world.players.get(p).map(|p| p.pos).unwrap_or_default();
+        if let (acb_game::mode::Mode::Escort(t), Some(r)) = (&m.mode, &m.rounds) {
+            return Some(self.escort_hud(world, m, t, r));
+        }
         let mut s = match (m.respawn.get(me).copied().flatten(), m.contracts.hunters.get(me).and_then(|h| h.target)) {
             (Some(r), _) => format!("respawn in {:.1} s", r as f32 / TICK_HZ as f32),
             (None, Some(t)) => {
@@ -607,6 +610,59 @@ impl Client {
             s += &format!(" | {msg}");
         }
         Some(s)
+    }
+
+    /// Escort HUD: role, nearest VIP (targetable ones when hunting, living
+    /// ones when protecting), team scores, round, phase and clock, last
+    /// message. E.g. `team 0 hunter | VIP 12.3 m | [team 0 100] team 1 0 |
+    /// round 1/2 play 0:35`.
+    fn escort_hud(&self, world: &World, m: &acb_game::mode::Match, t: &acb_game::rules::Teams, r: &acb_game::rounds::Rounds) -> String {
+        use acb_game::rounds::Phase;
+        use acb_game::rules::Role;
+        let me = self.slot;
+        let my_team = t.team.get(me).copied();
+        let role = t.team.get(me).map(|_| t.role(me));
+        let mut s = match (my_team, role) {
+            (Some(tm), Some(Role::Hunter)) => format!("team {tm} hunter"),
+            (Some(tm), Some(Role::Protector)) => format!("team {tm} protector"),
+            _ => "spectator".into(),
+        };
+        if let Some(rs) = m.respawn.get(me).copied().flatten() {
+            s += &format!(" | respawn in {:.1} s", rs as f32 / TICK_HZ as f32);
+        } else if let Some(v) = &m.vips {
+            let p = world.players.get(me).map(|p| p.pos).unwrap_or_default();
+            let hunting = role == Some(Role::Hunter);
+            let nearest = v
+                .bodies
+                .iter()
+                .zip(&v.slots)
+                .filter(|(b, _)| !hunting || t.vips.contains(b))
+                .filter_map(|(_, s)| s.as_ref().map(|x| x.walker.pos.distance(p)))
+                .min_by(f32::total_cmp);
+            s += &match (nearest, v.respawn_in, v.target_in) {
+                (Some(d), _, _) => format!(" | VIP {d:.1} m"),
+                (None, Some(n), _) => format!(" | VIPs in {} s", n.div_ceil(TICK_HZ)),
+                (None, None, n) if hunting && n > 0 => format!(" | VIPs targetable in {} s", n.div_ceil(TICK_HZ)),
+                _ => " | no VIP".into(),
+            };
+        }
+        if m.health.get(me).is_some_and(|&h| h < acb_game::mode::FULL_HEALTH) {
+            s += &format!(" | health {}%", m.health[me]);
+        }
+        let scores: Vec<String> =
+            r.team_score.iter().enumerate().map(|(i, v)| if Some(i as u8) == my_team { format!("[team {i} {v}]") } else { format!("team {i} {v}") }).collect();
+        let phase = match r.phase {
+            Phase::Intro => "intro",
+            Phase::Play => "play",
+            Phase::Recap => "recap",
+            Phase::Over => "over",
+        };
+        let left = r.left / TICK_HZ;
+        s += &format!(" | {} | round {}/{} {phase} {}:{:02}", scores.join(" "), (r.round + 1).min(r.rounds), r.rounds, left / 60, left % 60);
+        if let Some(msg) = &self.last_message {
+            s += &format!(" | {msg}");
+        }
+        s
     }
 
     /// Placement and pose to draw remote player `j` with: its confirmed

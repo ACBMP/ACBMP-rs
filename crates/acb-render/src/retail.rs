@@ -839,25 +839,39 @@ impl Retail {
     }
 
     /// A skinned draw's own VS frame buffer and consts bind group.
-    pub fn skinned_consts(&self, r: &Renderer, m: &Material) -> (wgpu::Buffer, wgpu::BindGroup) {
+    /// A skinned draw's constants: its own VS frame buffer (globals + bone
+    /// palette) and bind group, plus a second bind group with an own PS
+    /// frame buffer for highlighted (tinted) drawing.
+    pub fn skinned_consts(&self, r: &Renderer, m: &Material) -> SkinnedConsts {
         let p = &self.programs[m.program];
-        let buf = r.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("retail skinned frame"),
-            size: ConstBlock::new(wgsl::VS_CONSTS).bytes().len() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let bg = r.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("retail skinned consts"),
-            layout: &self.consts_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: p.ps_frame.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: m.vs_mat.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: m.ps_mat.as_entire_binding() },
-            ],
-        });
-        (buf, bg)
+        let block = |label, size| {
+            r.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false })
+        };
+        let frame = block("retail skinned frame", ConstBlock::new(wgsl::VS_CONSTS).bytes().len() as u64);
+        let tint_ps = block("retail skinned tint ps", ConstBlock::new(wgsl::PS_CONSTS).bytes().len() as u64);
+        let group = |ps: &wgpu::Buffer| {
+            r.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("retail skinned consts"),
+                layout: &self.consts_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: frame.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: ps.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: m.vs_mat.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: m.ps_mat.as_entire_binding() },
+                ],
+            })
+        };
+        let consts = group(&p.ps_frame);
+        let tinted = group(&tint_ps);
+        SkinnedConsts { frame, tint_ps, consts, tinted }
+    }
+
+    /// Fills a tinted skinned draw's own PS frame buffer from `env` (the
+    /// scene lighting with the tint added).
+    pub fn write_tinted_ps(&self, r: &Renderer, m: &Material, buf: &wgpu::Buffer, env: &Environment, fv: &FrameView) {
+        let mut ps = ConstBlock::new(wgsl::PS_CONSTS);
+        fill_globals(&mut ps, &self.programs[m.program].ps_globals, env, fv);
+        r.queue.write_buffer(buf, 0, &ps.bytes());
     }
 
     /// Fills a skinned draw's frame buffer: globals, then `palette` (mesh
@@ -876,6 +890,14 @@ impl Retail {
     pub fn pipeline(&self, m: &Material) -> &wgpu::RenderPipeline {
         &self.programs[m.program].pipelines[m.two_sided as usize]
     }
+}
+
+/// See [`Retail::skinned_consts`].
+pub struct SkinnedConsts {
+    pub frame: wgpu::Buffer,
+    pub tint_ps: wgpu::Buffer,
+    pub consts: wgpu::BindGroup,
+    pub tinted: wgpu::BindGroup,
 }
 
 /// Per-instance rows: WVP rows then World rows (`c[k]` = row k of the
