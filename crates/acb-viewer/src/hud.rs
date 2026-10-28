@@ -20,6 +20,9 @@ const TEXT: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const BACK: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
 const ARROW: [f32; 4] = [1.0, 0.78, 0.2, 1.0];
 const RING: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
+const MARK: [f32; 4] = [0.85, 0.9, 1.0, 0.95];
+const TARGET: [f32; 4] = [0.95, 0.15, 0.1, 1.0];
+const WARN_BACK: [f32; 4] = [0.6, 0.0, 0.0, 0.7];
 
 /// Glyph rows top to bottom, `#` lit. Lowercase is drawn as uppercase,
 /// anything missing as `?`.
@@ -114,11 +117,60 @@ fn wrap(text: &str, max: usize) -> Vec<String> {
     lines
 }
 
+/// One line of bitmap text at `x`, `y` (top left), pixel scale `s`.
+fn label(v: &mut Vec<Vert>, x: f32, y: f32, s: f32, line: &str, color: [f32; 4]) {
+    for (i, c) in line.chars().enumerate() {
+        let gx = x + i as f32 * 6.0 * s;
+        for (r, row) in glyph(c).iter().enumerate() {
+            // one quad per horizontal run of lit pixels
+            let row = row.as_bytes();
+            let mut col = 0;
+            while col < 5 {
+                if row[col] != b'#' {
+                    col += 1;
+                    continue;
+                }
+                let start = col;
+                while col < 5 && row[col] == b'#' {
+                    col += 1;
+                }
+                let y0 = y + r as f32 * s;
+                quad(v, gx + start as f32 * s, y0, gx + col as f32 * s, y0 + s, color);
+            }
+        }
+    }
+}
+
+/// What a compass mark on the Assassinate strip stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mark {
+    /// A potential target (any other living player).
+    Potential,
+    /// The player being acquired (look in progress).
+    Acquiring,
+    /// The acquired target (the contract).
+    Target,
+}
+
+/// The Assassinate widgets: compass strip marks (bearing as for the Escort
+/// arrow: radians, CCW from straight ahead, so positive is left), the
+/// acquire progress 0..1 when a look is in progress, and the "being
+/// acquired" warning with its blink phase (from the sim tick, so the same
+/// at any frame rate).
+#[derive(Clone, Debug, Default)]
+pub struct Assassin {
+    pub marks: Vec<(f32, Mark)>,
+    pub acquiring: Option<f32>,
+    pub warned: bool,
+    pub blink_on: bool,
+}
+
 /// Triangles for the HUD `text` across the top of a `w` x `h` screen and,
 /// when `bearing` is set (radians, counter-clockwise from straight ahead =
-/// to the left), a compass arrow under it.
-pub fn build(text: &str, bearing: Option<f32>, w: u32, h: u32) -> Vec<Vert> {
-    let (w, _h) = (w as f32, h as f32);
+/// to the left), a compass arrow under it; `assassin` adds the compass
+/// strip, the acquire bar and the warning.
+pub fn build(text: &str, bearing: Option<f32>, assassin: Option<&Assassin>, w: u32, h: u32) -> Vec<Vert> {
+    let (w, h) = (w as f32, h as f32);
     let s = (w / 640.0).round().clamp(1.0, 4.0);
     let adv = 6.0 * s;
     let line_h = 10.0 * s;
@@ -129,27 +181,11 @@ pub fn build(text: &str, bearing: Option<f32>, w: u32, h: u32) -> Vec<Vert> {
         let n = line.chars().count() as f32;
         let x = ((w - n * adv) / 2.0).round();
         quad(&mut v, x - 2.0 * s, y - 2.0 * s, x + n * adv + 1.0 * s, y + 9.0 * s, BACK);
-        for (i, c) in line.chars().enumerate() {
-            let gx = x + i as f32 * adv;
-            for (r, row) in glyph(c).iter().enumerate() {
-                // one quad per horizontal run of lit pixels
-                let row = row.as_bytes();
-                let mut col = 0;
-                while col < 5 {
-                    if row[col] != b'#' {
-                        col += 1;
-                        continue;
-                    }
-                    let start = col;
-                    while col < 5 && row[col] == b'#' {
-                        col += 1;
-                    }
-                    let y0 = y + r as f32 * s;
-                    quad(&mut v, gx + start as f32 * s, y0, gx + col as f32 * s, y0 + s, TEXT);
-                }
-            }
-        }
+        label(&mut v, x, y, s, &line, TEXT);
         y += line_h;
+    }
+    if let Some(a) = assassin {
+        y = assassin_widgets(&mut v, a, w, h, y, s);
     }
     if let Some(b) = bearing {
         let r = 14.0 * s;
@@ -171,6 +207,61 @@ pub fn build(text: &str, bearing: Option<f32>, w: u32, h: u32) -> Vec<Vert> {
         tri(&mut v, pt(0.85, 0.0), pt(-0.2, 0.0), pt(-0.45, -0.4), ARROW);
     }
     v
+}
+
+/// The Assassinate compass strip (+-180 deg, ahead in the middle), the
+/// acquire bar under it and the blinking warning in the lower third.
+/// Returns the y under the strip and bar.
+fn assassin_widgets(v: &mut Vec<Vert>, a: &Assassin, w: f32, h: f32, y: f32, s: f32) -> f32 {
+    use std::f32::consts::PI;
+    let half = (110.0 * s).min(w / 2.0 - 8.0);
+    let cx = w / 2.0;
+    let (top, bot) = (y + 2.0 * s, y + 12.0 * s);
+    let mid = (top + bot) / 2.0;
+    quad(v, cx - half - 2.0 * s, top - 2.0 * s, cx + half + 2.0 * s, bot + 2.0 * s, BACK);
+    // baseline, ahead notch, quarter ticks (left, right, behind at the ends)
+    quad(v, cx - half, mid - 0.5 * s, cx + half, mid + 0.5 * s, RING);
+    for q in [-1.0f32, -0.5, 0.0, 0.5, 1.0] {
+        let x = cx + q * half;
+        let (t0, t1) = if q == 0.0 { (top, bot) } else { (mid - 2.0 * s, mid + 2.0 * s) };
+        quad(v, x - 0.5 * s, t0, x + 0.5 * s, t1, RING);
+    }
+    let x_of = |b: f32| cx - (b / PI).clamp(-1.0, 1.0) * half;
+    // potential targets first so the acquiring / target marks draw on top
+    let mut marks = a.marks.clone();
+    marks.sort_by_key(|m| m.1 as u8);
+    for (b, m) in marks {
+        let x = x_of(b);
+        match m {
+            Mark::Potential => quad(v, x - 1.0 * s, top + 1.0 * s, x + 1.0 * s, bot - 1.0 * s, MARK),
+            Mark::Acquiring => {
+                tri(v, [x, bot], [x - 3.0 * s, top], [x + 3.0 * s, top], ARROW);
+            }
+            Mark::Target => {
+                // diamond
+                let r = 4.5 * s;
+                tri(v, [x, mid - r], [x + r, mid], [x, mid + r], TARGET);
+                tri(v, [x, mid - r], [x, mid + r], [x - r, mid], TARGET);
+            }
+        }
+    }
+    let mut y = bot + 4.0 * s;
+    if let Some(p) = a.acquiring {
+        let p = p.clamp(0.0, 1.0);
+        let (x0, x1) = (cx - half * 0.6, cx + half * 0.6);
+        quad(v, x0 - 1.0 * s, y - 1.0 * s, x1 + 1.0 * s, y + 5.0 * s, BACK);
+        quad(v, x0, y, x0 + (x1 - x0) * p, y + 4.0 * s, ARROW);
+        y += 7.0 * s;
+    }
+    if a.warned && a.blink_on {
+        let msg = "BEING ACQUIRED!";
+        let n = msg.len() as f32;
+        let x = ((w - n * 6.0 * s * 2.0) / 2.0).round();
+        let wy = (h * 0.68).round();
+        quad(v, x - 4.0 * s, wy - 4.0 * s, x + n * 12.0 * s + 2.0 * s, wy + 18.0 * s, WARN_BACK);
+        label(v, x, wy, s * 2.0, msg, TEXT);
+    }
+    y
 }
 
 /// Alpha-blend the triangles into an RGBA8 (sRGB) image, for captures.
@@ -320,11 +411,23 @@ mod tests {
     #[test]
     fn arrow_points_ahead_and_left() {
         let tip = |b| {
-            let v = build("x", Some(b), 640, 480);
+            let v = build("x", Some(b), None, 640, 480);
             v[v.len() - 6].pos
         };
         let (c, ahead, left) = (320.0, tip(0.0), tip(std::f32::consts::FRAC_PI_2));
         assert!((ahead[0] - c).abs() < 0.01 && ahead[1] < 40.0);
         assert!(left[0] < c - 5.0);
+    }
+
+    #[test]
+    fn strip_marks_follow_bearing() {
+        let col = |v: &[Vert], c: [f32; 4]| v.iter().filter(|x| x.color == c).map(|x| x.pos[0]).sum::<f32>() / v.iter().filter(|x| x.color == c).count() as f32;
+        let a = Assassin { marks: vec![(0.0, Mark::Target), (std::f32::consts::FRAC_PI_2, Mark::Potential)], acquiring: Some(0.5), warned: true, blink_on: true };
+        let v = build("x", None, Some(&a), 640, 480);
+        assert!((col(&v, TARGET) - 320.0).abs() < 0.01);
+        assert!(col(&v, MARK) < 300.0);
+        assert!(v.iter().any(|x| x.color == WARN_BACK));
+        let off = build("x", None, Some(&Assassin { blink_on: false, ..a }), 640, 480);
+        assert!(!off.iter().any(|x| x.color == WARN_BACK));
     }
 }

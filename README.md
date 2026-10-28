@@ -74,14 +74,19 @@ acquiring is warned and may stun you meanwhile (200 points, you start over).
 Your contract lasts while you keep looking; look away for 2 s and it is lost
 (look back within those 2 s and it is still yours, also after switching to
 someone else). A kill is only valid on your contract (100 points); killing a
-crowd NPC loses your contract. HUD: `acquiring pN 45%`, `being acquired by
-pN`, and `compass pA 12 m, pB 30 m` (every other living player, nearest
-first). `tools/assassinate.sh` runs a 1v1 on one machine (port 7952). Known
-gaps: the look cone and range are our guesses, not retail's camera lock;
-there is no lock button and no "release contract" (Y); kill bonuses,
-BloodBath, the informer NPC and the compass/radar markers on screen are
-missing (text HUD only); the start delay (3 s) and respawn delay (5 s) are
-the duel's placeholders.
+crowd NPC loses your contract. HUD text: `acquiring pN 45%`, `being acquired
+by pN`, and `compass pA 12 m, pB 30 m` (every other living player, nearest
+first). On screen under the text: a compass strip (straight ahead in the
+middle, left/right at the quarter ticks, behind at the ends, turning with the
+camera) with a white bar per potential target, a gold triangle on the player
+you are acquiring and a red diamond on your acquired target; a gold progress
+bar while you acquire; and a blinking red `BEING ACQUIRED!` box in the lower
+third while anyone acquires you. `tools/assassinate.sh` runs a 1v1 on one
+machine (port 7952). Known gaps: the look cone and range are our guesses, not
+retail's camera lock; there is no lock button and no "release contract" (Y);
+kill bonuses, BloodBath and the informer NPC are missing; the HUD widgets are
+our own art, not retail's compass/radar; the start delay (3 s) and respawn
+delay (5 s) are the duel's placeholders.
 
 Controls (on foot):
 
