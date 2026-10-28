@@ -1135,6 +1135,16 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   VIP bodies (`living_vips`) with `VIP_TINT` (0.45, 0.32, 0) = gold.
 - tools/escort.sh prints 3 `hud tick .*round` lines and the final `hud:` per client.
 
+## Escort HUD on screen (2026-10-28, phase4-escort-hud-text)
+- crates/acb-viewer/src/hud.rs: `ClientNet::hud` line drawn every frame at the top of the screen. 5x7 bitmap
+  font baked in code (uppercase, digits, punctuation; lowercase drawn uppercase, unknown `?`), one quad per
+  lit horizontal run, black 55% backing per line, fields wrapped on ` | `, scale = round(width/640) clamped 1..4.
+- Hunters (`vip_chase` = attacking team, alive): ring + gold arrow under the text, bearing = VIP yaw minus
+  `orbit.yaw` (CCW positive = left, so screen dir (-sin b, -cos b)).
+- One untextured vertex-colour pipeline, no bind groups, LoadOp::Load pass after `Renderer::render`; colours
+  sRGB, converted to linear on upload for sRGB surfaces. Captures use the same triangles rasterised on the CPU
+  into the `render_to_rgba` buffer. Render-only: gates unchanged at 60/144.
+
 ## Human state machine part 5 (2026-10-28, phase3-human-e)
 - InAir->HayStack (`CheckForHayStacks` 01319100): air entry on contact or when the feet..feet+1.8 m segment crosses the detection box (`DetectHayStack` 01318f9a), rising or falling: `human::haystack::air_enters`. Not ported: ignore timer (00ec45f0), state +0x3b0==9 veto, the prev-pos ray-cast branch, `IsNearDeepHayStackTarget` 0130aa50.
 - InAir->NarrowObject (`CheckForDefaultGrasp` 0132017a, `GetBeamAnchor` 0130fb08, box half 0.55 side / 0.4 sight / 0.35 up at +0.15): `Ground::beam_anchor`, gated by the 2 m grasp rule and a 0.3 m drop (ours). Drop at 38.25,-54.6,2.2 catches the railing at 38.60 -54.60 1.01 (60/144 fps). Not ported: pilotis grab, TargetedLedgeGrab beam landing; retail probe point offset unknown (ours feet).
