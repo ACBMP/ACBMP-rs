@@ -1176,3 +1176,45 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   back on their feet; `ClientStats::vip_recreated`, log `net: VIP re-created`. Test game::lost_vip_is_recreated.
 - Noted, not changed: VIPdata::OnUpdate sends the checkpoint score (U2A_NotifySpecialScore) to every member of the
   protecting team, i.e. retail gives each protector a personal share (E4 placeholder says team only).
+
+## Assassinate RE, Phase 4 prep (2026-10-28, phase4-assassinate-spec)
+Full findings, a values table (C = confirmed with address, R = our reading, P = placeholder), and the
+retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. The repo has no findings/ dir.
+- Engine name "assassinate": `DataPC.forge` 0xebec9a91 UnlockableGameMode (PlayNowMinimumLevel 5) and
+  0x71e41bec GamemodeParameters. The parameters are identical to Wanted2 except the name, so kill reach 2.5/8 m
+  and the threat meter carry over. Selection is by name through `GameModeManager::SelectCurrentGameMode(char
+  const*)` 0x00cabbac. The bricks come from `game:multi\gamemode%s_%s.xml`, which is not shipped.
+- No map has a `gamemode_assassinate` data block, and there is no AdditionalWorldData_Assassinate instance, so
+  Assassinate needs no map objects and uses the standard spawns (R).
+- Candidate target rule (R): `GBrick_ContractInitiator` (0x012d8f7a defaults, Update 0x0130d708). A player
+  acquires a target by looking at it for SelectingTime 3 s (0 s when the target is in High Profile). The target
+  is warned (blink), and NetPlayer SelectingEntity is replicated. After a focus change an acquired target is kept
+  for ChangeTargetFocusDelay 2 s. Other values: OutOfLosTime 1 s, BlinkAfterAcquiredTime 3 s.
+  - The alternative `GBrick_SelectTargetSimpleLoop` 0x016d4d68 is a single ring (each player hunts the next) and
+    fits dual/metadual (R).
+  - `GBrick_SimpleRadar::GetRadarRange` 0x013064f8 gives blip scale 1.0 under 6 m, then a falloff curve with a
+    floor of 0.075.
+  - BloodBath: a chain of 3 kills within 10 s.
+- Scores: ScoreKill 100, NPC kill 0 (UI strings say an innocent kill breaks the contract, R), stun 200, escape
+  100, Wanted bonuses. Round length, respawn delay and start delay are P (XML missing): we keep the duel's
+  300/5/3 s.
+- Already matching in our duel: kill and stun validity, reach, bands, threat meter, chase/escape, kill 100 /
+  stun 200 / escape 100, contract loss on death or stun, spawns.
+- Differs: how targets are acquired (lottery vs looking at a player), the compass (retail probably uses a radar,
+  R), the wrong-kill contract loss, and the missing kill bonuses.
+- A-steps (each needs its gate green before the next):
+  - A0 rules-from-data: decode CompressedLocalizationData (DataPC 0x176ce0f5) for UIStrings 0xebec9a93..98, the
+    official mode description. Gate: the text quoted here and the R items confirmed or dropped.
+  - A1 `Mode::Assassinate` skeleton plus `serve --mode assassinate`. Gate: acb-game tests green, duel.sh output
+    unchanged, every player kill refused before any acquisition.
+  - A2 acquisition in rules.rs: 180 ticks (0 in High Profile), 120-tick memory, acquired -> Target/Pursuer
+    relation. Gate: unit tests with exact ticks (a kill at tick 179 is refused, at 180 granted).
+  - A3 contract events: death fulfils or loses, a stun by the target loses, an NPC kill loses (R). Gate:
+    per-event unit tests, and the prediction replay matches.
+  - A4 the missing kill bonuses (Silent, Unspotted, FirstBlood, Revenge, Overkill 10 s, Incognito, Proximity) and
+    a BloodBath message. Gate: a table test against the 0x0103832c defaults.
+  - A5 net proto bump: acquiring and acquired state in GameState, plus Acquiring/Acquired/AcquireLost events.
+    Gate: 4 clients at 5% loss / 150 ms, acquire then kill scores once, a kill before acquiring is rolled back,
+    0 desyncs.
+  - A6 HUD: acquire progress, a "being acquired" blink, the radar curve; README Playtesting. Gate: the --capture
+    hud line.
