@@ -287,6 +287,39 @@ struct App {
     connect: Option<acb_net::client::Start>,
 }
 
+/// Assassinate widgets for player `me` from the predicted match state:
+/// compass marks for every potential target (world bearing through `rel`
+/// to camera-relative), the acquire progress of a look in progress and the
+/// "being acquired" warning, blinking on/off every 8 sim ticks.
+fn assassin_hud(world: &World, me: usize, rel: impl Fn(f32) -> f32) -> Option<hud::Assassin> {
+    let m = world.mode.as_ref()?;
+    if m.mode != acb_game::mode::Mode::Assassinate || !m.alive(me) {
+        return None;
+    }
+    let p = world.players.get(me)?.pos;
+    let target = m.contracts.hunters.get(me).and_then(|h| h.target);
+    let a = m.acquire.get(me)?;
+    let focus = a.focus.filter(|&f| target != Some(f));
+    let marks = m
+        .potential_targets(me)
+        .into_iter()
+        .filter_map(|q| {
+            let d = world.players.get(q)?.pos - p;
+            let kind = if target == Some(q) {
+                hud::Mark::Target
+            } else if focus == Some(q) {
+                hud::Mark::Acquiring
+            } else {
+                hud::Mark::Potential
+            };
+            Some((rel(d.y.atan2(d.x)), kind))
+        })
+        .collect();
+    let acquiring = focus.map(|_| a.look as f32 / acb_game::rules::ACQUIRE_TICKS as f32);
+    let warned = !m.acquirers(me).is_empty();
+    Some(hud::Assassin { marks, acquiring, warned, blink_on: (world.tick / 8) % 2 == 0 })
+}
+
 /// Controls from held and tapped keys and the camera yaw.
 /// `--input` key `vip`: while player `me` hunts in an Escort round, the
 /// camera yaw that runs it at the nearest targetable VIP.
@@ -471,11 +504,13 @@ impl App {
     fn hud_verts(&self, w: u32, h: u32) -> Vec<hud::Vert> {
         let (Some(n), Some(world)) = (&self.net, &self.world) else { return Vec::new() };
         let Some(text) = n.hud(world) else { return Vec::new() };
-        let bearing = vip_chase(world, n.slot).map(|a| {
+        let rel = |a: f32| {
             let b = (a - self.orbit.yaw).rem_euclid(std::f32::consts::TAU);
             if b > std::f32::consts::PI { b - std::f32::consts::TAU } else { b }
-        });
-        hud::build(&text, bearing, w, h)
+        };
+        let bearing = vip_chase(world, n.slot).map(rel);
+        let assassin = assassin_hud(world, n.slot, rel);
+        hud::build(&text, bearing, assassin.as_ref(), w, h)
     }
 
     fn me(&self) -> usize {

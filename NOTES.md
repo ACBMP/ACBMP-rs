@@ -1283,3 +1283,15 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
   kills.sh 8 granted.
 - Still placeholders: start delay 3 s, respawn 5 s, score limit 1000, look cone/range. Open: A4 kill bonuses, A5 net
   test with 4 clients at loss, A6 HUD (progress blink, compass markers on screen), lock button / CancelWithY.
+
+## Assassinate HUD on screen (A6) (2026-10-29, phase4-assassinate-hud)
+- Viewer only (`hud::Assassin`, `hud::Mark`, `assassin_widgets`; `main.rs` `assassin_hud`), same overlay pass and CPU
+  capture rasteriser as the Escort HUD; text drawing moved into `hud::label`.
+- Compass strip under the HUD text: +-180 deg, ahead centre, ticks at +-90 and the ends. Marks = `potential_targets(me)`
+  at bearing atan2(d) - `orbit.yaw` (positive = left, same as the Escort arrow): white bar = potential, gold triangle
+  = `acquire[me].focus` (not yet the target), red diamond = `hunters[me].target`.
+- Acquire bar: `look / ACQUIRE_TICKS` while a focus that is not the target exists. Warning: `acquirers(me)` non-empty,
+  red box "BEING ACQUIRED!" at 68% height, 2x text; blink on `(world.tick / 8) % 2` (sim tick, so 60/144 identical;
+  retail blink rate not read, ours). Hidden when dead / not Assassinate.
+- Visual check: serve on port 7965, two viewers (60/144) captured at 4.4/4.6 s (bar ~50%, warning) and 6 s
+  (diamond centred). Gates unchanged. Open: retail widget art/placement (compass/radar), blink rate.
