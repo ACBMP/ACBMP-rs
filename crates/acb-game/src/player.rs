@@ -652,7 +652,21 @@ pub(crate) fn drive(
                 p.vel = Vec3::ZERO;
                 return;
             }
-            let mut at = ground.slide(p.pos, p.vel.truncate() * dt);
+            let (mut at, wall) = ground.slide_hit(p.pos, p.vel.truncate() * dt);
+            // retail TurnOnWall (WallReception, 01315f90): running face
+            // first into a wall in the air turns the back to it and drops
+            // down it (ours: no reception clip, the fall pose stays)
+            let facing = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            if let Some(n) = wall {
+                if p.air.wall(human::in_air::wall_reception(n, p.vel, facing, p.air.time)) {
+                    if crate::trace() {
+                        eprintln!("air: turn on wall at {:.2} {:.2} {:.2} after {:.2} s", p.pos.x, p.pos.y, p.pos.z, p.air.time);
+                    }
+                    p.yaw = (-n.x).atan2(n.y);
+                    p.vel.x = 0.0;
+                    p.vel.y = 0.0;
+                }
+            }
             let z = p.pos.z + p.vel.z * dt;
             match ground.floor_hit(at + Vec3::Z * 0.1) {
                 // retail TestGroundCollision: near the start height the

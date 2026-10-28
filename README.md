@@ -53,8 +53,10 @@ relative); F + S or F alone jumps back off the wall, F + A/D jumps sideways
 across a gap, F + W leaps to a hold above; Shift + A/D at the end of an edge
 also side-jumps. A fall grabs a hold up to 1.2 m ahead only in its first
 2 m (retail); after that you go down. Drops under 0.53 m are stepped down,
-deeper ones fallen off. Walk into a haystack in high profile (or drop onto it) to
-hide; any move key leaves. Bushes count as haystacks too (one is right
+deeper ones fallen off. Walk or run into a haystack (touch it, facing it and
+pushing towards it; or drop onto it) to hide; any move key leaves. Running
+into a wall you can't climb stops you (retail obstacle collision); leaping
+face first into a wall turns your back to it and you slide down it. Bushes count as haystacks too (one is right
 behind the first San Donato spawn): sunk into one with the legs out of sight
 means hidden, not stuck; any move key hops out. Walking slowly among the crowd blends you. Stand
 or walk (low profile) next to a bench seat and press F to sit (blended);
