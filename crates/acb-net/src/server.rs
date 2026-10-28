@@ -42,6 +42,8 @@ pub struct ServeConfig {
     /// With `rules`: an Escort match instead of the duel (`team` empty:
     /// slots alternate teams 0, 1, 0, 1, ...).
     pub escort: Option<crate::proto::EscortRules>,
+    /// With `rules` and no `escort`: an Assassinate match instead of the duel.
+    pub assassinate: bool,
 }
 
 /// Ticks of applied inputs a snapshot repeats at most.
@@ -161,7 +163,7 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
         }
         e
     });
-    let mut world = game::load_match(&archive, &slots, builtins.as_ref(), cfg.rules, cfg.crowd, escort.as_ref())?;
+    let mut world = game::load_match(&archive, &slots, builtins.as_ref(), cfg.rules, cfg.crowd, escort.as_ref(), cfg.assassinate)?;
     if let Some(e) = &escort {
         eprintln!("serve: escort teams {:?}, team {} attacks first, {} VIP bodies", e.team, e.attacking, world.mode.as_ref().and_then(|m| m.vips.as_ref()).map_or(0, |v| v.bodies.len()));
     }
@@ -169,7 +171,7 @@ pub fn run(cfg: ServeConfig) -> anyhow::Result<()> {
         eprintln!("serve: match {:?} on {} player spawns", m.config, m.spawns.len());
     }
     eprintln!("serve: world with {} players loaded in {:.1}s", world.players.len(), t.elapsed().as_secs_f64());
-    let start = Msg::Start { map: map_name.clone(), snapshot_every: cfg.snapshot_every as u8, slots: slots.clone(), rules: cfg.rules, crowd: cfg.crowd, escort }.encode();
+    let start = Msg::Start { map: map_name.clone(), snapshot_every: cfg.snapshot_every as u8, slots: slots.clone(), rules: cfg.rules, crowd: cfg.crowd, escort, assassinate: cfg.assassinate }.encode();
     let mut last_start = Instant::now() - Duration::from_secs(1);
     let wait = Instant::now();
     while !peers.iter().all(|p| p.ready) {

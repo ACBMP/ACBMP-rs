@@ -662,6 +662,8 @@ impl World {
             _ => Vec::new(),
         };
         let mut vip_kills = Vec::new();
+        // crowd NPCs killed this tick, by player
+        let mut npc_kills = Vec::new();
         let stances: Vec<rules::Stance> = self.players.iter().map(|p| p.actor().stance).collect();
         for (i, p) in self.players.iter_mut().enumerate() {
             let input = if in_control[i] { inputs.get(i).copied().unwrap_or_default() } else { PlayerInput { cam_yaw: inputs.get(i).map_or(0.0, |x| x.cam_yaw), ..Default::default() } };
@@ -681,6 +683,8 @@ impl World {
                     actions.push((i, v, p.kill.as_ref().map_or(kill::WALK, |k| k.set())));
                 } else if let Some(v) = vip_targets.iter().copied().find(|&j| !was_scripted[j] && self.bodies[j].scripted.is_some()) {
                     vip_kills.push((i, v));
+                } else if (n_players..n_bodies).any(|j| !vip_targets.contains(&j) && !was_scripted[j] && self.bodies[j].scripted.is_some()) {
+                    npc_kills.push(i);
                 }
             }
             if let Some(before) = before {
@@ -719,6 +723,9 @@ impl World {
             for (k, v, set) in actions {
                 m.on_action(k, v, set);
             }
+            for k in npc_kills {
+                m.on_npc_kill(k);
+            }
             for (i, p) in self.players.iter().enumerate() {
                 if let Some((_, damage, _)) = p.landing {
                     m.on_fall(i, damage);
@@ -728,7 +735,8 @@ impl World {
             let who: Vec<mode::Presence> = self
                 .players
                 .iter()
-                .map(|p| mode::Presence { pos: p.pos, hidden: p.hidden, blended: p.blended, running: p.moved >= rules::RUN_SPEED && p.kill.is_none(), yaw: p.yaw, speed: p.moved, in_air: p.loco.airborne() || p.flight.is_some() })
+                .enumerate()
+                .map(|(i, p)| mode::Presence { pos: p.pos, hidden: p.hidden, blended: p.blended, running: p.moved >= rules::RUN_SPEED && p.kill.is_none(), yaw: p.yaw, speed: p.moved, in_air: p.loco.airborne() || p.flight.is_some(), look: inputs.get(i).map_or(0.0, |x| x.cam_yaw) })
                 .collect();
             let ground = self.ground.as_ref();
             // head to head (retail GameBrick::CanSee); no collision: clear

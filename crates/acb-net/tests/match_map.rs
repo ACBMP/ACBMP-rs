@@ -104,6 +104,7 @@ fn match_over_lossy_localhost() {
                 duration: Some(7.0),
                 rules: None,
                 escort: None,
+                assassinate: false,
                 crowd: Default::default(),
             })
         })

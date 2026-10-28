@@ -1248,3 +1248,38 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
   reaches a Checkpoint" (team wording; does not settle team vs per-protector, so the E7 note stands). No escape
   round end in the text, but round banners exist: 0x4be8e all VIPs killed, 0x4be8f protectors killed all hunters,
   0x4be90 "DEFENDERS HAVE PROTECTED THE VIP". The escape placeholder stays; 0x4be90 fits an escape or a time-out.
+
+## Assassinate A1-A2 (+A3) (2026-10-29, phase4-assassinate-a1)
+- `Mode::Assassinate` (mode.rs) beside Duel/Escort, `Match::assassinate`, `acbmp serve --mode assassinate`
+  (`--time-limit` default 600 s = `ASSASSINATE_TIME`, C: "10 minutes" UIString 0x4e102). Free-for-all: no lottery
+  (`Contracts::update` runs only in Duel); `hunters[h].target` is set only by acquisition, so every kill is refused
+  (`Reject::NotTarget`) until the killer acquired its victim. Chase/threat/escape, kill/stun scores, respawns and
+  spawns are the duel's (spec section 6).
+- Acquisition (`rules::Contracts::acquire`, `rules::Acquire`, `rules::looked_at`), every tick after the start delay:
+  - candidate = living other in the camera view (`PlayerInput::cam_yaw`, now `Presence::look`), nearest the view
+    centre, ties lowest index. Cone 20 deg (`LOOK_CONE_COS`) and range 30 m (`LOOK_RANGE` = compass DetectionRange):
+    P (retail uses the camera lock/highlight through 0x0130d596, not read). LOS = the match's head-to-head ray.
+  - `ACQUIRE_TICKS` 180 = SelectingTime 3.0 s (C 0x012d8f7a +0x86c); 0 when the candidate runs (`Presence::running`
+    = High Profile, C `IsTargetInHighProfile` 0x012e0a66, text draft 0x4dbc4) or is in memory. Look counts ticks in
+    a row; at 180 the candidate becomes the target (`ContractEvent::Assigned`). Tests: tick 179 refused, 180 granted.
+  - `MEMORY_TICKS` 120 = ChangeTargetFocusDelay 2.0 s (C 0x012d8f7a +0x894 / 0x012f7c2e). An acquired player out of
+    focus is remembered 120 ticks (counted from the first tick away); back in focus within that = still held / at
+    once; at 120 the held contract is `Lost`. Reading R: retail's list drops entries after 2 s; that the *contract*
+    also drops then is ours (CancelTargetDelay 0 / OutOfLosTime 1 s meanings not traced).
+  - Warning: `MatchEvent::Acquire(AcquireEvent::Acquiring|Stopped)` (net events 26/27), `Match::acquirers(p)`; HUD
+    "being acquired by pN" (retail blink, C 0x012f59ae/0x012f5b30). While acquiring, the target sees the acquirer as
+    Pursuer (may stun it; draft text 0x4dbc4/0x4dea8, R). Nobody is immune during acquisition (drafts disagree: open).
+  - Compass: `Match::potential_targets(p)` = every other living player (0x4e102 "Potential targets are marked on your
+    compass"; which players retail marks is R); HUD text only ("compass p1 12 m").
+- A3 events (tests `assassinate_event_*`): target death fulfils the killer's contract and loses everybody else's
+  (and is forgotten by every acquisition); a stun by the target (or an escape) loses the contract and resets the
+  acquisition; a crowd NPC kill loses the killer's contract (`NPC_KILL_LOSES_CONTRACT`, P: strings only; 0x4e125
+  "civilian kills give points to each of your opponents" not ported, mode unnamed). `World::step` reports NPC kills
+  to `Match::on_npc_kill` (no effect outside Assassinate). Contract cooldown (MinWait 5 s) is ignored here (P).
+- Net proto v9: `Start.assassinate`, `GameState.acquire` (focus, look, memory per player), events Acquiring /
+  AcquireStopped. `tools/assassinate.sh` (port 7952, duel inputs): both acquire at 180 (start delay), B acquires
+  running A at once (~tick 256), A acquires B at 359, A kills at 408: a 100, b 0, 0 desync.
+- Gates on this branch: duel.sh a 100 b 0 0 desync; escort.sh [270, 130] 3 VIP kills 0 desync; gates.sh unchanged;
+  kills.sh 8 granted.
+- Still placeholders: start delay 3 s, respawn 5 s, score limit 1000, look cone/range. Open: A4 kill bonuses, A5 net
+  test with 4 clients at loss, A6 HUD (progress blink, compass markers on screen), lock button / CancelWithY.

@@ -392,7 +392,7 @@ impl App {
         );
         let world = match self.connect.take() {
             Some(start) => {
-                let world = acb_net::game::load_match(&archive, &start.slots, self.builtins().as_ref(), start.rules, start.crowd, start.escort.as_ref())?;
+                let world = acb_net::game::load_match(&archive, &start.slots, self.builtins().as_ref(), start.rules, start.crowd, start.escort.as_ref(), start.assassinate)?;
                 eprintln!("net: match world with {} players, playing slot {}", world.players.len(), start.slot);
                 world
             }
