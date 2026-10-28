@@ -678,8 +678,15 @@ pub(crate) fn drive(
             // -> GetBeamAnchor 0130fb08 -> InAir.NarrowObject; ours lands on
             // its centre line in the beam clip set, no entry clip)
             let sight = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+            // a post top first (retail CheckForPilotis 00d1109a, before
+            // GetBeamAnchor; ours snaps onto its centre, no Pilotis state)
             let beam = if p.vel.z <= 0.0 && human::in_air::grasp_allowed(p.fall_from - p.pos.z, p.catch_block) {
-                ground.beam_anchor(p.pos, sight).filter(|(a, _)| human::in_air::beam_catch_allowed(p.air.start_z, a.z))
+                let post = ground.pilotis(p.pos, sight).filter(|c| human::in_air::beam_catch_allowed(p.air.start_z, c.z));
+                if let (Some(c), true) = (post, crate::trace()) {
+                    eprintln!("air: pilotis at {:.2?}", c.to_array());
+                }
+                post.and_then(|c| ground.beam(c).map(|b| (c, b)))
+                    .or_else(|| ground.beam_anchor(p.pos, sight).filter(|(a, _)| human::in_air::beam_catch_allowed(p.air.start_z, a.z)))
             } else {
                 None
             };

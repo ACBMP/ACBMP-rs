@@ -618,6 +618,46 @@ impl Ground {
         })
     }
 
+    /// Retail `CheckForPilotis` (00d1109a) for a fall: a post top (a beam
+    /// with no long axis, see [`Self::beam`]) in the
+    /// [`crate::human::in_air::PILOTIS_BOX_HALF`] box around `feet`
+    /// (side / `sight` (unit)), its top within
+    /// [`crate::human::in_air::PILOTIS_BOX_Z`] of the feet, passing
+    /// [`crate::human::in_air::pilotis`] on its four edges (ours: edges
+    /// probed on the floor, 2 cm steps; retail asks the guidance hole
+    /// detector) with nothing over it: the post centre, top height.
+    pub fn pilotis(&self, feet: Vec3, sight: Vec2) -> Option<Vec3> {
+        use crate::human::in_air::{pilotis, PILOTIS_BOX_HALF as H, PILOTIS_BOX_Z as Z, PILOTIS_CLEAR_FROM, PILOTIS_CLEAR_TO};
+        let side = Vec2::new(sight.y, -sight.x);
+        let (ni, nj) = ((H.x / BEAM_GRID).round() as i32, (H.y / BEAM_GRID).round() as i32);
+        let mut cands: Vec<(f32, Vec3)> = Vec::new();
+        for i in -ni..=ni {
+            for j in -nj..=nj {
+                let q = feet.truncate() + side * (BEAM_GRID * i as f32) + sight * (BEAM_GRID * j as f32);
+                if let Some(f) = self.floor_below(q.extend(feet.z + Z.1)).filter(|&f| f >= feet.z + Z.0) {
+                    let q = q.extend(f);
+                    if self.beam(q).is_some_and(|b| b.axis == Vec2::ZERO) {
+                        cands.push(((q - feet).length_squared(), q));
+                    }
+                }
+            }
+        }
+        cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // the last point still on the top `from` stands on, going along `d`
+        let edge = |from: Vec3, d: Vec2| {
+            let on = |e: f32| self.floor_below((from.truncate() + d * e).extend(from.z + 0.17)).is_some_and(|f| (f - from.z).abs() <= 0.12);
+            let e = (1..=50).map(|i| i as f32 * 0.02).find(|&e| !on(e))?;
+            Some((from.truncate() + d * (e - 0.01)).extend(from.z))
+        };
+        cands.into_iter().find_map(|(_, q)| {
+            let (e0, e1) = (edge(q, -sight)?, edge(q, sight)?);
+            let m = (e0 + e1) * 0.5;
+            let c = pilotis(feet, [e0, e1, edge(m, side)?, edge(m, -side)?])?;
+            let over = self.floor_below(c + Vec3::Z * PILOTIS_CLEAR_TO).is_some_and(|f| f > c.z + PILOTIS_CLEAR_FROM);
+            (!over).then_some(c)
+        })
+    }
+
     /// Walking on a beam: a move mostly along it stays on its centre
     /// line (retail's walk-on-beam); a move across it (or any move on a
     /// post) is left alone, stepping or jumping off.

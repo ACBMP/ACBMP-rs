@@ -31,7 +31,7 @@ pub const GRASP_HAND_HEIGHT: f32 = 0.38;
 /// `HumanInAir` Main -> NarrowObject (`TestMainToNarrowObjectMain`
 /// 012cc888, flag +0x3a0 bit1): set by `CheckForDefaultGrasp` (0132017a)
 /// when `GetBeamAnchor` (0130fb08) finds a beam (narrow-object entry type
-/// 3; pilotis entry 4 and targeted beam landings 8 are not ported). The
+/// 3; pilotis entry 4 is [`pilotis`], targeted beam landings 8 are not ported). The
 /// beam is searched in a box of these half extents (side, sight, up),
 /// metres (0130fb08: 0.55, 0.4, 0.35) ...
 pub const BEAM_BOX_HALF: Vec3 = Vec3::new(0.55, 0.4, 0.35);
@@ -45,6 +45,46 @@ pub const BEAM_BOX_UP: f32 = 0.15;
 /// is not, see [`LANDING_DELAY_DROP`]).
 pub fn beam_catch_allowed(start_z: f32, z: f32) -> bool {
     start_z - z > LANDING_DELAY_DROP
+}
+
+/// `Human::CheckForPilotis` (00d1109a), called by `CheckForDefaultGrasp`
+/// (0132017a, before `GetBeamAnchor`): a post top (pilotis) grabbed in a
+/// short fall, narrow-object entry type 4 (PilotisFromInAir). Retail casts
+/// a guidance box of these half extents (side, sight), metres (0.6, 0.5)
+/// ...
+pub const PILOTIS_BOX_HALF: Vec2 = Vec2::new(0.6, 0.5);
+/// ... spanning this height range around its origin, metres (the grasp
+/// call passes `true`: -0.3..1.1; `false` would be -0.6..0.6; retail's
+/// origin is a gap point at hand height, ours the feet).
+pub const PILOTIS_BOX_Z: (f32, f32) = (-0.3, 1.1);
+/// The nearest of the four top edges must be within this of the probe
+/// point, horizontally, metres (00d1109a: min of four lengths <= 0.375).
+pub const PILOTIS_EDGE_REACH: f32 = 0.375;
+/// The top may be at most this wide along and across the sight, metres
+/// (00d1109a: |e0 - e1| <= 0.7 and |e2 - e3| <= 0.7).
+pub const PILOTIS_MAX_WIDTH: f32 = 0.7;
+/// Clearance capsule over the post centre: from this far above the top
+/// ... metres (00d1109a: +0.6) ...
+pub const PILOTIS_CLEAR_FROM: f32 = 0.6;
+/// ... to this far, metres (+1.4; radius 0.4, ours: one ray up the centre).
+pub const PILOTIS_CLEAR_TO: f32 = 1.4;
+/// Seconds the retail displacement onto the post takes (0132017a
+/// `DisplacementManager::LegacySetup` 0.2; ours snaps).
+pub const PILOTIS_SNAP_TIME: f32 = 0.2;
+
+/// The pilotis test on a top's four edge points, `edges` = [behind (-sight),
+/// ahead (+sight), one side, the other side] (retail
+/// `GetClosestGapInDirection` 00d10ce2 x4: -sight and +sight from the box
+/// origin, then +-side from their midpoint): the post centre (their mean)
+/// if the nearest edge is within [`PILOTIS_EDGE_REACH`] of `probe` and the
+/// top is at most [`PILOTIS_MAX_WIDTH`] both ways.
+pub fn pilotis(probe: Vec3, edges: [Vec3; 4]) -> Option<Vec3> {
+    let flat = |v: Vec3| v.truncate();
+    let near = edges.iter().map(|e| (flat(*e) - flat(probe)).length()).fold(f32::INFINITY, f32::min);
+    let along = (flat(edges[0]) - flat(edges[1])).length();
+    let across = (flat(edges[2]) - flat(edges[3])).length();
+    (near <= PILOTIS_EDGE_REACH && along <= PILOTIS_MAX_WIDTH && across <= PILOTIS_MAX_WIDTH)
+        .then(|| edges.iter().copied().sum::<Vec3>() * 0.25)
 }
 
 /// The default grasp gate: the fall so far (`fall`, metres from its highest
@@ -240,6 +280,20 @@ pub fn step_off_dir(contacts: &[StepContact]) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pilotis_post() {
+        let e = |x: f32, y: f32| Vec3::new(x, y, 2.0);
+        // a 0.4 m square post at the origin, sight +Y
+        let post = [e(0.0, -0.2), e(0.0, 0.2), e(0.2, 0.0), e(-0.2, 0.0)];
+        assert_eq!(pilotis(Vec3::new(0.0, -0.5, 2.3), post), Some(Vec3::new(0.0, 0.0, 2.0)));
+        // nearest edge 0.4 m away: too far
+        assert_eq!(pilotis(Vec3::new(0.0, -0.6, 2.3), post), None);
+        // 0.8 m long top (a wall end, not a post)
+        assert_eq!(pilotis(Vec3::ZERO, [e(0.0, -0.4), e(0.0, 0.4), e(0.2, 0.0), e(-0.2, 0.0)]), None);
+        assert_eq!(pilotis(Vec3::ZERO, [e(0.0, -0.2), e(0.0, 0.2), e(0.36, 0.0), e(-0.36, 0.0)]), None);
+        assert!(pilotis(Vec3::ZERO, [e(0.0, -0.35), e(0.0, 0.35), e(0.35, 0.0), e(-0.35, 0.0)]).is_some());
+    }
 
     #[test]
     fn grasp_before_haystack_before_landing() {
