@@ -6,6 +6,7 @@
 
 pub mod datafile;
 pub mod forge;
+pub mod loc;
 mod io;
 pub mod lzo2a;
 

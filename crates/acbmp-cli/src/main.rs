@@ -291,6 +291,22 @@ enum Cmd {
     },
     /// FNV-1a digest over every sub-object's type hash and payload, in order
     Digest { forge: PathBuf },
+    /// Print localized game text (LocalizationPackage, English by default):
+    /// `id<TAB>text` lines, filtered by a string id (0x...) or a substring
+    Loc {
+        forge: PathBuf,
+        /// String id (`0x...`) or case-insensitive substring of the text
+        #[arg(default_value = "")]
+        needle: String,
+        /// Package name substring
+        #[arg(long, default_value = "LocalizationPackage_English")]
+        package: String,
+        #[arg(long, env = "ACBMP_SCHEMAS")]
+        schemas: PathBuf,
+        /// Write the still-compressed Data bytes here instead (format work)
+        #[arg(long)]
+        raw: Option<PathBuf>,
+    },
     /// Count sub-objects per type hash across every .data entry
     Census {
         forge: PathBuf,
@@ -400,6 +416,7 @@ fn main() -> anyhow::Result<()> {
         }
         Cmd::Census { forge, top } => census(forge, top)?,
         Cmd::Digest { forge } => digest(forge)?,
+        Cmd::Loc { forge, needle, package, schemas, raw } => loc(forge, &needle, &package, schemas, raw)?,
         Cmd::Animplay { forge, name, out, schemas, frames, stride } => animplay(forge, &name, out, schemas, frames, stride)?,
         Cmd::Rootmotion { forge, names, schemas, exe, stride } => rootmotion(forge, &names, schemas, exe, stride)?,
         Cmd::Animstats { forge, schemas, exe } => animstats(forge, schemas, exe)?,
@@ -1336,6 +1353,29 @@ fn meshes(forge: PathBuf, schemas: PathBuf, top: usize) -> anyhow::Result<()> {
     rows.sort_by(|a, b| b.0.total_cmp(&a.0));
     for (h, w, d, n, mats) in rows.into_iter().take(top) {
         println!("{h:7.1} x {w:7.1} x {d:7.1}  {n}  [{}]", mats.join(", "));
+    }
+    Ok(())
+}
+
+fn loc(forge: PathBuf, needle: &str, package: &str, schemas: PathBuf, raw: Option<PathBuf>) -> anyhow::Result<()> {
+    let schema = load_schema(&schemas)?;
+    let archive = open_map(&forge, &schema)?;
+    if let Some(out) = raw {
+        let bytes = archive.localization_data(package)?;
+        std::fs::write(&out, &bytes)?;
+        println!("{} bytes -> {}", bytes.len(), out.display());
+        return Ok(());
+    }
+    let want_id = needle.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok());
+    let lower = needle.to_lowercase();
+    for s in archive.localization(package)? {
+        let hit = match want_id {
+            Some(id) => s.id == id,
+            None => s.text.to_lowercase().contains(&lower),
+        };
+        if hit {
+            println!("{:#010x}\t{}", s.id, s.text.replace('\n', "\\n"));
+        }
     }
     Ok(())
 }

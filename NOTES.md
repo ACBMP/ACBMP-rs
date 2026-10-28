@@ -1224,3 +1224,26 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
 - The prev-pos ray branch runs only in a leap of faith (HumanInAir vtable +0x88 = `IsInLeapOfFaith` 012e64a0): ray from the previous position along the step, 3x its length (none <= 0.0005), layer 5; a hit plus `IsNearDeepHayStackTarget` (0130aa50: |z - target z| < 2.0, target HumanInAir +0x420) enters. Ours (no leap of faith): a targeted jump aimed into a haystack box (`hide::deep_target`) enters it when its next step's ray crosses the box (`hide::leap_entry`); other targeted jumps still land first. Contact/box fallbacks to the deep target not ported (no deep target outside flights).
 - Pilotis (`Human::CheckForPilotis` 00d1109a, from `CheckForDefaultGrasp` before `GetBeamAnchor`): box 0.6 side / 0.5 sight / -0.3..1.1 up, four top edges (-sight, +sight, then +-side from their midpoint), nearest edge <= 0.375 m from the probe, <= 0.7 m wide both ways, centre = mean, clearance 0.6..1.4 m (r 0.4) over it, then a 0.2 s displacement (entry type 4). `human::in_air::pilotis`, `Ground::pilotis` (posts = beams with no long axis, edges probed in 2 cm steps), fall snaps onto the centre in the beam clip set. Gate `pilotis` (-41.81,10.30,7.5 -> -41.71 10.61 6.90, 60/144). San Donato has many post-like tops (188 by a scan); retail origin is a gap point at hand height (ours feet), retail also requires no valid freestep target and a gap ahead (Human vtable +0x2c0, 0.5): not ported.
 - TargetedLedgeGrab arrival (0131c1e4, < 0.01 m): dispatch on InAirData +0x2d0 foothold type: hang 1/0x20000, ladder 0x2000, beam 0x100 (NarrowObject entry 8, landing clip by `GetFrontFoot` 00cbb628: left if the left foot is ahead), 0x200 unknown. `human::in_air::arrival`, `beam_landing_left`; ours traces the beam arrival, behaviour unchanged (no beam landing clips, no foot bones read).
+
+## Assassinate A0: localization (2026-10-28, phase4-assassinate-a0)
+- Decoder: `anvil_forge::loc` (format in its module doc: big-endian; a pair grammar of u16 nodes, sections of
+  string tables, 1/2/3-byte node codes; read from CompressedLocalizationData::DecodeHeader 0x00326e60 and
+  GetLocalizedStringRaw 0x0033f140). `Archive::localization(package)` in acb-world, CLI `acbmp loc DataPC.forge
+  [0x<id>|text]`. `UIString.OasisLineID` is the string id. English: 10703 strings. Tests: loc unit test,
+  acb-world/tests/localization.rs (map). No dump is committed; regenerate with `acbmp loc`.
+- GameMode Assassinate: Name 0x4bd31, Description 0x4e102 (shipped). The text says FFA 6-8 players, 10 minutes,
+  "Potential targets are marked on your compass", "To secure a contract, you must lock on a target".
+  Unreferenced drafts 0x4dbc4/0x4dea8/0x4deac: acquiring a contract "takes time and warns the target", the target
+  may stun the acquirer meanwhile, "Don't rush, or the contract will be filled instantly" (= 0 s in High
+  Profile), and killing an Informer NPC reveals a target (no Informer in the shipped text). The drafts disagree on
+  who is immune during the acquisition (0x4dbc4: the target cannot kill the acquirer; 0x4dea8: the target cannot
+  be killed).
+- Verdicts on the spec's R items: acquire-by-lock confirmed (0x4e102), compass kept (radar reading
+  contradicted, 0x4e102), round length 600 s (not the duel's 300), the 0xED5A0706 flag marks DLC modes
+  (0x4e053: Alhambra DLC = Escort + Assassinate; vip also has it). Wrong-kill contract loss: no text; 0x4e125
+  "Civilian kills give +#ScoreOrBonus# points to each of your opponents" (mode not named). Pursuer cap, focus
+  memory 2 s, spawns: no text, still open. "RELEASE YOUR CONTRACT" 0x4e260 = CancelWithY.
+- Escort (teamvip): Description 0x4bd3d: hunters "can only stun the PROTECTORS"; protectors "score each time a VIP
+  reaches a Checkpoint" (team wording; does not settle team vs per-protector, so the E7 note stands). No escape
+  round end in the text, but round banners exist: 0x4be8e all VIPs killed, 0x4be8f protectors killed all hunters,
+  0x4be90 "DEFENDERS HAVE PROTECTED THE VIP". The escape placeholder stays; 0x4be90 fits an escape or a time-out.
