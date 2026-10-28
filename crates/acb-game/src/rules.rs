@@ -789,6 +789,9 @@ pub enum Kind {
     Player(Team),
     /// A VIP NPC (an escorted crowd body; filled in by the VIP task).
     Vip,
+    /// A VIP body hunters may not target: dead, not spawned yet, or
+    /// within `HuntersDelayBeforeRespawnAllVIPs` of a respawn.
+    Escorted,
     /// Any other crowd NPC.
     Npc,
 }
@@ -806,14 +809,18 @@ pub struct Teams {
     pub team: Vec<Team>,
     /// The team hunting the VIPs this round.
     pub attacking_team: Team,
-    /// Body indices of the living VIPs (empty until the VIP task spawns them).
+    /// Body indices of the living VIPs hunters may target (`vip::Vips`
+    /// fills it every tick).
     pub vips: Vec<usize>,
+    /// Every body reserved for a VIP (alive or not); those not in `vips`
+    /// are [`Kind::Escorted`].
+    pub escorted: Vec<usize>,
 }
 
 impl Teams {
     /// Players alternate teams by slot (0, 1, 0, 1, ...); team 0 attacks first.
     pub fn alternating(players: usize) -> Teams {
-        Teams { team: (0..players).map(|p| (p % 2) as Team).collect(), attacking_team: 0, vips: Vec::new() }
+        Teams { team: (0..players).map(|p| (p % 2) as Team).collect(), attacking_team: 0, vips: Vec::new(), escorted: Vec::new() }
     }
 
     pub fn role(&self, p: usize) -> Role {
@@ -829,6 +836,7 @@ impl Teams {
         match self.team.get(body) {
             Some(&t) => Kind::Player(t),
             None if self.vips.contains(&body) => Kind::Vip,
+            None if self.escorted.contains(&body) => Kind::Escorted,
             None => Kind::Npc,
         }
     }
@@ -848,6 +856,7 @@ impl Teams {
 pub fn team_relation(of_team: Team, of_role: Role, other: Kind, attacking_team: Team) -> Relation {
     match (of_role, other) {
         (_, Kind::Npc) => Relation::Npc,
+        (_, Kind::Escorted) => Relation::Other,
         (Role::Hunter, Kind::Vip) => Relation::Target,
         (Role::Protector, Kind::Vip) => Relation::Other,
         (_, Kind::Player(t)) if t == of_team => Relation::Other,

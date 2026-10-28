@@ -1068,3 +1068,17 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
   every AC2MP map gets 3-4 ways, so E3 should call `ways_for` with the attacking team's spawn group.
 - San Donato (tests/vip_map.rs): all groups 3 ways 155-183 m; hunters 1 / 2: 4 ways 155-217 m each, 6-9 checkpoints,
   starts 36-105 m from hunters, walked at 1.4 m/s inside 1.25x length/pace + 5 s. `acbmp ways` lists them.
+
+## Escort VIP bodies, E3 (2026-10-28, escort-vips)
+- vip.rs: `Vips` cycle in ticks (TIME_BEFORE_RESPAWN_ALL 5 s, HUNTERS_DELAY 10 s, both GBrick_SpawnVIPs defaults);
+  `choose_way` (ChooseBestVipWay, our reading: nearest start >= 35 m from every hunter, else farthest); `WaySet` holds
+  each way and its reverse: a VIP at its way's end turns round (our choice, retail end-of-way behaviour unknown).
+- World::escort(archive, builtins, Teams, config, spawns) adds NB_VIPS bodies (lookalikes of loaded personas), builds
+  ways per team (avoid TeamIndex team+1 spawns), Match.vips. World::step: a hunter kill that scripts a VIP body is
+  recorded, then step_vips (kills, timers, spawns, walk at Crowd::pace) keeps Teams::vips = targetable bodies;
+  dead/not-yet-targetable VIPs are Kind::Escorted (Relation::Other for everyone). First spawn: targets at once.
+- tests/escort_map.rs (San Donato): VIPs walk 8.0 / 9.5 m in 5 s, a running hunter kills both via the walk-in,
+  respawn exactly 300 ticks after the second kill (42 / 63 m from the killer), Targetable 600 ticks later.
+  ACBMP_TRACE=1 prints `vip:` events and per-second VIP positions.
+- Open: kill from a standing stop behind a walking VIP times out (walk-in at walk pace never closes); no net sync of
+  Vips (E5); no attacking-team swap/score (E4); VIP skins/reaction pack not modelled.
