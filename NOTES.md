@@ -1099,3 +1099,9 @@ Full findings with addresses and the Phase 4 task plan: `~/.cache/acbmp-re/findi
 - Gate: mode::tests::escort_round_pair_scores_and_swaps (team totals 210 / 450, swap at 6 s + 1 tick, winner team 1);
   escort_map: hunter 0 / team 0 = 200 after two VIP kills. Not done: players re-placed at team spawns at round start,
   ResetAbilityCD (no abilities), round end on VIP escape, net (E5), HUD (E6).
+
+## Human state machine part 4 (2026-10-28, phase3-human-d)
+- Fall-off-edge clearance (retail `TestIsEdgeValidForFall` 00fc38ca -> `TestFallOffEdgeClearance` 00d01166): upright box 0.5 m past the edge, centre 0.7 m up, half 0.25/0.3/1.0; blocked = the move is refused (stay on the edge). `Ground::box_clear` (exact triangle/box SAT), `human::ground::fall_box`. No gate exercises a blocked edge.
+- StepOff (00cef704, push 00d129e8: 0.4 m out, 0.4 m up, 0.2 s; clearance ray down >= 0.8 m): only contacts with collision material type 2 (no-stand) step off; default material never does. Our collision has no materials, so `human::in_air::step_off` is a pure decision, not wired.
+- ForwardFromIdle (00f6720c): freerun jumps may leave from standing (or a start action < 0.75), no 1.5 m/s needed. Blocked at a wall counts as standing (speed 0), so the parapet gate jumps at once; its stick release moved to 0.78 s (ending -10.09 -0.36 6.59, on the top).
+- JumpImpulsion exits after 0.2 s anticipation (00f80e88; 00f3159c/00f31634/00fddfdc/00fde04a): `human::jump::impulsion_exit`; unreachable while there is no standing jump.

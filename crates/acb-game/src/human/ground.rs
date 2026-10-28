@@ -119,6 +119,26 @@ impl Obstacle {
     }
 }
 
+/// Retail `HumanGround::TestIsEdgeValidForFall` (00fc38ca) ->
+/// `Human::TestFallOffEdgeClearance` (00d01166): walking off an edge only
+/// falls when an upright box just past the edge is clear (otherwise the
+/// move is refused and the character stays on the edge). The box centre is
+/// this far past the edge along the move, metres.
+pub const FALL_BOX_AHEAD: f32 = 0.5;
+/// ... and this far above the edge's height, metres (00d01166: + 0.7).
+pub const FALL_BOX_UP: f32 = 0.7;
+/// Box half extents: along the move, across it, up, metres
+/// (00d01166: 0.25, 0.3, 1.0; so it spans 0.3 m below the edge to 1.7 m
+/// above it).
+pub const FALL_BOX_HALF: Vec3 = Vec3::new(0.25, 0.3, 1.0);
+
+/// The clearance box for falling off an edge at `edge` (the first point
+/// past it, at the height walked from) moving along `dir` (unit): its
+/// centre; the half extents are [`FALL_BOX_HALF`] in (dir, side, up).
+pub fn fall_box(edge: Vec3, dir: Vec2) -> Vec3 {
+    edge + (dir * FALL_BOX_AHEAD).extend(FALL_BOX_UP)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +178,13 @@ mod tests {
         assert_eq!(o.blend, 1.0);
         assert!(!o.faced());
         assert!(o.holds(Vec2::X) && !o.holds(Vec2::Y) && !o.holds(Vec2::ZERO));
+    }
+
+    #[test]
+    fn fall_box_spans_below_and_above_the_edge() {
+        let c = fall_box(Vec3::new(1.0, 0.0, 5.0), Vec2::X);
+        assert!(c.abs_diff_eq(Vec3::new(1.5, 0.0, 5.7), 1e-6));
+        assert!((c.z - FALL_BOX_HALF.z - 4.7).abs() < 1e-6);
+        assert!((c.z + FALL_BOX_HALF.z - 6.7).abs() < 1e-6);
     }
 }

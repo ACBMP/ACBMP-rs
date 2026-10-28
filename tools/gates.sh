@@ -6,7 +6,9 @@
 #                                 first 2 m of a fall, 1.2 m probe: catches the
 #                                 awning beam below, hangfree)
 #   railing   38.60 -54.38 1.01
-#   parapet  -10.29 -0.33 6.59
+#   parapet  -10.09 -0.36 6.59   (blocked at the wall = standing: the jump
+#                                 leaves at once via ForwardFromIdle, so the
+#                                 stick lets go at 0.78 s, on the top)
 #   eject    -14.86 43.99 2.25   (hang, S+F: back eject, lands 1.28 m out)
 #   sidejump -22.85 42.05 5.51   (hang at a dead end, Shift+A: 1.47 m gap)
 #   leap     5.21 13.32 6.21     (climb, W+F: 2.4 m up to a hang)
@@ -21,7 +23,7 @@ out=$(mktemp -d)
 runs=(
   "climb|-18,44.6,2.22,-97|0=w,shift 1.5= 2.5=d 8= 8.5=s 8.8=|11"
   "railing|34.5,-54.38,0.1,-90|0=w,shift 0.6=w,shift,space 0.62=w,shift 1.1=|4"
-  "parapet|-13,0,6,-97|0=w,shift 0.4=w,shift,space 0.42=w,shift 0.9=|4"
+  "parapet|-13,0,6,-97|0=w,shift 0.4=w,shift,space 0.42=w,shift 0.78=|4"
   "eject|-18,44.6,2.22,-97|0=w,shift 1.5= 3=s,f 3.3=|6"
   "sidejump|-24.0,43.3,3.8,180|0=w,shift 1.5= 2.5=a,shift 2.7=|5"
   "leap|5.21,14.8,3,180|0=w,shift 1.0= 3=w,f 3.2=|5"

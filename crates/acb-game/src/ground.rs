@@ -182,6 +182,34 @@ impl Ground {
             })
     }
 
+    /// Is an upright box free of collision? `centre`, `dir` (unit,
+    /// horizontal: the box's first axis; the second is across it, the third
+    /// up) and `half` extents along those axes (retail
+    /// `Human::CheckClearanceBoxGlobal`, used by
+    /// [`crate::human::ground::fall_box`]). Exact triangle / box overlap
+    /// (separating axes) against the floor and wall triangles.
+    pub fn box_clear(&self, centre: Vec3, dir: Vec2, half: Vec3) -> bool {
+        let ax = [dir.extend(0.0), Vec3::new(-dir.y, dir.x, 0.0), Vec3::Z];
+        let r = half.x.hypot(half.y);
+        let (lo, hi) = (cell(centre.truncate() - Vec2::splat(r)), cell(centre.truncate() + Vec2::splat(r)));
+        for x in lo.0..=hi.0 {
+            for y in lo.1..=hi.1 {
+                for map in [&self.floor, &self.wall] {
+                    for &i in map.get(&(x, y)).into_iter().flatten() {
+                        let t = self.tris[i as usize].map(|v| {
+                            let d = v - centre;
+                            Vec3::new(d.dot(ax[0]), d.dot(ax[1]), d.dot(ax[2]))
+                        });
+                        if tri_box_overlap(&t, half) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// First wall hit moving horizontally from `from` by `delta` (plus
     /// `radius`): the fraction of the move and the wall's unit normal.
     pub fn sweep_wall(&self, from: Vec3, delta: Vec2, radius: f32) -> Option<(f32, Vec2)> {
@@ -268,5 +296,38 @@ impl Ground {
             Some(_) => (at, true),
             None => (pos, false),
         }
+    }
+}
+
+/// Does triangle `t` (in box space) overlap the box `[-half, half]`?
+/// Separating axis test: the 3 box axes, the triangle normal and the 9 edge
+/// cross products.
+fn tri_box_overlap(t: &[Vec3; 3], half: Vec3) -> bool {
+    let e = [t[1] - t[0], t[2] - t[1], t[0] - t[2]];
+    let mut axes = vec![Vec3::X, Vec3::Y, Vec3::Z, e[0].cross(e[1])];
+    for b in [Vec3::X, Vec3::Y, Vec3::Z] {
+        axes.extend(e.iter().map(|e| b.cross(*e)));
+    }
+    axes.into_iter().filter(|a| a.length_squared() > 1e-12).all(|a| {
+        let p = t.map(|v| v.dot(a));
+        let r = half.x * a.x.abs() + half.y * a.y.abs() + half.z * a.z.abs();
+        p[0].min(p[1]).min(p[2]) <= r && p[0].max(p[1]).max(p[2]) >= -r
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tri_box_overlap_separates() {
+        let h = Vec3::new(0.25, 0.3, 1.0);
+        let t = |z: f32, x: f32| [Vec3::new(x, -1.0, z), Vec3::new(x, 1.0, z), Vec3::new(x + 1.0, 0.0, z)];
+        assert!(tri_box_overlap(&t(0.0, -0.5), h));
+        assert!(!tri_box_overlap(&t(1.1, -0.5), h));
+        assert!(!tri_box_overlap(&t(0.0, 0.3), h));
+        // a wall across the box
+        let w = [Vec3::new(0.1, -2.0, -2.0), Vec3::new(0.1, 2.0, -2.0), Vec3::new(0.1, 0.0, 3.0)];
+        assert!(tri_box_overlap(&w, h));
     }
 }

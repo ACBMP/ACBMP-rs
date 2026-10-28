@@ -146,6 +146,75 @@ impl Air {
     }
 }
 
+/// Retail InAir -> StepOff (`Human::EvaluateTransitionToInAirStepOff`
+/// 00cef704, flag +0x3a0 bit 10, `TestMainToStepOffMain` 012cc81c): a fall
+/// touching a surface whose collision material forbids standing (material
+/// type 2) pushes off it instead of landing, when there is room below.
+/// Contacts with a triangle normal below this z are ceilings, ignored.
+pub const STEP_OFF_CEILING: f32 = -std::f32::consts::FRAC_1_SQRT_2;
+/// A default-material contact with a triangle normal z above this is
+/// ground: no step off (the landing takes it), 00cef704.
+pub const STEP_OFF_STAND: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// A no-stand contact with the triangle or contact normal z above this
+/// steps off straight away; otherwise the mean contact normal z must exceed
+/// it, 00cef704.
+pub const STEP_OFF_UP: f32 = 0.5;
+/// The clearance ray straight down must be free for at least this, metres
+/// (00cef704: `CheckClearanceRayCast` 0.8, >= 0.8).
+pub const STEP_OFF_CLEARANCE: f32 = 0.8;
+/// The push off: this far out along the horizontal mean contact normal and
+/// this far up, metres, over [`STEP_OFF_TIME`] s
+/// (`Human::ExecuteTransitionToInAirStepOff` 00d129e8: 0.4, 0.4, 0.2).
+pub const STEP_OFF_PUSH: f32 = 0.4;
+pub const STEP_OFF_RISE: f32 = 0.4;
+pub const STEP_OFF_TIME: f32 = 0.2;
+
+/// One collision contact of a falling character, for [`step_off`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StepContact {
+    /// Normal of the touched mesh triangle (unit).
+    pub tri: Vec3,
+    /// Contact normal (unit, out of the surface).
+    pub normal: Vec3,
+    /// Collision material type 2 (no standing).
+    pub no_stand: bool,
+    /// The contact is another character (not a mesh): never steps off.
+    pub character: bool,
+}
+
+/// Does this tick's contact set start a StepOff? `clear_below` is the free
+/// distance straight down (asked only when needed). Our stand-in collision
+/// has no collision materials, so every contact is default material and,
+/// as in retail for default material, nothing steps off.
+pub fn step_off(contacts: &[StepContact], clear_below: impl FnOnce() -> f32) -> bool {
+    let (mut sum, mut no_stand, mut direct) = (Vec3::ZERO, false, false);
+    for c in contacts {
+        if c.character {
+            return false;
+        }
+        if c.tri.z < STEP_OFF_CEILING {
+            continue;
+        }
+        sum += c.normal;
+        if !c.no_stand {
+            if c.tri.z > STEP_OFF_STAND {
+                return false;
+            }
+        } else {
+            no_stand = true;
+            direct |= c.tri.z > STEP_OFF_UP || c.normal.z > STEP_OFF_UP;
+        }
+    }
+    let up = sum.length_squared() < 1e-12 || sum.normalize().z > STEP_OFF_UP;
+    (direct || (no_stand && up)) && clear_below() >= STEP_OFF_CLEARANCE
+}
+
+/// The step off push direction: the horizontal mean contact normal (unit;
+/// zero when the contacts are flat), 00d129e8.
+pub fn step_off_dir(contacts: &[StepContact]) -> Vec2 {
+    contacts.iter().map(|c| c.normal.truncate()).sum::<Vec2>().normalize_or_zero()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +281,23 @@ mod tests {
         assert!(!a.wall(true));
         assert!(!a.wall(false));
         assert!(a.wall(true));
+    }
+
+    #[test]
+    fn step_off_needs_no_stand_material_and_room() {
+        let c = |tri: Vec3, no_stand| StepContact { tri, normal: tri, no_stand, character: false };
+        let steep = Vec3::new(0.8, 0.0, 0.6);
+        let flat = Vec3::Z;
+        // default material: never (flat lands, steep slides)
+        assert!(!step_off(&[c(flat, false)], || 5.0));
+        assert!(!step_off(&[c(steep, false)], || 5.0));
+        // no-stand top with room below steps off; without room it lands
+        assert!(step_off(&[c(steep, true)], || 5.0));
+        assert!(!step_off(&[c(steep, true)], || 0.5));
+        // a standable default contact alongside vetoes it
+        assert!(!step_off(&[c(steep, true), c(flat, false)], || 5.0));
+        // a side-on no-stand wall: mean normal too flat
+        assert!(!step_off(&[c(Vec3::X, true)], || 5.0));
+        assert!(step_off_dir(&[c(steep, true)]).abs_diff_eq(Vec2::X, 1e-6));
     }
 }
