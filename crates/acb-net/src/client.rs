@@ -566,7 +566,7 @@ impl Client {
             EventKind::Acquiring => format!("warning: player {} is acquiring you", e.a),
             EventKind::AcquireStopped if e.a == me => format!("stopped acquiring player {}", e.b),
             EventKind::AcquireStopped => format!("player {} stopped acquiring you", e.a),
-            EventKind::Bonus if e.a == me => format!("bonus: {}", acb_game::bonus::Bonus::from_u8(e.b).map_or("?", |b| b.name()).to_uppercase()),
+            EventKind::Bonus if e.a == me => format!("bonus: {}", crate::proto::bonus_names(e.b).to_uppercase()),
             EventKind::BloodBath if e.a == me => format!("BLOODBATH: your kill closed a chain of {} kills", e.b),
             EventKind::BloodBath => format!("BLOODBATH: player {} closed a chain of {} kills", e.a, e.b),
             EventKind::MatchOver if e.a == crate::proto::NONE => "match over: draw".into(),

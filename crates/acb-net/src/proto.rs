@@ -273,10 +273,16 @@ pub enum EventKind {
     Acquiring = 26,
     /// Assassinate: a = player, b = the player it stopped acquiring.
     AcquireStopped = 27,
-    /// Assassinate: a = player, b = `acb_game::bonus::Bonus` its kill earned.
+    /// Assassinate: a = player, b = the bonuses its kill earned (bit `1 <<
+    /// acb_game::bonus::Bonus as u8` each).
     Bonus = 28,
     /// Assassinate: a = player whose kill closed a BloodBath chain of b kills.
     BloodBath = 29,
+}
+
+/// The names in a [`EventKind::Bonus`] mask, comma separated.
+pub fn bonus_names(mask: u8) -> String {
+    (0..8).filter(|i| mask & (1 << i) != 0).map(|i| acb_game::bonus::Bonus::from_u8(i).map_or("?", |b| b.name())).collect::<Vec<_>>().join(", ")
 }
 
 impl EventKind {
@@ -418,12 +424,7 @@ impl Event {
             EventKind::VipWayEnd => format!("tick {} VIP {} reaches its way's end ({} checkpoints)", self.tick, self.a, self.b),
             EventKind::Acquiring => format!("tick {} player {} acquiring player {}", self.tick, self.a, self.b),
             EventKind::AcquireStopped => format!("tick {} player {} stopped acquiring player {}", self.tick, self.a, self.b),
-            EventKind::Bonus => format!(
-                "tick {} player {} bonus {}",
-                self.tick,
-                self.a,
-                acb_game::bonus::Bonus::from_u8(self.b).map_or("?", |b| b.name())
-            ),
+            EventKind::Bonus => format!("tick {} player {} bonus {}", self.tick, self.a, bonus_names(self.b)),
             EventKind::BloodBath => format!("tick {} player {} BLOODBATH ({} kill chain)", self.tick, self.a, self.b),
         }
     }

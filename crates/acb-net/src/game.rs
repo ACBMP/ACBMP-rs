@@ -321,6 +321,13 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
         MatchEvent::Round(RoundEvent::Escaped { round, team }) => Some(ev(EventKind::VipEscaped, team as usize, round as usize)),
         _ => None,
     });
+    let mut masks: BTreeMap<usize, usize> = BTreeMap::new();
+    for e in &m.events {
+        if let MatchEvent::Bonus { player, bonus } = *e {
+            *masks.entry(player).or_default() |= 1 << bonus as usize;
+        }
+    }
+    let bonuses = masks.into_iter().map(|(p, mask)| ev(EventKind::Bonus, p, mask));
     m.events
         .iter()
         .filter_map(|e| match *e {
@@ -338,11 +345,13 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
             MatchEvent::TeamScore { .. } | MatchEvent::Round(_) => None,
             MatchEvent::Acquire(AcquireEvent::Acquiring { hunter, target }) => Some(ev(EventKind::Acquiring, hunter, target)),
             MatchEvent::Acquire(AcquireEvent::Stopped { hunter, target }) => Some(ev(EventKind::AcquireStopped, hunter, target)),
-            MatchEvent::Bonus { player, bonus } => Some(ev(EventKind::Bonus, player, bonus as usize)),
+            // one event per kill (events dedup by tick, kind, player)
+            MatchEvent::Bonus { .. } => None,
             MatchEvent::BloodBath { player, chain } => Some(ev(EventKind::BloodBath, player, chain as usize)),
         })
         .chain(rounds)
         .chain(vips)
+        .chain(bonuses)
         .collect()
 }
 
