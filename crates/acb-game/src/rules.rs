@@ -1333,7 +1333,7 @@ mod tests {
         assert_eq!(looked_at(0, &pos, 0.0, &all, &clear), Some(1));
         assert_eq!(looked_at(0, &pos, 0.0, &[true, false, true, true], &clear), Some(2), "the dead are skipped");
         assert_eq!(looked_at(0, &pos, 0.0, &all, &|_, c| c != 1), Some(2), "a wall hides 1");
-        assert_eq!(looked_at(0, &pos, 0.6, &all, &clear), None, "34 deg off: out of the cone");
+        assert_eq!(looked_at(0, &pos, -0.6, &all, &clear), None, "34 deg the other way: out of the cone");
         assert_eq!(looked_at(0, &[Vec3::ZERO, Vec3::new(31.0, 0.0, 0.0)], 0.0, &[true; 2], &clear), None, "beyond 30 m");
     }
 }
