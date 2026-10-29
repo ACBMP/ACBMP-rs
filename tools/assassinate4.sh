@@ -15,7 +15,7 @@ sleep 0.5
 v() { WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 ACBMP_TRACE=1 timeout 240 ./target/release/acb-viewer $M/DataPC_AC2MP_SanDonato.forge --connect 127.0.0.1:7952 --name $1 --netsim $NET --character AC2MP_ID07_MainTemplate_Player --play --exe $ACBMP_EXE --input "$2" --fps $3 --capture "$O/$1.png" --capture-after 60 > "$O/$1.txt" 2>&1; }
 # slots follow join order (a=0, b=1, c=2, d=3): start each client after the previous one joined
 joined() { for _ in $(seq 600); do grep -q "joined as $1 " "$O/serve.txt" && return; sleep 0.1; done; echo "FAIL: $1 never joined"; }
-v a "1.5=e 1.8= 4=w,shift 6.2=w 6.8=e 7.2=" 60 & joined a
+v a "1.5=e 1.8= 2=w 3= 4=w,shift 6.2=w 6.8=e 7.2=" 60 & joined a
 v b "" 144 & joined b
 v c "" 60 & joined c
 v d "" 60 &
