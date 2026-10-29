@@ -1379,7 +1379,8 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
 User report: sprint start stood still, no real jumps (only falls), many walls not climbable or the climb ending
 inside a wall, no way off beams/ledges. Measured with `examples/parkour_sweep.rs` (every San Donato wall with a
 guidance edge 1.0-4.5 m over the floor in front of it, deduplicated on a 3 m grid: 493 walls; 10 s Shift+W,
-`SWEEP_LEGS=1` adds Space) and `examples/probe.rs` (holds, floor and headroom round a point).
+`SWEEP_LEGS=1` adds Space; 15 s for the map) and `examples/probe.rs` (holds, floor and headroom round a point).
+`examples/tickbench.rs`: one player costs 0.01-0.03 ms per sim tick (idle, walk, sprint, climb, fall).
 - Starts: a standing start more than 60 deg off the facing played the low profile turn on the spot and its
   settle into the wait (`Cancel::Never`): 1.3 s in place before any move, also when sprinting. Now high profile
   uses retail's `h_` turn and both continue into their moving exits (NOTES "Player control"): moving 0.4 s after
