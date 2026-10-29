@@ -74,9 +74,12 @@ Assassinate (free-for-all, 10 min, any player count):
     # clients exactly as for the duel
 
 Nobody hands out contracts: you acquire one by keeping a player in the
-middle of your camera view (within 20 degrees, 30 m, in line of sight) for
-3 s, or at once if that player is running (High Profile). The player you are
-acquiring is warned and may stun you meanwhile (200 points, you start over).
+view (within 60 degrees of the camera, 9 m, 1.6 m up or down, in line of
+sight) for 3 s, or at once if that player is running (High Profile). The player you are
+acquiring is warned and may stun you meanwhile (200 points, you start over). R locks the highlighted
+player (it stays your candidate behind walls until it dies or is 30 m away;
+R again unlocks); Y releases your contract (not during a kill or stun) and
+that player cannot be acquired again for 5 s.
 Your contract lasts while you keep looking; look away for 2 s and it is lost
 (look back within those 2 s and it is still yours, also after switching to
 someone else). A kill is only valid on your contract (100 points plus
@@ -99,9 +102,10 @@ while you acquire; and a blinking red `BEING ACQUIRED!` box in the lower
 third while anyone acquires you. `tools/assassinate.sh` runs a 1v1 on one
 machine, `tools/assassinate4.sh` four clients at 5% loss and 150 ms (both
 port 7952, never both at once). Known gaps: the look cone and range are our
-guesses, not retail's camera lock; the focus range, the Silent window and
-what Incognito means are our readings; there is no lock button and no
-"release contract" (Y); the informer NPC is missing; the HUD widgets are our
+retail's targeting values, but that the highlight is that pick is our
+reading; the lock break range (30 m) and the 5 s re-acquire cooldown after a
+release are placeholders; the focus range, the Silent window and what
+Incognito means are our readings; the informer NPC is missing; the HUD widgets are our
 own art, not retail's compass; the start delay (3 s) and respawn delay (5 s)
 are the duel's placeholders.
 
@@ -116,6 +120,8 @@ Controls (on foot):
 | F | jump: at a ledge stop (walking into it or standing there), lower onto the wall below |
 | E | kill (your target online; any NPC in free play); walks in from ~4 m |
 | Q | stun (your pursuer online) |
+| R | Assassinate: lock / unlock the highlighted player |
+| Y | Assassinate: release your contract |
 | right mouse (hold) | orbit the camera |
 | mouse wheel | camera distance |
 | Esc | quit |

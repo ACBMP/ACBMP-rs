@@ -1337,6 +1337,25 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
 - Still open: lock button / CancelWithY "release contract" (0x4e260), A6 HUD (progress blink, compass markers),
   the focus range and Incognito meaning (trace `ComputeReducedField` arguments), bonuses outside Assassinate.
 
+## Assassinate A7: highlight, lock, release (2026-10-29, phase4-assassinate-a7)
+- Look = the player targeting pick `AssassinTask::GetBestNearbyTarget` 0x00b4f648: horizontal range
+  `GlobalParameters.Dist_visibility` 9 m (C), |dz| <= 1.6 (C literal), cone cos 0.5 = 60 deg (C literal). That the
+  camera highlight used by `GBrick_ContractInitiator::Update` 0x0130d708 is this pick is our reading (R; the
+  highlight setter was not traced). Replaces the A1 placeholders 20 deg / 30 m.
+- Line of sight: `ValidateTargetForCameraWithNavAndRaycast` 0x0130d596 casts to the target's feet + 2.0 / 1.0 /
+  0.0 m (C), seen when any ray is clear; we cast from the acquirer's head, not the camera (P). A locked target
+  skips the test (C, 0x0130d708).
+- Lock (R key, `BUTTON_LOCK`): a press locks the highlight, a second press unlocks; the lock holds while the
+  target lives and is within `LOCK_RANGE` = 30 m compass range (P, retail break distance not read).
+- Release (Y key, CancelWithY, text "RELEASE YOUR CONTRACT" 0x4e260): drops the contract unless in a kill/stun
+  conflict (`IsInAnyActiveConflictWithPlayer`, C) and once `CancelTargetDelay` 0 s has run (C default, 0x012d8f7a
+  +0x890); a chase on it ends as an escape. `RELEASE_COOLDOWN_TICKS` 300 (5 s = Wanted MinWaitTime) before the
+  released player can be acquired again (P: retail's release path sets no cooldown we found).
+- Net proto v11: input buttons 11 bits (lock, release); acquisition state carries the locked player, last
+  buttons and the released player + cooldown; event ContractReleased (a = player, b = target).
+- Gate scripts: assassinate.sh / assassinate4.sh walk a forward 2-3 s so B is inside the 9 m range before the
+  acquisition; results unchanged (a 600, b 0; 4-client PASS), 0 desync.
+
 ## Escort VIP marker (2026-10-29, phase4-vip-marker)
 - Retail (findings/mode-escort.md): `GBrick_VIPFeedback` ReadFromXML 0x00b7fe18 draws an arrow over each VIP,
   ArrowFarScale 0.6 at ArrowFarDistance 30 m, ArrowCloseScale 1.0 at ArrowCloseDistance 5 m; icon per viewer
