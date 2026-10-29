@@ -260,6 +260,12 @@ pub enum MatchEvent {
     /// Assassinate: a player started or stopped looking at another (the
     /// looked-at player is warned).
     Acquire(AcquireEvent),
+    /// Assassinate: a scoring kill earned `bonus` (its points are in the
+    /// kill's [`MatchEvent::Score`]).
+    Bonus { player: usize, bonus: crate::bonus::Bonus },
+    /// Assassinate: `player`'s kill closed a chain of `chain` kills within
+    /// 10 s (`GBrick_BloodBath`: a voice/message, no points).
+    BloodBath { player: usize, chain: u32 },
 }
 
 /// Which rule set a [`Match`] runs.
@@ -309,6 +315,8 @@ pub struct Match {
     pub rounds: Option<crate::rounds::Rounds>,
     /// Assassinate: per player, its acquisition (others: empty).
     pub acquire: Vec<Acquire>,
+    /// Assassinate: kill bonus and BloodBath state (others: `None`).
+    pub bonus: Option<crate::bonus::Tracker>,
 }
 
 /// Seconds to whole ticks.
@@ -397,13 +405,19 @@ impl Match {
             vips: None,
             rounds: None,
             acquire: Vec::new(),
+            bonus: None,
         }
     }
 
     /// An Assassinate match ([`Mode::Assassinate`]; `config.time_limit`
     /// should be [`ASSASSINATE_TIME`]).
     pub fn assassinate(players: usize, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
-        Match { mode: Mode::Assassinate, acquire: vec![Acquire::default(); players], ..Match::new(players, config, spawns) }
+        Match {
+            mode: Mode::Assassinate,
+            acquire: vec![Acquire::default(); players],
+            bonus: Some(crate::bonus::Tracker::new(players)),
+            ..Match::new(players, config, spawns)
+        }
     }
 
     /// Assassinate: the players acquiring `p` (looking at it, not yet
@@ -520,8 +534,15 @@ impl Match {
             }
             return;
         }
-        if matches!(rel, Relation::Target | Relation::Mutual) {
-            self.award(killer, KILL_POINTS + bonus, ScoreReason::Kill);
+        let scored = matches!(rel, Relation::Target | Relation::Mutual);
+        if scored {
+            let extra = self.kill_bonuses(killer, victim);
+            self.award(killer, KILL_POINTS + bonus + extra, ScoreReason::Kill);
+        }
+        if let Some(t) = &mut self.bonus {
+            if let Some(chain) = t.on_kill(killer, victim, scored) {
+                self.events.push(MatchEvent::BloodBath { player: killer, chain });
+            }
         }
         for e in self.contracts.on_death(victim, Some(killer)) {
             self.events.push(MatchEvent::Contract(e));
@@ -529,6 +550,18 @@ impl Match {
         self.died(victim);
         // +1: the clock part of this same tick already counts down once
         self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1) + 1);
+    }
+
+    /// Assassinate: the [`crate::bonus`] points of `killer`'s scoring kill
+    /// of `victim` (one [`MatchEvent::Bonus`] each). Others: 0.
+    fn kill_bonuses(&mut self, killer: usize, victim: usize) -> u32 {
+        let Some(t) = &self.bonus else { return 0 };
+        let mut s = t.situation(killer, victim);
+        s.chasing = self.chases.get(killer).is_some_and(|c| c.is_some());
+        s.incognito = self.threat_of.get(killer) != Some(&Some(victim)) || self.threat[killer] <= 0.0;
+        let list = crate::bonus::bonuses(&s);
+        self.events.extend(list.iter().map(|&b| MatchEvent::Bonus { player: killer, bonus: b }));
+        list.iter().map(|b| b.points()).sum()
     }
 
     /// Assassinate: player `p` killed a crowd NPC: its contract and its
@@ -696,6 +729,13 @@ impl Match {
         }
         if self.ticks >= ticks(self.config.start_delay) && self.mode == Mode::Assassinate {
             self.acquire_tick(who, los);
+        }
+        if self.bonus.is_some() {
+            let running: Vec<bool> = who.iter().map(|w| w.running).collect();
+            let alive: Vec<bool> = (0..who.len()).map(|p| self.alive(p)).collect();
+            if let Some(t) = &mut self.bonus {
+                t.tick(pos, &running, &alive);
+            }
         }
         if self.rounds.is_some() {
             self.tick_rounds();
@@ -1135,7 +1175,11 @@ mod tests {
         assert!(m.acquirers(1).is_empty());
         assert!(!kill_ok(&m, 1, 0), "one-way: 1 never looked at 0");
         m.on_action(0, 1, crate::kill::WALK);
-        assert_eq!(m.score, vec![KILL_POINTS, 0]);
+        let got: Vec<_> = m.events.iter().filter_map(|e| match e { MatchEvent::Bonus { bonus, .. } => Some(*bonus), _ => None }).collect();
+        // standing 3 s within 10 m, never on 1's threat meter, first kill
+        use crate::bonus::Bonus;
+        assert_eq!(got, vec![Bonus::Proximity, Bonus::Incognito, Bonus::FirstBlood]);
+        assert_eq!(m.score, vec![KILL_POINTS + 150 + 300 + 50, 0]);
         assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Fulfilled { hunter: 0, target: 1 })));
         assert_eq!(m.acquire[0], Acquire::default(), "nobody looks at the dead");
     }
@@ -1242,7 +1286,10 @@ mod tests {
         // 2 also holds 1 (set by hand: what matters is the death)
         m.contracts.hunters[2].target = Some(1);
         m.on_action(2, 1, crate::kill::WALK);
-        assert_eq!(m.score, vec![0, 0, KILL_POINTS]);
+        let got: Vec<_> = m.events.iter().filter_map(|e| match e { MatchEvent::Bonus { bonus, .. } => Some(*bonus), _ => None }).collect();
+        // 2's nearest player is 0, not 1 (no focus); not on 1's threat meter; first kill
+        assert_eq!(got, vec![crate::bonus::Bonus::Incognito, crate::bonus::Bonus::FirstBlood]);
+        assert_eq!(m.score, vec![0, 0, KILL_POINTS + 300 + 50]);
         assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Fulfilled { hunter: 2, target: 1 })));
         assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: 0, target: 1 })));
         assert_eq!(m.contracts.hunters[0].target, None);

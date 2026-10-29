@@ -12,7 +12,7 @@ use acb_game::{Setup, World};
 use acb_world::Archive;
 use glam::Vec3;
 
-use crate::proto::{AcquireState, CrowdConfig, EscortRules, EscortState, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, VipState, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_SEATED, F_VICTIM, NONE, NONE16};
+use crate::proto::{AcquireState, BonusState, CrowdConfig, EscortRules, EscortState, Event, EventKind, GameState, NetPos, PlayerGame, Reject, Slot, VipState, WireInput, F_AIRBORNE, F_ATTACKING, F_BLENDED, F_CLIMBING, F_HIDDEN, F_SEATED, F_VICTIM, NONE, NONE16};
 
 /// Builds a match world: slot `i` is player `i` on the map's player spawn
 /// `i` (or its `at`) plus `crowd.count` NPCs seeded from `crowd.seed`
@@ -231,6 +231,15 @@ pub fn game_state(m: &Match) -> GameState {
                 memory: a.memory.iter().map(|&(p, left)| (p as u8, left.min(u16::MAX as u32) as u16)).collect(),
             })
             .collect(),
+        bonus: m.bonus.as_ref().map(|t| {
+            let u = |x: u32| x.min(u16::MAX as u32) as u16;
+            let id = |x: Option<usize>| x.map_or(NONE, |x| x as u8);
+            BonusState {
+                first_blood: t.first_blood,
+                players: (0..t.quiet.len()).map(|p| (u(t.quiet[p]), id(t.close[p].0), u(t.close[p].1), id(t.last_killer[p]))).collect(),
+                memory: t.memory.iter().map(|k| (k.killer as u8, k.victim as u8, u(k.left))).collect(),
+            }
+        }),
     }
 }
 
@@ -258,6 +267,16 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) -> Vec<usize> {
         a.focus = (s.focus != NONE).then_some(s.focus as usize);
         a.look = s.look as u32;
         a.memory = s.memory.iter().map(|&(p, left)| (p as usize, left as u32)).collect();
+    }
+    if let (Some(t), Some(b)) = (&mut m.bonus, &g.bonus) {
+        let id = |x: u8| (x != NONE).then_some(x as usize);
+        t.first_blood = b.first_blood;
+        for (p, &(quiet, near, ticks, last)) in b.players.iter().enumerate().take(t.quiet.len()) {
+            t.quiet[p] = quiet as u32;
+            t.close[p] = (id(near), ticks as u32);
+            t.last_killer[p] = id(last);
+        }
+        t.memory = b.memory.iter().map(|&(k, v, left)| acb_game::bonus::Memory { killer: k as usize, victim: v as usize, left: left as u32 }).collect();
     }
     g.escort.as_ref().map(|e| apply_escort(m, e)).unwrap_or_default()
 }
@@ -302,6 +321,13 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
         MatchEvent::Round(RoundEvent::Escaped { round, team }) => Some(ev(EventKind::VipEscaped, team as usize, round as usize)),
         _ => None,
     });
+    let mut masks: BTreeMap<usize, usize> = BTreeMap::new();
+    for e in &m.events {
+        if let MatchEvent::Bonus { player, bonus } = *e {
+            *masks.entry(player).or_default() |= 1 << bonus as usize;
+        }
+    }
+    let bonuses = masks.into_iter().map(|(p, mask)| ev(EventKind::Bonus, p, mask));
     m.events
         .iter()
         .filter_map(|e| match *e {
@@ -319,9 +345,13 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
             MatchEvent::TeamScore { .. } | MatchEvent::Round(_) => None,
             MatchEvent::Acquire(AcquireEvent::Acquiring { hunter, target }) => Some(ev(EventKind::Acquiring, hunter, target)),
             MatchEvent::Acquire(AcquireEvent::Stopped { hunter, target }) => Some(ev(EventKind::AcquireStopped, hunter, target)),
+            // one event per kill (events dedup by tick, kind, player)
+            MatchEvent::Bonus { .. } => None,
+            MatchEvent::BloodBath { player, chain } => Some(ev(EventKind::BloodBath, player, chain as usize)),
         })
         .chain(rounds)
         .chain(vips)
+        .chain(bonuses)
         .collect()
 }
 

@@ -14,7 +14,9 @@ pub const MAGIC: [u8; 2] = *b"AB";
 /// `GameState`, Escort events.
 /// 9: Assassinate: a mode flag in `Start`, acquisitions in `GameState`,
 /// acquire events.
-pub const VERSION: u8 = 9;
+/// 10: Assassinate kill bonuses: bonus state in `GameState`, Bonus and
+/// BloodBath events.
+pub const VERSION: u8 = 10;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -271,6 +273,16 @@ pub enum EventKind {
     Acquiring = 26,
     /// Assassinate: a = player, b = the player it stopped acquiring.
     AcquireStopped = 27,
+    /// Assassinate: a = player, b = the bonuses its kill earned (bit `1 <<
+    /// acb_game::bonus::Bonus as u8` each).
+    Bonus = 28,
+    /// Assassinate: a = player whose kill closed a BloodBath chain of b kills.
+    BloodBath = 29,
+}
+
+/// The names in a [`EventKind::Bonus`] mask, comma separated.
+pub fn bonus_names(mask: u8) -> String {
+    (0..8).filter(|i| mask & (1 << i) != 0).map(|i| acb_game::bonus::Bonus::from_u8(i).map_or("?", |b| b.name())).collect::<Vec<_>>().join(", ")
 }
 
 impl EventKind {
@@ -304,6 +316,8 @@ impl EventKind {
             25 => VipEscaped,
             26 => Acquiring,
             27 => AcquireStopped,
+            28 => Bonus,
+            29 => BloodBath,
             _ => return None,
         })
     }
@@ -410,6 +424,8 @@ impl Event {
             EventKind::VipWayEnd => format!("tick {} VIP {} reaches its way's end ({} checkpoints)", self.tick, self.a, self.b),
             EventKind::Acquiring => format!("tick {} player {} acquiring player {}", self.tick, self.a, self.b),
             EventKind::AcquireStopped => format!("tick {} player {} stopped acquiring player {}", self.tick, self.a, self.b),
+            EventKind::Bonus => format!("tick {} player {} bonus {}", self.tick, self.a, bonus_names(self.b)),
+            EventKind::BloodBath => format!("tick {} player {} BLOODBATH ({} kill chain)", self.tick, self.a, self.b),
         }
     }
 }
@@ -449,6 +465,20 @@ pub struct GameState {
     pub escort: Option<EscortState>,
     /// Assassinate only: every player's acquisition (empty otherwise).
     pub acquire: Vec<AcquireState>,
+    /// Assassinate only: kill bonus state.
+    pub bonus: Option<BonusState>,
+}
+
+/// Assassinate kill bonus state (`acb_game::bonus::Tracker`; 2 + 6 per
+/// player + 4 per remembered kill bytes).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BonusState {
+    pub first_blood: bool,
+    /// Per player: ticks out of high profile (saturating), nearest player
+    /// in focus range ([`NONE`]) and ticks there, last killer ([`NONE`]).
+    pub players: Vec<(u16, u8, u16, u8)>,
+    /// BloodBath memory: killer, victim, ticks left.
+    pub memory: Vec<(u8, u8, u16)>,
 }
 
 /// One player's Assassinate acquisition (4 + 3 per remembered player bytes).
@@ -589,6 +619,25 @@ impl GameState {
                 w.u16(left);
             }
         }
+        match &self.bonus {
+            Some(b) => {
+                w.u8(1 + b.first_blood as u8);
+                w.u8(b.players.len() as u8);
+                for &(quiet, near, ticks, last) in &b.players {
+                    w.u16(quiet);
+                    w.u8(near);
+                    w.u16(ticks);
+                    w.u8(last);
+                }
+                w.u8(b.memory.len() as u8);
+                for &(k, v, left) in &b.memory {
+                    w.u8(k);
+                    w.u8(v);
+                    w.u16(left);
+                }
+            }
+            None => w.u8(0),
+        }
     }
 
     fn read(r: &mut Reader, players: u8) -> Option<GameState> {
@@ -604,7 +653,17 @@ impl GameState {
                 Some(AcquireState { focus, look, memory })
             })
             .collect::<Option<_>>()?;
-        Some(GameState { ticks_left, over, players, escort, acquire })
+        let bonus = match r.u8()? {
+            0 => None,
+            f => {
+                let n = r.u8()?;
+                let players = (0..n).map(|_| Some((r.u16()?, r.u8()?, r.u16()?, r.u8()?))).collect::<Option<_>>()?;
+                let k = r.u8()?;
+                let memory = (0..k).map(|_| Some((r.u8()?, r.u8()?, r.u16()?))).collect::<Option<_>>()?;
+                Some(BonusState { first_blood: f == 2, players, memory })
+            }
+        };
+        Some(GameState { ticks_left, over, players, escort, acquire, bonus })
     }
 }
 
@@ -1161,6 +1220,7 @@ mod tests {
                     ],
                 }),
                 acquire: vec![AcquireState { focus: 1, look: 179, memory: vec![] }, AcquireState { focus: NONE, look: 0, memory: vec![(0, 119), (2, 1)] }],
+                bonus: Some(BonusState { first_blood: true, players: vec![(180, 1, 3, NONE), (0, NONE, 0, 0)], memory: vec![(1, 0, 599)] }),
             }),
         }
     }
