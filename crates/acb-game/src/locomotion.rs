@@ -45,9 +45,15 @@ enum Id {
     RunStop(usize),
     RunStopSettle(usize),
     SprintStop(usize),
-    /// left 90, right 90, left 180, right 180
+    /// left 90, right 90, left 180, right 180: low profile turn on the
+    /// spot, its settle into the wait and its walk out
     Turn(usize),
     TurnSettle(usize),
+    TurnWalk(usize),
+    /// high profile turn on the spot, its settle and its jog out
+    HTurn(usize),
+    HTurnSettle(usize),
+    HTurnJog(usize),
     /// walk, run: into the fall pose (held on its last frame)
     Fall(usize),
     /// from the wait into walk, jog (ending on the right foot)
@@ -103,6 +109,10 @@ pub struct Clips {
     sprint_stop: [Clip; 2],
     turn: [Clip; 4],
     turn_settle: [Clip; 4],
+    turn_walk: [Clip; 4],
+    h_turn: [Clip; 4],
+    h_turn_settle: [Clip; 4],
+    h_turn_jog: [Clip; 4],
     fall: [Clip; 2],
     /// soft, hard, damage (still / input held), damage roll, fatal
     land: [Clip; 8],
@@ -148,6 +158,16 @@ impl Clips {
             let end = if turns[i].0 == "left" { "l" } else { "r" };
             load(&format!("xx_l_waitturn_{}_{}_footl_tr_l_wait_hipm_foot{end}", turns[i].0, turns[i].1))
         };
+        // retail's moving exits of the same turns (the wait-turn
+        // `_tr_l_walk_hipm` / `_tr_h_jog_hipm` clips), and the high
+        // profile turn set (0.2 s instead of 0.4 s)
+        let turn_walk = |i: usize| load(&format!("xx_l_waitturn_{}_{}_footl_tr_l_walk_hipm_footl", turns[i].0, turns[i].1));
+        let h_turn = |i: usize| load(&format!("xx_h_wait_hipm_footl_to_h_waitturn_{}_{}_footl", turns[i].0, turns[i].1));
+        let h_settle = |i: usize| {
+            let end = if turns[i].0 == "left" { "l" } else { "r" };
+            load(&format!("xx_h_waitturn_{}_{}_footl_tr_h_wait_hipm_foot{end}", turns[i].0, turns[i].1))
+        };
+        let h_jog = |i: usize| load(&format!("xx_h_waitturn_{}_{}_footl_tr_h_jog_hipm_footl", turns[i].0, turns[i].1));
         // a cycle is two half strides: `_footl` ends where `_footr` starts
         let stride = |stem: &str| -> anyhow::Result<Clip> { Ok(load(&format!("{stem}_footl"))?.then(&load(&format!("{stem}_footr"))?)) };
         let beam = (|| -> anyhow::Result<BeamClips> {
@@ -190,6 +210,10 @@ impl Clips {
             sprint_stop: pair(&|f| format!("xx_h_sprintstop_foot{f}"))?,
             turn: [turn(0)?, turn(1)?, turn(2)?, turn(3)?],
             turn_settle: [settle(0)?, settle(1)?, settle(2)?, settle(3)?],
+            turn_walk: [turn_walk(0)?, turn_walk(1)?, turn_walk(2)?, turn_walk(3)?],
+            h_turn: [h_turn(0)?, h_turn(1)?, h_turn(2)?, h_turn(3)?],
+            h_turn_settle: [h_settle(0)?, h_settle(1)?, h_settle(2)?, h_settle(3)?],
+            h_turn_jog: [h_jog(0)?, h_jog(1)?, h_jog(2)?, h_jog(3)?],
             start: [load("xx_l_wait_footl_tr_l_walk_footr")?, load("xx_l_wait_footl_tr_h_jog_footr")?],
             run_turn: [load("xx_h_runturn180_footl")?, load("xx_h_runturn180_footr")?],
             run_turn_out: [load("xx_h_runturn180_footl_tr_jog_hipm_footl")?, load("xx_h_runturn180_footr_tr_jog_hipm_footr")?],
@@ -243,6 +267,10 @@ impl Clips {
             Id::SprintStop(f) => &self.sprint_stop[f],
             Id::Turn(i) => &self.turn[i],
             Id::TurnSettle(i) => &self.turn_settle[i],
+            Id::TurnWalk(i) => &self.turn_walk[i],
+            Id::HTurn(i) => &self.h_turn[i],
+            Id::HTurnSettle(i) => &self.h_turn_settle[i],
+            Id::HTurnJog(i) => &self.h_turn_jog[i],
             Id::Fall(i) => &self.fall[i],
             Id::Start(i) => &self.start[i],
             Id::RunTurn(f) => &self.run_turn[f],
@@ -569,6 +597,13 @@ impl Locomotion {
         f
     }
 
+    /// Leapt off an edge with no target: the takeoff clip of jump `kind`,
+    /// then into the fall pose; it lands like a fall ([`Locomotion::land`]).
+    pub fn start_leap(&mut self, clips: &Clips, sk: &Skeleton, kind: usize) {
+        self.start_jump(clips, sk, kind);
+        self.jump_land = None;
+    }
+
     /// Touched down after falling `height` metres; `moving`: input held.
     pub fn land(&mut self, height: f32, moving: bool) {
         if self.air.take().is_none() {
@@ -618,12 +653,19 @@ impl Locomotion {
         let want = (dir != Vec2::ZERO).then(|| (-dir.x).atan2(dir.y));
         if let Some((id, t)) = &mut self.air {
             *t += dt;
-            // takeoff, then the air clip of the same jump
-            if let (Id::Takeoff(..), Some(land)) = (*id, self.jump_land) {
+            // takeoff, then the air clip of the same jump (a leap: into
+            // the run's fall pose)
+            if let Id::Takeoff(..) = *id {
                 let len = clips.get(*id).length;
                 if *t > len {
-                    *id = land;
                     *t -= len;
+                    match self.jump_land {
+                        Some(land) => *id = land,
+                        None => {
+                            *id = Id::Fall(1);
+                            self.fade = Some((self.last.clone(), FADE));
+                        }
+                    }
                 }
             }
             let c = clips.get(*id);
@@ -645,7 +687,7 @@ impl Locomotion {
             }
         }
         let (delta, pose) = match self.action.is_some() {
-            true => self.play_action(clips, sk, yaw, dt),
+            true => self.play_action(clips, sk, want.is_some(), yaw, dt),
             false => self.play_cycle(clips, sk, want, gait, yaw, dt),
         };
         let pose = self.faded(pose, dt);
@@ -728,7 +770,21 @@ impl Locomotion {
                         (true, true) => 2,
                         (false, true) => 3,
                     };
-                    self.start(Action::new(vec![Id::Turn(i), Id::TurnSettle(i)], Cancel::Never));
+                    // the turn, then on out of it moving (retail's
+                    // wait-turn exits into the walk or the jog); a stick
+                    // released during the turn settles into the wait
+                    // instead (play_action)
+                    let mut a = if gait == Gait::Walk {
+                        let mut a = Action::new(vec![Id::Turn(i), Id::TurnWalk(i)], Cancel::Never);
+                        a.end = (1.0, 0.0);
+                        a
+                    } else {
+                        let mut a = Action::new(vec![Id::HTurn(i), Id::HTurnJog(i)], Cancel::Never);
+                        a.end = (blend_speed(0.6), 0.0);
+                        a
+                    };
+                    a.steer = false;
+                    self.start(a);
                 } else {
                     // set off: into the walk, or a jog that blends into the run
                     let jog = gait != Gait::Walk;
@@ -745,7 +801,7 @@ impl Locomotion {
 
     /// Advances the one-shot queue; root motion turns `yaw`. Returns the
     /// world displacement and the pose.
-    fn play_action(&mut self, clips: &Clips, sk: &Skeleton, yaw: &mut f32, dt: f32) -> (Vec2, Pose) {
+    fn play_action(&mut self, clips: &Clips, sk: &Skeleton, held: bool, yaw: &mut f32, dt: f32) -> (Vec2, Pose) {
         let a = self.action.as_mut().unwrap();
         let mut left = dt;
         let mut moved = Vec2::ZERO;
@@ -757,7 +813,7 @@ impl Locomotion {
             moved += (Quat::from_rotation_z(*yaw) * d.w_axis.truncate()).truncate();
             // a `_to_` turn keeps its pose in the frame it started in: the
             // entity takes the new heading only once it ends
-            if !matches!(id, Id::Turn(_)) {
+            if !matches!(id, Id::Turn(_) | Id::HTurn(_)) {
                 *yaw = wrap_angle(*yaw + yaw_of(&d));
             }
             left -= t1 - a.t;
@@ -765,8 +821,26 @@ impl Locomotion {
             if a.t < clip.length || a.queue.len() == 1 {
                 break;
             }
-            if matches!(id, Id::Turn(_)) {
+            if matches!(id, Id::Turn(_) | Id::HTurn(_)) {
                 *yaw = wrap_angle(*yaw + yaw_of(&clip.root_motion(clip.length)));
+                // out of the turn: moving on if the stick is still held
+                // (steering the rest of the way, given up on release),
+                // else the settle into the wait
+                match (a.queue[1], held) {
+                    (Id::TurnWalk(_) | Id::HTurnJog(_), true) => {
+                        a.cancel = Cancel::OnRelease;
+                        a.steer = true;
+                    }
+                    (Id::TurnWalk(i), false) => {
+                        a.queue[1] = Id::TurnSettle(i);
+                        a.end = (0.0, 0.0);
+                    }
+                    (Id::HTurnJog(i), false) => {
+                        a.queue[1] = Id::HTurnSettle(i);
+                        a.end = (0.0, 0.0);
+                    }
+                    _ => {}
+                }
             }
             if matches!(id, Id::RunTurn(_)) {
                 *yaw = wrap_angle(*yaw + std::f32::consts::PI);
