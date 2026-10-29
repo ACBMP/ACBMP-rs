@@ -1,5 +1,8 @@
 //! On-screen match HUD: the `ClientNet::hud` line as text at the top of the
-//! screen, plus a compass arrow to the nearest enemy VIP for Escort hunters.
+//! screen, plus a compass arrow to the nearest enemy VIP for Escort hunters
+//! and a marker over every Escort VIP the viewer cares about (drawn over the
+//! scene, so it shows through walls; clamped to the screen edge when the
+//! VIP is off screen or behind the camera).
 //!
 //! Render-only and dependency-free: a 5x7 bitmap font baked in code, every
 //! lit run of glyph pixels one quad, all quads untextured vertex-coloured
@@ -8,6 +11,7 @@
 //! on the CPU.
 
 use acb_render::wgpu;
+use glam::Vec4;
 
 /// A triangle-list vertex in pixel coordinates (y down), sRGB colour.
 #[derive(Clone, Copy)]
@@ -23,6 +27,91 @@ const RING: [f32; 4] = [1.0, 1.0, 1.0, 0.35];
 const MARK: [f32; 4] = [0.85, 0.9, 1.0, 0.95];
 const TARGET: [f32; 4] = [0.95, 0.15, 0.1, 1.0];
 const WARN_BACK: [f32; 4] = [0.6, 0.0, 0.0, 0.7];
+const VIP: [f32; 4] = [1.0, 0.78, 0.2, 0.95];
+const OUTLINE: [f32; 4] = [0.0, 0.0, 0.0, 0.8];
+
+/// Retail `GBrick_VIPFeedback` (ReadFromXML 0x00b7fe18): the arrow over a
+/// VIP is drawn at ArrowFarScale 0.6 from ArrowFarDistance 30 m out and at
+/// ArrowCloseScale 1.0 from ArrowCloseDistance 5 m in.
+const VIP_FAR: (f32, f32) = (30.0, 0.6);
+const VIP_CLOSE: (f32, f32) = (5.0, 1.0);
+
+/// An Escort VIP marker: the point over the VIP's head in clip space
+/// (`view_proj * pos`) and its distance from the viewer's player in metres.
+#[derive(Clone, Copy, Debug)]
+pub struct VipMark {
+    pub clip: Vec4,
+    pub dist: f32,
+}
+
+/// Marker scale for a VIP `dist` metres away (retail far/close lerp).
+fn vip_scale(dist: f32) -> f32 {
+    let t = ((VIP_FAR.0 - dist) / (VIP_FAR.0 - VIP_CLOSE.0)).clamp(0.0, 1.0);
+    VIP_FAR.1 + (VIP_CLOSE.1 - VIP_FAR.1) * t
+}
+
+/// Where the marker for clip-space point `c` goes on a `w` x `h` screen:
+/// the projected point when it lies inside the `margin` inset, else the
+/// inset edge along the screen direction from the centre plus that
+/// (unit) direction. Points behind the camera keep their side but go to
+/// the lower half (our choice; retail ShowArrowOffscreen is 0 for the
+/// assassin feedback and unknown here).
+fn place(c: Vec4, w: f32, h: f32, margin: f32) -> ([f32; 2], Option<[f32; 2]>) {
+    let (hw, hh) = (w / 2.0, h / 2.0);
+    if c.w > 1e-3 {
+        let (x, y) = ((c.x / c.w + 1.0) * hw, (1.0 - c.y / c.w) * hh);
+        if (margin..=w - margin).contains(&x) && (margin..=h - margin).contains(&y) {
+            return ([x, y], None);
+        }
+    }
+    // undivided clip x/y keep the side for points behind the camera too
+    let mut d = [c.x * hw, -c.y * hh];
+    if c.w <= 1e-3 {
+        d[1] = d[1].abs();
+    }
+    let len = d[0].hypot(d[1]);
+    let d = if len < 1e-6 { [0.0, 1.0] } else { [d[0] / len, d[1] / len] };
+    let tx = if d[0].abs() > 1e-6 { (hw - margin).max(0.0) / d[0].abs() } else { f32::INFINITY };
+    let ty = if d[1].abs() > 1e-6 { (hh - margin).max(0.0) / d[1].abs() } else { f32::INFINITY };
+    let t = tx.min(ty);
+    ([hw + d[0] * t, hh + d[1] * t], Some(d))
+}
+
+/// One VIP marker: a gold diamond with a black outline and its distance
+/// above it; on screen a small chevron under the diamond points down at
+/// the head, on the edge a wedge points out towards the VIP.
+fn vip_marker(v: &mut Vec<Vert>, m: &VipMark, w: f32, h: f32, s: f32) {
+    let r = 7.0 * s * vip_scale(m.dist);
+    let (at, edge) = place(m.clip, w, h, 26.0 * s);
+    let diamond = |v: &mut Vec<Vert>, c: [f32; 2], r: f32, col| {
+        let [n, e, so, we] = [[c[0], c[1] - r], [c[0] + r, c[1]], [c[0], c[1] + r], [c[0] - r, c[1]]];
+        tri(v, n, e, so, col);
+        tri(v, n, so, we, col);
+    };
+    let (c, text_y) = match edge {
+        None => {
+            let c = [at[0], at[1] - 1.8 * r];
+            tri(v, [at[0] - 0.55 * r - s, at[1] - 0.7 * r - s], [at[0] + 0.55 * r + s, at[1] - 0.7 * r - s], [at[0], at[1] + s], OUTLINE);
+            tri(v, [at[0] - 0.55 * r, at[1] - 0.7 * r], [at[0] + 0.55 * r, at[1] - 0.7 * r], at, VIP);
+            (c, c[1] - r - 10.0 * s)
+        }
+        Some(d) => {
+            let p = [-d[1], d[0]];
+            let pt = |f: f32, side: f32| [at[0] + d[0] * f * r + p[0] * side * r, at[1] + d[1] * f * r + p[1] * side * r];
+            tri(v, pt(2.0, 0.0), pt(1.0, 0.65), pt(1.0, -0.65), VIP);
+            // the distance on the inward side
+            (at, if d[1] < 0.0 { at[1] + r + 3.0 * s } else { at[1] - r - 10.0 * s })
+        }
+    };
+    diamond(v, c, r + s, OUTLINE);
+    diamond(v, c, r, VIP);
+    let text = format!("{:.0}m", m.dist);
+    let tw = text.chars().count() as f32 * 6.0 * s - s;
+    let x = (c[0] - tw / 2.0).round().clamp(2.0 * s, (w - tw - 2.0 * s).max(0.0));
+    let y = text_y.round().clamp(2.0 * s, (h - 9.0 * s).max(0.0));
+    quad(v, x - s, y - s, x + tw + s, y + 8.0 * s, BACK);
+    label(v, x, y, s, &text, VIP);
+}
 
 /// Glyph rows top to bottom, `#` lit. Lowercase is drawn as uppercase,
 /// anything missing as `?`.
@@ -168,14 +257,18 @@ pub struct Assassin {
 /// Triangles for the HUD `text` across the top of a `w` x `h` screen and,
 /// when `bearing` is set (radians, counter-clockwise from straight ahead =
 /// to the left), a compass arrow under it; `assassin` adds the compass
-/// strip, the acquire bar and the warning.
-pub fn build(text: &str, bearing: Option<f32>, assassin: Option<&Assassin>, w: u32, h: u32) -> Vec<Vert> {
+/// strip, the acquire bar and the warning. `vips` markers go first, under
+/// the text.
+pub fn build(text: &str, bearing: Option<f32>, assassin: Option<&Assassin>, vips: &[VipMark], w: u32, h: u32) -> Vec<Vert> {
     let (w, h) = (w as f32, h as f32);
     let s = (w / 640.0).round().clamp(1.0, 4.0);
     let adv = 6.0 * s;
     let line_h = 10.0 * s;
     let max = (((w - 16.0) / adv) as usize).max(8);
     let mut v = Vec::new();
+    for m in vips {
+        vip_marker(&mut v, m, w, h, s);
+    }
     let mut y = 8.0;
     for line in wrap(text, max) {
         let n = line.chars().count() as f32;
@@ -411,7 +504,7 @@ mod tests {
     #[test]
     fn arrow_points_ahead_and_left() {
         let tip = |b| {
-            let v = build("x", Some(b), None, 640, 480);
+            let v = build("x", Some(b), None, &[], 640, 480);
             v[v.len() - 6].pos
         };
         let (c, ahead, left) = (320.0, tip(0.0), tip(std::f32::consts::FRAC_PI_2));
@@ -423,11 +516,28 @@ mod tests {
     fn strip_marks_follow_bearing() {
         let col = |v: &[Vert], c: [f32; 4]| v.iter().filter(|x| x.color == c).map(|x| x.pos[0]).sum::<f32>() / v.iter().filter(|x| x.color == c).count() as f32;
         let a = Assassin { marks: vec![(0.0, Mark::Target), (std::f32::consts::FRAC_PI_2, Mark::Potential)], acquiring: Some(0.5), warned: true, blink_on: true };
-        let v = build("x", None, Some(&a), 640, 480);
+        let v = build("x", None, Some(&a), &[], 640, 480);
         assert!((col(&v, TARGET) - 320.0).abs() < 0.01);
         assert!(col(&v, MARK) < 300.0);
         assert!(v.iter().any(|x| x.color == WARN_BACK));
-        let off = build("x", None, Some(&Assassin { blink_on: false, ..a }), 640, 480);
+        let off = build("x", None, Some(&Assassin { blink_on: false, ..a }), &[], 640, 480);
         assert!(!off.iter().any(|x| x.color == WARN_BACK));
+    }
+
+    #[test]
+    fn vip_marker_on_screen_and_clamped() {
+        // in front, centre: drawn where it projects
+        let (p, e) = place(Vec4::new(0.0, 0.0, 0.5, 1.0), 640.0, 480.0, 20.0);
+        assert!(e.is_none() && (p[0] - 320.0).abs() < 0.01 && (p[1] - 240.0).abs() < 0.01);
+        // off to the right: right edge, pointing right
+        let (p, e) = place(Vec4::new(3.0, 0.0, 0.5, 1.0), 640.0, 480.0, 20.0);
+        assert!((p[0] - 620.0).abs() < 0.01 && e.unwrap()[0] > 0.99);
+        // behind and to the left: left side, lower half
+        let (p, e) = place(Vec4::new(-1.0, 0.2, 0.5, -1.0), 640.0, 480.0, 20.0);
+        assert!(p[0] < 21.0 && p[1] >= 240.0 && e.is_some());
+        // retail scale: 0.6 far, 1.0 close
+        assert!((vip_scale(40.0) - 0.6).abs() < 1e-6 && (vip_scale(2.0) - 1.0).abs() < 1e-6);
+        let v = build("x", None, None, &[VipMark { clip: Vec4::new(0.0, 0.0, 0.5, 1.0), dist: 12.0 }], 640, 480);
+        assert!(v.iter().any(|x| x.color == VIP));
     }
 }

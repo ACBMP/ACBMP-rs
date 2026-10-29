@@ -58,7 +58,13 @@ team 1 10 | round 1/2 play 0:35 | +100 points`: your team and role (hunter or
 protector), the distance to the nearest VIP (targetable ones when hunting,
 living ones when protecting; `VIPs in N s` while they respawn), team totals
 (yours bracketed), round, phase (intro/play/recap/over) with its clock, and
-the last message. Living VIPs are drawn gold-tinted. `tools/escort.sh` runs a 2v2 on one machine with 5 % loss and
+the last message. Living VIPs are drawn gold-tinted and get a gold
+diamond with their distance (`12M`) over their head, drawn over the scene so
+it shows through walls: hunters see the targetable VIPs, protectors every
+living one. Off screen or behind the camera the marker sticks to the screen
+edge with a wedge pointing towards the VIP (behind: lower half). It shrinks
+with distance (retail scale 1.0 at 5 m to 0.6 at 30 m). Markers at the same
+edge spot overlap. `tools/escort.sh` runs a 2v2 on one machine with 5 % loss and
 150 ms round trip; its viewers use the test input `--input "0=vip"` (while
 your team hunts, run at the nearest VIP pressing kill).
 

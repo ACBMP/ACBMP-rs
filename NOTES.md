@@ -1336,3 +1336,17 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
 - `tools/assassinate.sh` now gives a 600 (100 + Focus 150 + Incognito 300 + FirstBlood 50), b 0, 0 desync.
 - Still open: lock button / CancelWithY "release contract" (0x4e260), A6 HUD (progress blink, compass markers),
   the focus range and Incognito meaning (trace `ComputeReducedField` arguments), bonuses outside Assassinate.
+
+## Escort VIP marker (2026-10-29, phase4-vip-marker)
+- Retail (findings/mode-escort.md): `GBrick_VIPFeedback` ReadFromXML 0x00b7fe18 draws an arrow over each VIP,
+  ArrowFarScale 0.6 at ArrowFarDistance 30 m, ArrowCloseScale 1.0 at ArrowCloseDistance 5 m; icon per viewer
+  (GetTextureID(Entity*), texture not looked up). Offscreen behaviour unknown (VipAssassinFeedback has
+  ShowArrowOffscreen 0, a different brick).
+- Ours (crates/acb-viewer): `vip_marks` picks the VIPs as `escort_hud` does (hunter: living and in `Teams::vips`;
+  else every living slot), point = interpolated body root + 2.1 m (ours), clip = `Camera::view_proj`, distance
+  root to player (3D, as the HUD line). `hud::VipMark` drawn first in `hud::build` (under the text): gold diamond
+  with black outline, chevron down to the head, `NNm` label; scale lerp per the retail constants.
+- `hud::place`: on screen inside a 26*s px inset -> projected point; else clamped to the inset edge along the
+  undivided clip x/y from the centre (keeps the side behind the camera; behind forced to the lower half, ours)
+  with an outward wedge. Same overlay pass and CPU rasteriser, so captures show it. Render-only: gates unchanged
+  at 60/144 (pilotis -41.71 10.61 6.90). Open: markers on the same edge spot overlap.
