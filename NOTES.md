@@ -461,7 +461,12 @@ its exact byte length and by key continuity (`acbmp animstats`).
   - standing with input > 60 degrees away:
     `xx_l_wait_hipm_footl_to_l_waitturn_{left,right}_{090,180}_footl`
     (0.4 s) + `xx_l_waitturn_..._footl_tr_l_wait_hipm_foot{l|r}` (0.8 s); the
-    `h_` set is the same shape at half the length.
+    `h_` set is the same shape at half the length. With the stick still
+    held when the turn ends the settle is replaced by the turn's moving
+    exit: `xx_l_waitturn_..._footl_tr_l_walk_hipm_footl` (0.67 s, 1.1 m/s)
+    in low profile, and in high profile (Shift or Space) the `h_` turn
+    `xx_h_wait_hipm_footl_to_h_waitturn_..._footl` (0.2 s) +
+    `xx_h_waitturn_..._footl_tr_h_jog_hipm_footl` (0.57 s, to 3.6 m/s).
     The `_to_` clip's root track turns 90/180 degrees between 0.05 and
     0.1 s but its pose stays in the starting frame (Reference bone yaw
     70 -> 137 for left 90; the follow-up starts at 47 = 137 - 90), so the
@@ -1369,3 +1374,30 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
   undivided clip x/y from the centre (keeps the side behind the camera; behind forced to the lower half, ours)
   with an outward wedge. Same overlay pass and CPU rasteriser, so captures show it. Render-only: gates unchanged
   at 60/144 (pilotis -41.71 10.61 6.90). Open: markers on the same edge spot overlap.
+
+## Playability pass (2026-10-29, phase3-playability)
+User report: sprint start stood still, no real jumps (only falls), many walls not climbable or the climb ending
+inside a wall, no way off beams/ledges. Measured with `examples/parkour_sweep.rs` (every San Donato wall with a
+guidance edge 1.0-4.5 m over the floor in front of it, deduplicated on a 3 m grid: 493 walls; 10 s Shift+W,
+`SWEEP_LEGS=1` adds Space) and `examples/probe.rs` (holds, floor and headroom round a point).
+- Starts: a standing start more than 60 deg off the facing played the low profile turn on the spot and its
+  settle into the wait (`Cancel::Never`): 1.3 s in place before any move, also when sprinting. Now high profile
+  uses retail's `h_` turn and both continue into their moving exits (NOTES "Player control"): moving 0.4 s after
+  the press (HP), 0.4 s turn + walk-out (LP). A stick released during the turn still settles.
+- Pull-up (hang + up): needed the hold flagged top and floor exactly 0.7 m behind; now
+  `Ground::passover_spot` tries 0.7, 0.5, 0.9, 0.35, 0.25, 0.15, 1.2 m behind the edge (floor within 0.5 m of
+  the edge height, any hold), centres on narrow tops (`settle_top`) and needs headroom. `Then::Stand` keeps
+  the Reference re-root only where it is clear floor at the planned height (else the planned spot). Sweep,
+  Shift+W: standing on top after a climb 78 -> 306 of 493, standing inside geometry 25 -> 0.
+- Leap (ours): freerunning (HP + Legs, the jump gate of `human::jump::freerun`) off an edge with no jump
+  target now jumps instead of walking off: `jump::leap`, the run's speed along the facing (at least
+  `LEAP_MIN_SPEED` 3.5 m/s) and `LEAP_UP` 3.0 m/s up (0.46 m rise), takeoff clip `front 300cm` then the run
+  fall pose; it lands, grabs and hides like a fall. Retail values not measured (no capture yet). Before, any
+  gap whose floor was more than 3.2 m down (or outside the detection polygon) was a plain fall.
+- Step off (ours, as NOTES "Freerun moves" already described): F at a low profile edge stop with no wall below
+  to lower onto steps over the edge (to where the floor drops, up to 0.8 m out, wall and fall-box checked)
+  and falls at 1.2 m/s. Before, F there did nothing, so a beam end or roof edge without a hold had no way down
+  but walking back.
+- Open: guidance-edge dead ends (a lintel under an overhang with no hold above) stay unclimbable; retail
+  freerun up a 1.2 m wall needs Legs (Shift alone bumps), as before.
+

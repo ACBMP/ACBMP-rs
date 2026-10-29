@@ -791,6 +791,7 @@ pub(crate) fn drive(
             }
             // retail EdgeStop -> Ledge (LedgePullDown): standing at an edge
             // stop, the jump button lowers onto the wall below
+            // (no wall below to lower onto: step off the edge instead)
             if let (Some(e), true, true, true) = (p.edge, input.jump, !input.run, len <= 1e-4) {
                 if let Some(c) = pulldown(p, ground, clipset, e.along) {
                     if crate::trace() {
@@ -799,6 +800,11 @@ pub(crate) fn drive(
                     p.climb = Some(c);
                     p.edge = None;
                     p.vel = Vec3::ZERO;
+                    return;
+                }
+                if step_off_edge(p, ground, e.along) {
+                    let world = p.entity() * bodies[me].model;
+                    bodies[me].show(world, step.pose);
                     return;
                 }
             }
@@ -905,6 +911,9 @@ pub(crate) fn drive(
                         eprintln!("edge: fall blocked at {:.2} {:.2} {:.2}", to.x, to.y, to.z);
                     }
                     to = p.pos;
+                } else if ledge && running {
+                    // freerunning off an edge with nothing to jump to
+                    jump::leap(p, clips, sk, delta / dt.max(1e-4));
                 } else if ledge {
                     p.loco.start_fall();
                     p.vel = (delta / dt.max(1e-4)).extend(0.0);
@@ -954,6 +963,37 @@ fn air_grasp(p: &Player, ground: &Ground, clipset: &Clipset) -> Option<crate::cl
     }
     let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
     ground.catch_hold(p.pos, fwd, human::in_air::GRASP_PROBE)
+}
+
+/// Stepping off an edge stop along `along` (no wall below to lower onto):
+/// over the edge to where the floor drops away (up to 0.8 m out, no wall
+/// in the way, room to fall), then a fall at a walk's pace. `false`: no
+/// such spot, stay.
+fn step_off_edge(p: &mut Player, ground: &Ground, along: Vec2) -> bool {
+    const SPEED: f32 = 1.2;
+    let from = p.pos;
+    let Some(out) = (1..=16).map(|i| i as f32 * 0.05).find(|&x| {
+        let q = from + (along * x).extend(0.0);
+        ground.floor_below(q + Vec3::Z * 0.1).is_none_or(|f| f < from.z - crate::ground::STEP)
+    }) else {
+        return false;
+    };
+    let to = from + (along * out).extend(0.0);
+    if ground.sweep_wall(from + Vec3::Z * 0.5, along * out, 0.0).is_some()
+        || !ground.box_clear(human::ground::fall_box(to, along), along, human::ground::FALL_BOX_HALF)
+    {
+        return false;
+    }
+    if crate::trace() {
+        eprintln!("edge: step off at {:.2} {:.2} {:.2}", to.x, to.y, to.z);
+    }
+    p.pos = to;
+    p.loco.start_fall();
+    p.vel = (along * SPEED).extend(0.0);
+    p.fall_from = p.pos.z;
+    p.air = Air::start(p.pos.z, Some(0.0));
+    p.edge = None;
+    true
 }
 
 /// Lowering from an edge onto the wall below, facing over it along `along`.

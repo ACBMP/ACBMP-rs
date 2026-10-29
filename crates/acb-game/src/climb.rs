@@ -527,13 +527,18 @@ impl Climb {
                     Then::Drop(v) => (pose, Outcome::Drop(v)),
                     Then::Eject(v) => (pose, Outcome::Eject(v)),
                     Then::Stand => {
-                        // stand where the last pose's Reference stands
+                        // stand where the last pose's Reference stands,
+                        // unless that is not clear floor at the planned
+                        // height (then on the planned spot itself)
                         let frame = Mat4::from_rotation_translation(Quat::from_rotation_z(self.yaw), self.pos);
                         let (pos, yaw) = match crate::kill::reference(c, c.length) {
                             Some((rp, ry)) => crate::kill::reroot(frame, rp, ry, clips.neutral),
                             None => (self.pos, self.yaw),
                         };
-                        (pose, Outcome::Stand(pos.with_z(s.to.z), yaw))
+                        let pos = pos.with_z(s.to.z);
+                        let clear = |p: Vec3| ground.floor_below(p + Vec3::Z * 0.3).is_some_and(|f| (f - p.z).abs() < 0.15) && ground.headroom(p).is_none();
+                        let pos = if clear(pos) || !clear(s.to) { pos } else { s.to };
+                        (pose, Outcome::Stand(pos, yaw))
                     }
                 }
             }
@@ -673,12 +678,9 @@ impl Climb {
             }
             (hang, Dir::Up) => {
                 // over the top onto the ground behind the edge
-                if self.hold.top {
-                    let spot = self.hold.nearest(hand) - (n * 0.7).extend(0.0);
-                    if let Some(f) = ground.floor_below(spot + Vec3::Z * 0.5).filter(|f| (f - spot.z).abs() < 0.5) {
-                        let clips = ["xx_h_hangwall_tr_passover_handr", "xx_h_passover_handr_030cm"];
-                        return Some((seq(&clips, spot.with_z(f), yaw, Then::Stand), "passover"));
-                    }
+                if let Some(spot) = ground.passover_spot(&self.hold, hand) {
+                    let clips = ["xx_h_hangwall_tr_passover_handr", "xx_h_passover_handr_030cm"];
+                    return Some((seq(&clips, spot, yaw, Then::Stand), "passover"));
                 }
                 if hang == Stance::HangWall {
                     let (hold, point) = ground.next_hold(hand, n, Dir::Up)?;
@@ -1029,6 +1031,23 @@ impl Ground {
     /// character's right (`sign` 1) or left (-1).
     pub fn shimmy(&self, hold: &Hold, hand: Vec3, sign: f32) -> Option<Shimmy> {
         shimmy_on(hold, hand, sign, &self.holds_near(hand, SHIMMY_STEP + 1.0).copied().collect::<Vec<_>>())
+    }
+
+    /// Where hands at `hand` on `hold` pull up to over its top (retail
+    /// Ledge Pullup / HandPassOver): floor 0.15-1.2 m behind the edge
+    /// (nearest the usual 0.7 m first) within 0.5 m of the edge's height,
+    /// centred on a narrow top, with the body's room over it. The edge
+    /// need not be flagged a top: any floor behind it at that height will
+    /// do (guidance edges on walls whose top face is not walkable data).
+    pub fn passover_spot(&self, hold: &Hold, hand: Vec3) -> Option<Vec3> {
+        let n = hold.wall;
+        let edge = hold.nearest(hand);
+        [0.7, 0.5, 0.9, 0.35, 0.25, 0.15, 1.2].into_iter().find_map(|d| {
+            let spot = edge - (n * d).extend(0.0);
+            let f = self.floor_below(spot.with_z(edge.z + 0.6)).filter(|f| (f - edge.z).abs() < 0.5)?;
+            let (at, _) = self.settle_top(spot.with_z(f), -n);
+            (self.headroom(at).is_none() && (at.z - f).abs() < 0.15).then_some(at)
+        })
     }
 
     /// Debug: standing spots from which a hold can be climbed straight

@@ -496,6 +496,33 @@ pub(crate) fn take_off(p: &mut Player, clips: &Clips, sk: &Skeleton, target: Vec
     p.flight = Some(flight);
 }
 
+/// Untargeted freerun leap: Legs at an edge with no jump target in reach
+/// still jumps (retail's freerun jump into the open, as off a roof with
+/// nothing ahead), at the run's speed but at least this, m/s (ours)...
+pub const LEAP_MIN_SPEED: f32 = 3.5;
+/// ...and this fast upward, m/s (ours: a 0.46 m rise, the arc of the
+/// `front 300cm` jump clips).
+pub const LEAP_UP: f32 = 3.0;
+/// The jump kind whose takeoff clip a leap plays ([`locomotion::JUMPS`]:
+/// front 300cm).
+const LEAP_KIND: usize = 3;
+
+/// Leaps off an edge along the facing with horizontal ground velocity
+/// `vel` (m/s); then a ballistic fall that lands, grabs or hides like any
+/// other (no target).
+pub(crate) fn leap(p: &mut Player, clips: &Clips, sk: &Skeleton, vel: Vec2) {
+    let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
+    let speed = vel.dot(fwd).max(LEAP_MIN_SPEED);
+    p.loco.start_leap(clips, sk, LEAP_KIND);
+    p.vel = (fwd * speed).extend(LEAP_UP);
+    p.fall_from = p.pos.z;
+    p.air = crate::human::Air::start(p.pos.z, Some(0.0));
+    p.edge = None;
+    if crate::trace() {
+        eprintln!("jump: leap (no target) from {:.2?} at {speed:.2} m/s", p.pos.to_array());
+    }
+}
+
 /// Body radius for the headroom over a landing, metres.
 const BODY: f32 = 0.12;
 

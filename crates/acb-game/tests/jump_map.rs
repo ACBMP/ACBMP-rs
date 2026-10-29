@@ -225,3 +225,99 @@ fn hang_targets() {
     eprintln!("hang targets: {found} of {tried} wall edges");
     assert!(tried > 0 && found > 0, "{found} of {tried}");
 }
+
+fn player_at(d: &Data, at: [f32; 4]) -> World {
+    let character = Arc::new(acb_game::load_character(&d.archive, "AC2MP_ID07_MainTemplate_Player").unwrap());
+    let setup = Setup {
+        characters: vec![("AC2MP_ID07_MainTemplate_Player".into(), character)],
+        count: Some(1),
+        anim: String::new(),
+        wander: 0.0,
+        play: true,
+        crowd: 0,
+        pair: Vec::new(),
+        at: Some(at.to_vec()),
+        builtins: d.builtins.as_ref(),
+    };
+    World::load(&d.archive, &setup).unwrap()
+}
+
+/// Standing on the open plaza (facing +x) and setting off backwards or
+/// sideways: high profile turns in 0.2 s and is moving 0.45 s after the
+/// press, low profile walks out of its 0.4 s turn (no turn on the spot
+/// plus settle into the wait first).
+#[test]
+fn turning_starts_move_at_once() {
+    let Some(d) = data() else { return };
+    let mut w = player_at(&d, [40.0, 20.4, 0.1, -90.0]);
+    let saved = w.save();
+    for (input, gait) in [
+        (PlayerInput { back: true, sprint: true, ..PlayerInput::default() }, "sprint"),
+        (PlayerInput { left: true, run: true, ..PlayerInput::default() }, "run"),
+        (PlayerInput { back: true, ..PlayerInput::default() }, "walk"),
+    ] {
+        w.restore(&saved);
+        let from = w.players[0].pos;
+        let mut moved_at = None;
+        for i in 0..(1.5 / DT) as usize {
+            w.step(&[input]);
+            if moved_at.is_none() && w.players[0].pos.distance(from) > 0.05 {
+                moved_at = Some(i as f32 * DT);
+            }
+        }
+        let t = moved_at.unwrap_or(f32::INFINITY);
+        println!("{gait}: moving after {t:.2} s, at {:.2?}", w.players[0].pos);
+        assert!(t < if gait == "walk" { 0.55 } else { 0.45 }, "{gait}: moving only after {t} s");
+    }
+}
+
+/// Freerunning (Shift + Space) off the 6.3 m roof east of the first spawn
+/// (edge at x = -13.1, 3.9 m down to the next roof, no jump target in
+/// reach): a leap that rises before it falls, landing well out.
+#[test]
+fn freerun_leap_off_an_edge() {
+    let Some(d) = data() else { return };
+    let mut w = player_at(&d, [-8.0, 43.5, 6.5, 90.0]);
+    let run = PlayerInput { forward: true, run: true, sprint: true, cam_yaw: std::f32::consts::PI, ..PlayerInput::default() };
+    let z0 = w.players[0].pos.z;
+    let (mut peak, mut left_at) = (z0, None);
+    for _ in 0..(3.0 / DT) as usize {
+        w.step(&[run]);
+        let p = &w.players[0];
+        if p.loco.airborne() && left_at.is_none() {
+            left_at = Some(p.pos);
+        }
+        if left_at.is_some() && p.loco.airborne() {
+            peak = peak.max(p.pos.z);
+        }
+    }
+    let from = left_at.expect("never left the roof");
+    let p = &w.players[0];
+    println!("left at {from:.2?}, peak +{:.2} m, now {:.2?}", peak - from.z, p.pos);
+    assert!(peak - from.z > 0.3, "no jump arc: peak {peak} from {from:?}");
+    assert!(from.x - p.pos.x > 6.0, "landed only {:.2} m out", from.x - p.pos.x);
+}
+
+/// Walking (low profile) to the end of the stairwell balustrade stops
+/// there; F then steps off it and drops to the floor 0.94 m below.
+#[test]
+fn jump_button_steps_off_a_beam_end() {
+    let Some(d) = data() else { return };
+    let mut w = player_at(&d, [38.60, -54.6, 1.1, 180.0]);
+    let walk = PlayerInput { forward: true, cam_yaw: -std::f32::consts::FRAC_PI_2, ..PlayerInput::default() };
+    for _ in 0..(2.0 / DT) as usize {
+        w.step(&[walk]);
+    }
+    let p = &w.players[0];
+    assert!((p.pos.z - 1.01).abs() < 0.05 && !p.loco.airborne(), "not stopped on the rail end: {:?}", p.pos);
+    for _ in 0..(0.5 / DT) as usize {
+        w.step(&[PlayerInput::default()]);
+    }
+    w.step(&[PlayerInput { jump: true, ..PlayerInput::default() }]);
+    for _ in 0..(1.5 / DT) as usize {
+        w.step(&[PlayerInput::default()]);
+    }
+    let p = &w.players[0];
+    println!("after F: {:.2?}", p.pos);
+    assert!(p.pos.z < 0.2 && !p.loco.airborne() && p.climb.is_none(), "did not step off: {:?}", p.pos);
+}
