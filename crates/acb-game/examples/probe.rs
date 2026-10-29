@@ -11,7 +11,17 @@ fn main() -> anyhow::Result<()> {
     let g = Ground::load(&archive)?;
     let p = Vec3::new(a[2].parse()?, a[3].parse()?, a[4].parse()?);
     for h in g.holds_around(p, 2.5) {
-        println!("hold {:.2?} -> {:.2?} wall {:.2?} top {} len {:.2}", h.a.to_array(), h.b.to_array(), h.wall.to_array(), h.top, h.length());
+        let q = h.nearest(p);
+        println!(
+            "hold {:.2?} -> {:.2?} wall {:.2?} top {} len {:.2} hang clear at {:.2?}: {}",
+            h.a.to_array(),
+            h.b.to_array(),
+            h.wall.to_array(),
+            h.top,
+            h.length(),
+            q.to_array(),
+            g.hang_clear(q, h.wall)
+        );
     }
     println!("floor below (z+3) / headroom on a 0.25 m grid, rows +y down:");
     for j in (-6..=6).rev() {

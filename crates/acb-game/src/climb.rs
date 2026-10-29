@@ -848,9 +848,25 @@ impl Ground {
         Some((hit, n))
     }
 
+    /// Room to hang from the hold point `q` on a wall facing `n`: nothing
+    /// 0.35-0.9 m out from the hold, 0.35 m and 1 m under the hands (the
+    /// arms and the body). A wall face up to 0.35 m proud of its edge (a
+    /// cornice, a plinth) counts as clear; a hold tucked behind another
+    /// object (a beam under an eave) does not. The hold queries rank clear
+    /// holds first and take a blocked one only when nothing else is in
+    /// reach (ours; retail validates its climb anchors, `ValidateAnchorPoints`).
+    pub fn hang_clear(&self, q: Vec3, n: Vec2) -> bool {
+        [0.35, 1.0].iter().all(|&down| {
+            let o = q + (n * 0.9).extend(-down);
+            self.ray(o, (-n * 0.55).extend(0.0)).is_none()
+        })
+    }
+
     /// The hold a wall run up the wall at `hit` (outward normal `n`) from
     /// feet at height `feet` grabs: the lowest edge on that wall within
-    /// half a metre sideways, [`WALL_RUN_REACH`] above the feet.
+    /// half a metre sideways, [`WALL_RUN_REACH`] above the feet, from 0.4 m
+    /// into the wall to 0.7 m out of it (an eave or beam over a recessed
+    /// wall face), with room to hang ([`Self::hang_clear`]).
     pub fn wall_run_hold(&self, hit: Vec3, n: Vec2, feet: f32) -> Option<(Hold, Vec3)> {
         let right = right_of(n);
         self.holds_near(hit, 1.0)
@@ -859,9 +875,9 @@ impl Ground {
                 let q = h.nearest(hit);
                 let d = (q - hit).truncate();
                 let dz = q.z - feet;
-                (d.dot(right).abs() < 0.5 && d.dot(n).abs() < 0.4 && (WALL_RUN_REACH.0..=WALL_RUN_REACH.1).contains(&dz)).then_some((dz, *h, q))
+                (d.dot(right).abs() < 0.5 && (-0.4..0.7).contains(&d.dot(n)) && (WALL_RUN_REACH.0..=WALL_RUN_REACH.1).contains(&dz)).then(|| ((!self.hang_clear(q, h.wall), dz), *h, q))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .min_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.total_cmp(&b.0 .1)))
             .map(|x| (x.1, x.2))
     }
 
@@ -938,9 +954,9 @@ impl Ground {
                 let out = off.truncate().dot(n).abs();
                 let cross = if vertical { off.truncate().dot(right).abs() } else { off.z.abs() };
                 let ok = (min..=max).contains(&along) && out < 0.35 && cross < if vertical { 0.5 } else { 0.6 };
-                ok.then_some((along, *h, q))
+                ok.then(|| ((!self.hang_clear(q, h.wall), along), *h, q))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .min_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.total_cmp(&b.0 .1)))
             .map(|x| (x.1, x.2))
     }
 
@@ -974,9 +990,9 @@ impl Ground {
                 let d = (q - pos).truncate();
                 let dz = q.z - pos.z;
                 let ahead = d.dot(fwd);
-                (ahead > -0.1 && ahead <= reach && d.perp_dot(fwd).abs() < 0.7 && (1.3..=2.2).contains(&dz)).then_some((d.length(), *h))
+                (ahead > -0.1 && ahead <= reach && d.perp_dot(fwd).abs() < 0.7 && (1.3..=2.2).contains(&dz)).then(|| ((!self.hang_clear(q, h.wall), d.length()), *h))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .min_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.total_cmp(&b.0 .1)))
             .map(|x| x.1)
     }
 
@@ -992,9 +1008,9 @@ impl Ground {
                 let q = h.nearest(mid);
                 let d = (q - pos).truncate();
                 let ahead = d.dot(fwd);
-                ((min..=max).contains(&ahead) && d.perp_dot(fwd).abs() < 0.7).then_some((ahead, *h, q))
+                ((min..=max).contains(&ahead) && d.perp_dot(fwd).abs() < 0.7).then(|| ((!self.hang_clear(q, h.wall), ahead), *h, q))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .min_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.total_cmp(&b.0 .1)))
             .map(|x| (x.1, x.2))
     }
 
@@ -1021,9 +1037,9 @@ impl Ground {
                         Dir::Left => (-2.0..=-0.5).contains(&lat) && up.abs() < 0.5,
                         Dir::Right => (0.5..=2.0).contains(&lat) && up.abs() < 0.5,
                     };
-                ok.then_some((q.distance(probe), *h, q))
+                ok.then(|| ((!self.hang_clear(q, h.wall), q.distance(probe)), *h, q))
             })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .min_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.total_cmp(&b.0 .1)))
             .map(|x| (x.1, x.2))
     }
 

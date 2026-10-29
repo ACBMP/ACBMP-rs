@@ -1388,7 +1388,15 @@ guidance edge 1.0-4.5 m over the floor in front of it, deduplicated on a 3 m gri
   `Ground::passover_spot` tries 0.7, 0.5, 0.9, 0.35, 0.25, 0.15, 1.2 m behind the edge (floor within 0.5 m of
   the edge height, any hold), centres on narrow tops (`settle_top`) and needs headroom. `Then::Stand` keeps
   the Reference re-root only where it is clear floor at the planned height (else the planned spot). Sweep,
-  Shift+W: standing on top after a climb 78 -> 306 of 493, standing inside geometry 25 -> 0.
+  Shift+W: standing on top after a climb 78 -> 308 of 493 (with the hold ranking below; Shift+Space+W 304),
+  standing inside geometry 25 -> 0.
+- Hold choice (ours): a hold tucked behind another object (San Donato 26.4 -13.1: a roof edge 4.00 m behind
+  an eave beam 3.89 m) was grabbed with the body inside the beam, and nothing moved from there.
+  `Ground::hang_clear` (nothing 0.35-0.9 m out from the hold, 0.35 m and 1 m under the hands) now ranks
+  clear holds first in every hang query (wall run, fall grasp, hang target, next hold, wall jumps); a blocked
+  one is still taken when nothing else is in reach (rejecting them outright lost 22 walls whose only top
+  is behind a canopy). The wall run's hold may stand 0.7 m out from the wall face it hits (was 0.4 m either
+  way), for eaves over recessed walls.
 - Leap (ours): freerunning (HP + Legs, the jump gate of `human::jump::freerun`) off an edge with no jump
   target now jumps instead of walking off: `jump::leap`, the run's speed along the facing (at least
   `LEAP_MIN_SPEED` 3.5 m/s) and `LEAP_UP` 3.0 m/s up (0.46 m rise), takeoff clip `front 300cm` then the run
