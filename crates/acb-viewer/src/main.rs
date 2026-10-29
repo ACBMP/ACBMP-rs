@@ -119,6 +119,8 @@ fn parse_keys(list: &str) -> anyhow::Result<HashSet<KeyCode>> {
                 "e" => KeyCode::KeyE,
                 "q" => KeyCode::KeyQ,
                 "f" => KeyCode::KeyF,
+                "r" => KeyCode::KeyR,
+                "y" => KeyCode::KeyY,
                 // test bot: an Escort hunter runs at the nearest targetable VIP pressing kill
                 "vip" => KeyCode::KeyV,
                 other => anyhow::bail!("unknown key {other}"),
@@ -364,6 +366,8 @@ fn input_from(keys: &HashSet<KeyCode>, tapped: &HashSet<KeyCode>, cam_yaw: f32) 
         jump: k(KeyCode::KeyF),
         kill: k(KeyCode::KeyE),
         stun: k(KeyCode::KeyQ),
+        lock: k(KeyCode::KeyR),
+        release: k(KeyCode::KeyY),
         view_lag: 0,
     }
 }
