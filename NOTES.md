@@ -1352,7 +1352,7 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
   +0x890); a chase on it ends as an escape. `RELEASE_COOLDOWN_TICKS` 300 (5 s = Wanted MinWaitTime) before the
   released player can be acquired again (P: retail's release path sets no cooldown we found).
 - Net proto v11: input buttons 11 bits (lock, release); acquisition state carries the locked player, last
-  buttons and the released player + cooldown; event ContractReleased (a = player, b = target).
+  buttons and the released player + cooldown; event 30 Released (a = player, b = target).
 - Gate scripts: assassinate.sh / assassinate4.sh walk a forward 2-3 s so B is inside the 9 m range before the
   acquisition; results unchanged (a 600, b 0; 4-client PASS), 0 desync.
 
