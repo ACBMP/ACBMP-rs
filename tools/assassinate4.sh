@@ -13,13 +13,17 @@ NET=${1:-loss=5%,delay=150ms,jitter=5ms}
 ./target/release/acbmp serve $M/DataPC_AC2MP_SanDonato.forge --port 7952 --mode assassinate --players 4 --at=31,20.4,0.02,-90 --at=41,20.4,0.02,90 --time-limit 20 > "$O/serve.txt" 2>&1 &
 sleep 0.5
 v() { WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 ACBMP_TRACE=1 timeout 240 ./target/release/acb-viewer $M/DataPC_AC2MP_SanDonato.forge --connect 127.0.0.1:7952 --name $1 --netsim $NET --character AC2MP_ID07_MainTemplate_Player --play --exe $ACBMP_EXE --input "$2" --fps $3 --capture "$O/$1.png" --capture-after 60 > "$O/$1.txt" 2>&1; }
-v a "1.5=e 1.8= 4=w,shift 6.2=w 6.8=e 7.2=" 60 &
-sleep 0.3; v b "" 144 &
-sleep 0.3; v c "" 60 &
-sleep 0.3; v d "" 60 &
+# slots follow join order (a=0, b=1, c=2, d=3): start each client after the previous one joined
+joined() { for _ in $(seq 600); do grep -q "joined as $1 " "$O/serve.txt" && return; sleep 0.1; done; echo "FAIL: $1 never joined"; }
+v a "1.5=e 1.8= 4=w,shift 6.2=w 6.8=e 7.2=" 60 & joined a
+v b "" 144 & joined b
+v c "" 60 & joined c
+v d "" 60 &
 wait
 grep -E 'serve: (result|sent|[abcd]:)' "$O/serve.txt"
 res=$(grep -oE 'result after [0-9.]+ s: .*' "$O/serve.txt" | head -1)
+# result line "a N, b 0, c 0, d 0" in any order
+result_ok() { echo "$1" | grep -qE "[:,] a $2[,( ]" || return 1; for q in b c d; do echo "$1" | grep -qE "[:,] $q 0[,( ]" || return 1; done; }
 ok=1
 pts=$(grep -oE 'player 0 scores [0-9]+' "$O/a.txt" | head -1)
 tick_of() { grep -oE "event tick [0-9]+ $1" "$O/a.txt" | head -1 | awk '{print $3}'; }
@@ -31,12 +35,13 @@ for n in a b c d; do
   [ "$(grep -E '^net: event.*player 0 scores' "$f" | sort -u | wc -l)" = 1 ] || { echo "FAIL $n: player 0 did not score exactly once"; ok=0; }
   [ "$(grep -oE 'player 0 scores [0-9]+' "$f" | head -1)" = "$pts" ] || { echo "FAIL $n: points differ from a ($pts)"; ok=0; }
   grep -qE ' 0 desync, 0 of [0-9]+ match desync' "$f" || { echo "FAIL $n: desync"; ok=0; }
-  grep -qE '^net: match over: result after .*: a [0-9]+, b 0, c 0, d 0' "$f" || { echo "FAIL $n: no result line"; ok=0; }
+  rl=$(grep -E '^net: match over: result after ' "$f" | head -1)
+  result_ok "$rl" "[0-9]+" || { echo "FAIL $n: no result line"; ok=0; }
 done
 # the rejection is resent until acked, so a client that pressed always logs it
 grep -qE 'event tick [0-9]+ player 0 kill rejected: not your target' "$O/a.txt" || { echo "FAIL a: no pre-acquisition rejection"; ok=0; }
 k=$(tick_of 'player 0 kills body 1'); r=$(tick_of 'player 0 now hunts player 1')
 { [ -n "$k" ] && [ -n "$r" ] && [ "$k" -gt "$r" ]; } || { echo "FAIL: kill (tick $k) not after the acquisition (tick $r)"; ok=0; }
 [ "${res#*: }" != "${res}" ] && echo "server $res; a: $pts"
-case "$res" in *"a ${pts##* }, b 0, c 0, d 0"*) ;; *) echo "FAIL: server result differs from a's score"; ok=0;; esac
+result_ok "$res" "${pts##* }" || { echo "FAIL: server result differs from a's score"; ok=0; }
 [ $ok = 1 ] && echo PASS || echo FAIL
