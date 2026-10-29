@@ -73,15 +73,26 @@ middle of your camera view (within 20 degrees, 30 m, in line of sight) for
 acquiring is warned and may stun you meanwhile (200 points, you start over).
 Your contract lasts while you keep looking; look away for 2 s and it is lost
 (look back within those 2 s and it is still yours, also after switching to
-someone else). A kill is only valid on your contract (100 points); killing a
-crowd NPC loses your contract. HUD: `acquiring pN 45%`, `being acquired by
-pN`, and `compass pA 12 m, pB 30 m` (every other living player, nearest
-first). `tools/assassinate.sh` runs a 1v1 on one machine (port 7952). Known
-gaps: the look cone and range are our guesses, not retail's camera lock;
-there is no lock button and no "release contract" (Y); kill bonuses,
-BloodBath, the informer NPC and the compass/radar markers on screen are
-missing (text HUD only); the start delay (3 s) and respawn delay (5 s) are
-the duel's placeholders.
+someone else). A kill is only valid on your contract (100 points plus
+bonuses); killing a crowd NPC loses your contract. Kill bonuses (Assassinate
+only; the duel and Escort keep 100 + acrobatic/hidden): FOCUS +150 (you
+stayed within 10 m of the victim, your nearest player, for 3 s), then one of
+INCOGNITO +300 (the victim's threat meter never picked you up), SILENT +200
+(no running in the last 3 s) or UNSPOTTED +50 (not in a chase), FIRST BLOOD
++50 (first kill of the match), REVENGE +50 (you kill the player who killed
+you last, before anyone else does). The message line shows `bonus: FOCUS,
+INCOGNITO, FIRST BLOOD`. A kill that closes a chain of 3 kills within 10 s
+(you killed B, who had killed C, who had killed D) announces BLOODBATH to
+everyone (no points). HUD: `acquiring pN 45%`, `being acquired by pN`, and
+`compass pA 12 m, pB 30 m` (every other living player, nearest first).
+`tools/assassinate.sh` runs a 1v1 on one machine, `tools/assassinate4.sh`
+four clients at 5% loss and 150 ms (both port 7952, never both at once).
+Known gaps: the look cone and range are our guesses, not retail's camera
+lock; the focus range, the Silent window and what Incognito means are our
+readings; there is no lock button and no "release contract" (Y); the
+informer NPC and the compass/radar markers on screen are missing (text HUD
+only); the start delay (3 s) and respawn delay (5 s) are the duel's
+placeholders.
 
 Controls (on foot):
 

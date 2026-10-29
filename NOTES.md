@@ -1283,3 +1283,44 @@ retail-vs-duel table are in `~/.cache/acbmp-re/findings/mode-assassinate.md`. Th
   kills.sh 8 granted.
 - Still placeholders: start delay 3 s, respawn 5 s, score limit 1000, look cone/range. Open: A4 kill bonuses, A5 net
   test with 4 clients at loss, A6 HUD (progress blink, compass markers on screen), lock button / CancelWithY.
+
+## Assassinate A4-A5 (2026-10-29, phase4-assassinate-a4)
+- `crates/acb-game/src/bonus.rs`: values = `GBrick_ScoreKill::ReadFromXML` defaults (C 0x0103832c): Silent 200,
+  Unspotted 50, Incognito 300, FirstBlood 50 (AllowFirstBlood 1), Revenge 50, Proximity 150, Overkill 200 / 10 s.
+  Order (C `HandleConflictResolvedEvent` 0x0103beae): Proximity (= the conflict's "focus" flag, in-game name FOCUS),
+  then exactly one of Incognito > Silent > Unspotted (Unspotted only when the killer is not chasing,
+  `IsChasing`), then FirstBlood, Revenge. Overkill: `AddBonusOverkill` 0x01111d18 has no caller in the Mac build
+  (xref), so retail never awards it and neither do we. Flags come from `GameInfo::ComputeReducedField`
+  0x00c5b7b0 (only partly read).
+- Conditions: Focus = "Stay close to a target for at least 3 seconds before killing" (C text 0x4d0cd): 180 ticks
+  with the victim as the killer's nearest living player within `FOCUS_RANGE` 10 m (P: retail compares to a
+  GameInfo float at +0x5c4, not found; 10 m = Wanted2 ThreatClose). Silent = "Kill your target while remaining out
+  of high profile" (C text 0x4d0d2); "remaining" = no running for `SILENT_TICKS` 180 (P). Incognito: no shipped
+  description; ours = the killer is not on the victim's threat meter (meter 0 or on someone else) (R). Unspotted:
+  `Match::chases[killer]` is None (C order; text 0x4bd47 "DISCREET: Enter High Profile just before
+  assassinating" fits). FirstBlood = first scoring kill of the match (C text 0x4bd59). Revenge = "Kill the Templar
+  who killed you last before anyone else" (C text 0x4bd57): any death of X clears everyone's last_killer == X.
+- Assassinate only (`Match::bonus` is `Some` only there). Retail's ScoreKill brick is shared by all modes, but the
+  duel and Escort gates keep their scores (a 100; [270, 130]); porting the bonuses to the duel/Escort is open.
+- BloodBath (C `GBrick_BloodBath::HandleKillEvent` 0x01594ad8, `GetBloodBath` 0x015638b8, defaults NbKills 3 /
+  Duration 10 s at 0x0157093e): a memory of (killer, victim) per kill, each dropped after 600 ticks; on a kill the
+  longest chain from the killer (killer -> victim, who killed -> ...) reaching 3 announces it (retail: a unique
+  voice) and clears the memory. It is a chain, not one player's 3 kills. `MatchEvent::BloodBath`, no points.
+- Net proto v10: `GameState.bonus` (first blood, per player quiet ticks / focus player + ticks / last killer, kill
+  memory), events 28 Bonus (b = mask `1 << Bonus`; one event per kill because server events dedup by (tick, kind,
+  player)) and 29 BloodBath (shown to everyone). Client message `bonus: FOCUS, INCOGNITO, FIRST BLOOD`.
+- Tests: `bonus::tests::table` (situation -> bonuses -> points vs the defaults), focus/silent ticks, revenge/first
+  blood, bloodbath chain and window; mode tests assassinate_* now expect the bonus points.
+- A5 `tools/assassinate4.sh` (port 7952, 4 viewers, default netsim loss=5%,delay=150ms,jitter=5ms; A 60 fps, B 144,
+  C/D idle on standard spawns): A's kill at tick 90 is refused ("not your target") on every client log, A
+  acquires B at 359 and kills at 408: "player 0 scores 600" once on all four clients and the server (a 600, b 0,
+  c 0, d 0), 0 desync / 0 match desync everywhere, PASS. The client also refuses the early kill in its own
+  prediction, so there is nothing to roll back (0 rollbacks).
+- The flaky tick-30 rejection (2-player script): the client starts by jumping ahead by its lead (rtt at join is
+  inflated by loading, 213-481 ms = 16-32 ticks) and the viewer script is keyed to client ticks, so the 0.5 s press
+  was sent for ticks the server had often already played (late inputs, "ticks without input" at the start) and
+  never reached it. Both scripts now press at 1.5 s (tick 90); the rejection event is resent until acked, so a
+  press that reaches the server always shows in the log.
+- `tools/assassinate.sh` now gives a 600 (100 + Focus 150 + Incognito 300 + FirstBlood 50), b 0, 0 desync.
+- Still open: lock button / CancelWithY "release contract" (0x4e260), A6 HUD (progress blink, compass markers),
+  the focus range and Incognito meaning (trace `ComputeReducedField` arguments), bonuses outside Assassinate.
