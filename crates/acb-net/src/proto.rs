@@ -16,7 +16,7 @@ pub const MAGIC: [u8; 2] = *b"AB";
 /// acquire events.
 /// 10: Assassinate kill bonuses: bonus state in `GameState`, Bonus and
 /// BloodBath events.
-pub const VERSION: u8 = 10;
+pub const VERSION: u8 = 11;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -26,7 +26,7 @@ pub const MAX_PLAYERS: usize = 16;
 
 // ---------------------------------------------------------------- inputs
 
-/// A [`PlayerInput`] as sent: 9 buttons, the view lag (7 bits, ticks,
+/// A [`PlayerInput`] as sent: 11 buttons, the view lag (5 bits, ticks,
 /// saturating) and the camera yaw in 1/65536 turns, 4 bytes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WireInput {
@@ -43,8 +43,12 @@ const B_SPRINT: u16 = 32;
 const B_JUMP: u16 = 64;
 const B_KILL: u16 = 128;
 const B_STUN: u16 = 256;
-/// `PlayerInput::view_lag` lives in the top 7 bits.
-const LAG_SHIFT: u16 = 9;
+const B_LOCK: u16 = 512;
+const B_RELEASE: u16 = 1024;
+/// `PlayerInput::view_lag` lives in the top 5 bits (the sim rewinds at
+/// most `rules::MAX_REWIND` = 12 ticks).
+const LAG_SHIFT: u16 = 11;
+const LAG_MAX: u8 = 31;
 
 impl WireInput {
     pub fn from_input(i: &PlayerInput) -> WireInput {
@@ -59,12 +63,14 @@ impl WireInput {
             (i.jump, B_JUMP),
             (i.kill, B_KILL),
             (i.stun, B_STUN),
+            (i.lock, B_LOCK),
+            (i.release, B_RELEASE),
         ] {
             if on {
                 b |= bit;
             }
         }
-        b |= (i.view_lag.min(127) as u16) << LAG_SHIFT;
+        b |= (i.view_lag.min(LAG_MAX) as u16) << LAG_SHIFT;
         let turns = (i.cam_yaw / std::f32::consts::TAU).rem_euclid(1.0);
         WireInput { buttons: b, yaw: ((turns * 65536.0).round() as u32 & 0xffff) as u16 }
     }
@@ -82,6 +88,8 @@ impl WireInput {
             jump: b(B_JUMP),
             kill: b(B_KILL),
             stun: b(B_STUN),
+            lock: b(B_LOCK),
+            release: b(B_RELEASE),
             view_lag: (self.buttons >> LAG_SHIFT) as u8,
         }
     }
@@ -278,6 +286,8 @@ pub enum EventKind {
     Bonus = 28,
     /// Assassinate: a = player whose kill closed a BloodBath chain of b kills.
     BloodBath = 29,
+    /// Assassinate: a = player, b = the player whose contract it released.
+    Released = 30,
 }
 
 /// The names in a [`EventKind::Bonus`] mask, comma separated.
@@ -318,6 +328,7 @@ impl EventKind {
             27 => AcquireStopped,
             28 => Bonus,
             29 => BloodBath,
+            30 => Released,
             _ => return None,
         })
     }
@@ -425,6 +436,7 @@ impl Event {
             EventKind::Acquiring => format!("tick {} player {} acquiring player {}", self.tick, self.a, self.b),
             EventKind::AcquireStopped => format!("tick {} player {} stopped acquiring player {}", self.tick, self.a, self.b),
             EventKind::Bonus => format!("tick {} player {} bonus {}", self.tick, self.a, bonus_names(self.b)),
+            EventKind::Released => format!("tick {} player {} released its contract on player {}", self.tick, self.a, self.b),
             EventKind::BloodBath => format!("tick {} player {} BLOODBATH ({} kill chain)", self.tick, self.a, self.b),
         }
     }
@@ -481,7 +493,7 @@ pub struct BonusState {
     pub memory: Vec<(u8, u8, u16)>,
 }
 
-/// One player's Assassinate acquisition (4 + 3 per remembered player bytes).
+/// One player's Assassinate acquisition (9 + 3 per remembered player bytes).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AcquireState {
     /// Player it looks at ([`NONE`]).
@@ -490,6 +502,12 @@ pub struct AcquireState {
     pub look: u16,
     /// Acquired players out of focus, ticks left.
     pub memory: Vec<(u8, u16)>,
+    /// Locked player ([`NONE`]).
+    pub lock: u8,
+    /// Lock / release buttons held last tick (`acb_game::rules::BUTTON_*`).
+    pub buttons: u8,
+    /// Player last released ([`NONE`]) and ticks until it can be acquired.
+    pub released: (u8, u16),
 }
 
 /// One VIP slot as a snapshot carries it (17 bytes).
@@ -618,6 +636,10 @@ impl GameState {
                 w.u8(p);
                 w.u16(left);
             }
+            w.u8(a.lock);
+            w.u8(a.buttons);
+            w.u8(a.released.0);
+            w.u16(a.released.1);
         }
         match &self.bonus {
             Some(b) => {
@@ -650,7 +672,8 @@ impl GameState {
             .map(|_| {
                 let (focus, look, k) = (r.u8()?, r.u16()?, r.u8()?);
                 let memory = (0..k).map(|_| Some((r.u8()?, r.u16()?))).collect::<Option<_>>()?;
-                Some(AcquireState { focus, look, memory })
+                let (lock, buttons, released) = (r.u8()?, r.u8()?, (r.u8()?, r.u16()?));
+                Some(AcquireState { focus, look, memory, lock, buttons, released })
             })
             .collect::<Option<_>>()?;
         let bonus = match r.u8()? {
@@ -1093,7 +1116,7 @@ mod tests {
         let i = PlayerInput { kill: true, forward: true, view_lag: 17, ..Default::default() };
         let q = quantize_input(&i);
         assert_eq!((q.kill, q.forward, q.stun, q.view_lag), (true, true, false, 17));
-        assert_eq!(quantize_input(&PlayerInput { view_lag: 200, ..Default::default() }).view_lag, 127);
+        assert_eq!(quantize_input(&PlayerInput { view_lag: 200, ..Default::default() }).view_lag, 31);
         let mut w = WireInput::from_input(&i);
         w.clear_attacks();
         assert_eq!(w.to_input().view_lag, 17);
@@ -1219,7 +1242,10 @@ mod tests {
                         VipState::default(),
                     ],
                 }),
-                acquire: vec![AcquireState { focus: 1, look: 179, memory: vec![] }, AcquireState { focus: NONE, look: 0, memory: vec![(0, 119), (2, 1)] }],
+                acquire: vec![
+                    AcquireState { focus: 1, look: 179, memory: vec![], lock: 1, buttons: 1, released: (NONE, 0) },
+                    AcquireState { focus: NONE, look: 0, memory: vec![(0, 119), (2, 1)], lock: NONE, buttons: 0, released: (0, 299) },
+                ],
                 bonus: Some(BonusState { first_blood: true, players: vec![(180, 1, 3, NONE), (0, NONE, 0, 0)], memory: vec![(1, 0, 599)] }),
             }),
         }

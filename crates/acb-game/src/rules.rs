@@ -567,6 +567,28 @@ impl Contracts {
         h.cooldown = MIN_WAIT_TIME;
     }
 
+    /// Assassinate: `hunter` releases its contract (retail CancelWithY,
+    /// "RELEASE YOUR CONTRACT" 0x4e260; `GBrick_ContractInitiator::Update`
+    /// 0x0130d708 clears the selected entity on the key press). The target
+    /// is forgotten and cannot be acquired again for
+    /// [`RELEASE_COOLDOWN_TICKS`].
+    pub fn release(&mut self, hunter: usize, acq: &mut Acquire) -> Vec<ContractEvent> {
+        let h = &mut self.hunters[hunter];
+        let Some(t) = h.target.take() else { return Vec::new() };
+        h.previous = Some(t);
+        h.wait = 0.0;
+        acq.memory.retain(|&(p, _)| p != t);
+        if acq.focus == Some(t) {
+            acq.focus = None;
+            acq.look = 0;
+        }
+        if acq.lock == Some(t) {
+            acq.lock = None;
+        }
+        acq.released = Some((t, RELEASE_COOLDOWN_TICKS));
+        vec![ContractEvent::Lost { hunter, target: t }]
+    }
+
     /// `p` was stunned by its target, or its target escaped it: the
     /// contract is lost (Wanted); a new one after the cooldown.
     pub fn on_stunned(&mut self, p: usize) -> Vec<ContractEvent> {
@@ -881,19 +903,42 @@ pub const CHANGE_TARGET_FOCUS_DELAY: f32 = 2.0;
 pub const ACQUIRE_TICKS: u32 = 180;
 /// [`CHANGE_TARGET_FOCUS_DELAY`] in ticks.
 pub const MEMORY_TICKS: u32 = 120;
-/// Placeholder: how far a player can look at another to acquire it. Retail
-/// takes the camera's target/lock (`BhvAssassin::GetLockTarget`, the
-/// TargetingManager highlight) through `ValidateTargetForCameraWithNavAndRaycast`
-/// 0x0130d596, whose range we have not read; we use the compass range.
-pub const LOOK_RANGE: f32 = DETECTION_RANGE;
-/// Placeholder: half-angle of the look cone around the camera's forward
-/// (cos 20 deg); retail's camera target pick was not traced.
-pub const LOOK_CONE_COS: f32 = 0.939_692_6;
+/// How far the highlight reaches for acquisition: the player targeting's
+/// `GlobalParameters.Dist_visibility` 9 m (horizontal, `AssassinTask::
+/// GetBestNearbyTarget` 0x00b4f648). Retail's candidate is the camera's
+/// highlight or lock (`GBrick_ContractInitiator::Update` 0x0130d708); that
+/// the highlight is this targeting pick is our reading (the highlight
+/// setter was not traced).
+pub const LOOK_RANGE: f32 = DIST_VISIBILITY;
+/// Height window of the highlight, |dz| (0x00b4f648, literal 1.6).
+pub const LOOK_HEIGHT: f32 = TARGET_HEIGHT;
+/// Half-angle of the highlight cone around the camera's forward (0x00b4f648,
+/// literal 0.5 = 60 degrees).
+pub const LOOK_CONE_COS: f32 = TARGET_CONE_COS;
+/// Heights above the target's feet that `ValidateTargetForCameraWithNavAndRaycast`
+/// (0x0130d596) casts to from the camera: the target is seen when any ray is
+/// clear. A locked target skips the test (0x0130d708). We cast from the
+/// acquirer's head ([`TARGET_HEIGHT`]), not the camera.
+pub const LOOK_RAY_HEIGHTS: [f32; 3] = [2.0, 1.0, 0.0];
+/// Placeholder: a lock holds while the locked player is within this
+/// horizontal distance (the compass range); retail's lock break distance
+/// was not read.
+pub const LOCK_RANGE: f32 = DETECTION_RANGE;
+/// `GBrick_ContractInitiator` `CancelTargetDelay` default 0 s (0x012d8f7a,
+/// +0x890; timer +0x87c started on acquisition): a contract can be released
+/// this long after it was acquired.
+pub const CANCEL_TARGET_DELAY: f32 = 0.0;
+/// Placeholder: after a release, the released player cannot be acquired
+/// again for this long (the Wanted lottery cooldown `MinWaitTime` 5 s,
+/// [`MIN_WAIT_TIME`]). Retail's release path (0x0130d708) sets no cooldown
+/// we could find; without one, looking on would re-acquire at once.
+pub const RELEASE_COOLDOWN_TICKS: u32 = 300;
 
-/// The player `hunter` looks at this tick: the living other within
-/// [`LOOK_RANGE`] and [`LOOK_CONE_COS`] of the camera forward `look`
-/// ((cos, sin) of the input's `cam_yaw`) and in line of sight, closest to
-/// the view centre (ties: lowest index). `alive[i]` gates candidates.
+/// The player `hunter` highlights this tick: the living other within
+/// [`LOOK_RANGE`], [`LOOK_HEIGHT`] and [`LOOK_CONE_COS`] of the camera
+/// forward `look` ((cos, sin) of the input's `cam_yaw`) and in line of
+/// sight, closest to the view centre (ties: lowest index). `alive[i]`
+/// gates candidates.
 pub fn looked_at(hunter: usize, pos: &[Vec3], look: f32, alive: &[bool], los: &dyn Fn(usize, usize) -> bool) -> Option<usize> {
     let fwd = Vec2::new(look.cos(), look.sin());
     let mut best: Option<(usize, f32)> = None;
@@ -903,7 +948,7 @@ pub fn looked_at(hunter: usize, pos: &[Vec3], look: f32, alive: &[bool], los: &d
         }
         let d = (*q - pos[hunter]).truncate();
         let dist = d.length();
-        if dist > LOOK_RANGE || dist < 1e-4 {
+        if dist > LOOK_RANGE || dist < 1e-4 || (q.z - pos[hunter].z).abs() > LOOK_HEIGHT {
             continue;
         }
         let dot = fwd.dot(d / dist);
@@ -914,6 +959,11 @@ pub fn looked_at(hunter: usize, pos: &[Vec3], look: f32, alive: &[bool], los: &d
     }
     best.map(|(c, _)| c)
 }
+
+/// Lock button bit in [`Acquire::buttons`].
+pub const BUTTON_LOCK: u8 = 1;
+/// Release button bit in [`Acquire::buttons`].
+pub const BUTTON_RELEASE: u8 = 2;
 
 /// One player's acquisition (retail `GBrick_ContractInitiator` selection
 /// timer +0x844 and its ContractAquiringCounter list +0x9c).
@@ -926,6 +976,14 @@ pub struct Acquire {
     /// Acquired players out of focus and ticks left until they are
     /// forgotten (the contract on one of them is lost then).
     pub memory: Vec<(usize, u32)>,
+    /// The locked player: the candidate whatever the view, until unlocked,
+    /// dead or beyond [`LOCK_RANGE`].
+    pub lock: Option<usize>,
+    /// Lock / release buttons held last tick ([`BUTTON_LOCK`],
+    /// [`BUTTON_RELEASE`]): a press is a new bit.
+    pub buttons: u8,
+    /// The player last released and ticks until it can be acquired again.
+    pub released: Option<(usize, u32)>,
 }
 
 /// What an acquisition tick decided.
@@ -950,7 +1008,7 @@ impl Acquire {
 
     /// Forget everything (death, stun, escape).
     pub fn reset(&mut self) {
-        *self = Acquire::default();
+        *self = Acquire { buttons: self.buttons, ..Acquire::default() };
     }
 
     /// Drop `p` everywhere (it died or left).
@@ -960,6 +1018,42 @@ impl Acquire {
             self.look = 0;
         }
         self.memory.retain(|&(q, _)| q != p);
+        if self.lock == Some(p) {
+            self.lock = None;
+        }
+    }
+
+    /// This tick's lock and release presses from the held buttons
+    /// (`lock`, `release`); remembers them for the next tick.
+    pub fn presses(&mut self, lock: bool, release: bool) -> (bool, bool) {
+        let now = if lock { BUTTON_LOCK } else { 0 } | if release { BUTTON_RELEASE } else { 0 };
+        let new = now & !self.buttons;
+        self.buttons = now;
+        (new & BUTTON_LOCK != 0, new & BUTTON_RELEASE != 0)
+    }
+
+    /// The candidate this tick: the locked player if any (held while alive
+    /// and within [`LOCK_RANGE`]), else `highlight`. A lock press locks the
+    /// highlight or, when already locked, unlocks. The player released
+    /// last is no candidate until its cooldown ends.
+    pub fn candidate(&mut self, hunter: usize, pos: &[Vec3], alive: &[bool], highlight: Option<usize>, lock_press: bool) -> Option<usize> {
+        if let Some((_, left)) = &mut self.released {
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                self.released = None;
+            }
+        }
+        if lock_press {
+            self.lock = if self.lock.is_some() { None } else { highlight };
+        }
+        if let Some(l) = self.lock {
+            let far = (pos[l] - pos[hunter]).truncate().length() > LOCK_RANGE;
+            if far || !alive.get(l).copied().unwrap_or(false) {
+                self.lock = None;
+            }
+        }
+        let cand = self.lock.or(highlight);
+        cand.filter(|&c| self.released.is_none_or(|(r, _)| r != c))
     }
 }
 
@@ -1326,14 +1420,70 @@ mod tests {
 
     #[test]
     fn looked_at_cone_range_sight() {
-        let pos = [Vec3::ZERO, Vec3::new(10.0, 1.0, 0.0), Vec3::new(10.0, 3.0, 0.0), Vec3::new(31.0, 0.0, 0.0)];
+        let pos = [Vec3::ZERO, Vec3::new(8.0, 1.0, 0.0), Vec3::new(4.0, 6.0, 0.0), Vec3::new(10.0, 0.0, 0.0)];
         let all = [true; 4];
         let clear = |_: usize, _: usize| true;
-        // 1 is nearest the view centre; 2 is at 16.7 deg (inside 20), 3 too far
+        // 1 is nearest the view centre; 2 is at 56 deg (inside 60), 3 beyond 9 m
         assert_eq!(looked_at(0, &pos, 0.0, &all, &clear), Some(1));
         assert_eq!(looked_at(0, &pos, 0.0, &[true, false, true, true], &clear), Some(2), "the dead are skipped");
         assert_eq!(looked_at(0, &pos, 0.0, &all, &|_, c| c != 1), Some(2), "a wall hides 1");
-        assert_eq!(looked_at(0, &pos, -0.6, &all, &clear), None, "34 deg the other way: out of the cone");
-        assert_eq!(looked_at(0, &[Vec3::ZERO, Vec3::new(31.0, 0.0, 0.0)], 0.0, &[true; 2], &clear), None, "beyond 30 m");
+        assert_eq!(looked_at(0, &pos, -0.2, &all, &|_, c| c != 1), None, "2 at 68 deg: out of the cone");
+        assert_eq!(looked_at(0, &[Vec3::ZERO, Vec3::new(9.5, 0.0, 0.0)], 0.0, &[true; 2], &clear), None, "beyond 9 m");
+        assert_eq!(looked_at(0, &[Vec3::ZERO, Vec3::new(5.0, 0.0, 1.7)], 0.0, &[true; 2], &clear), None, "1.7 m above");
+        assert_eq!(looked_at(0, &[Vec3::ZERO, Vec3::new(5.0, 0.0, 1.5)], 0.0, &[true; 2], &clear), Some(1));
+    }
+
+    #[test]
+    fn lock_holds_the_candidate() {
+        let mut a = Acquire::default();
+        let pos = [Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::new(40.0, 0.0, 0.0)];
+        let alive = [true; 3];
+        let (lock, _) = a.presses(true, false);
+        assert!(lock);
+        assert_eq!(a.candidate(0, &pos, &alive, Some(1), lock), Some(1));
+        // held: no new press; the lock outlasts the highlight
+        assert_eq!(a.presses(true, false), (false, false));
+        assert_eq!(a.candidate(0, &pos, &alive, None, false), Some(1));
+        // released and pressed again: unlock
+        a.presses(false, false);
+        let (lock, _) = a.presses(true, false);
+        assert_eq!(a.candidate(0, &pos, &alive, None, lock), None);
+        // beyond the lock range or dead: gone
+        a.lock = Some(2);
+        assert_eq!(a.candidate(0, &pos, &alive, None, false), None);
+        a.lock = Some(1);
+        assert_eq!(a.candidate(0, &pos, &[true, false, true], None, false), None);
+    }
+
+    #[test]
+    fn release_drops_the_contract_with_a_cooldown() {
+        let mut c = Contracts::new(3);
+        for h in &mut c.hunters {
+            h.active = true;
+        }
+        let mut a = Acquire::default();
+        let pos = [Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0), Vec3::ZERO];
+        for _ in 0..ACQUIRE_TICKS {
+            let cand = a.candidate(0, &pos, &[true; 3], Some(1), false);
+            c.acquire(0, &mut a, cand, false);
+        }
+        assert_eq!(c.hunters[0].target, Some(1));
+        assert_eq!(c.release(0, &mut a), vec![ContractEvent::Lost { hunter: 0, target: 1 }]);
+        assert_eq!(c.hunters[0].target, None);
+        assert!(c.release(0, &mut a).is_empty(), "nothing left to release");
+        // still looked at: no candidate until the cooldown ends, then 3 s again
+        for _ in 0..RELEASE_COOLDOWN_TICKS - 1 {
+            assert_eq!(a.candidate(0, &pos, &[true; 3], Some(1), false), None);
+        }
+        let mut n = 0;
+        loop {
+            n += 1;
+            let cand = a.candidate(0, &pos, &[true; 3], Some(1), false);
+            c.acquire(0, &mut a, cand, false);
+            if c.hunters[0].target.is_some() {
+                break;
+            }
+        }
+        assert_eq!(n, ACQUIRE_TICKS as usize);
     }
 }

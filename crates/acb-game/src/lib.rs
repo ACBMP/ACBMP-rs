@@ -124,6 +124,12 @@ pub struct PlayerInput {
     pub jump: bool,
     pub kill: bool,
     pub stun: bool,
+    /// Assassinate lock (viewer R): a press locks the highlighted player as
+    /// the acquisition candidate (no line of sight needed), another unlocks.
+    pub lock: bool,
+    /// Assassinate release (viewer Y, retail CancelWithY): a press drops the
+    /// current contract.
+    pub release: bool,
     /// Ticks between this input's tick and the tick the client drew the
     /// other players at (lag compensation; the sim rewinds at most
     /// [`rules::MAX_REWIND`]).
@@ -737,7 +743,7 @@ impl World {
                 .players
                 .iter()
                 .enumerate()
-                .map(|(i, p)| mode::Presence { pos: p.pos, hidden: p.hidden, blended: p.blended, running: p.moved >= rules::RUN_SPEED && p.kill.is_none(), yaw: p.yaw, speed: p.moved, in_air: p.loco.airborne() || p.flight.is_some(), look: inputs.get(i).map_or(0.0, |x| x.cam_yaw) })
+                .map(|(i, p)| mode::Presence { pos: p.pos, hidden: p.hidden, blended: p.blended, running: p.moved >= rules::RUN_SPEED && p.kill.is_none(), yaw: p.yaw, speed: p.moved, in_air: p.loco.airborne() || p.flight.is_some(), look: inputs.get(i).map_or(0.0, |x| x.cam_yaw), lock: inputs.get(i).is_some_and(|x| x.lock), release: inputs.get(i).is_some_and(|x| x.release), conflict: p.kill.is_some() })
                 .collect();
             let ground = self.ground.as_ref();
             // head to head (retail GameBrick::CanSee); no collision: clear
@@ -745,8 +751,17 @@ impl World {
                 let (o, t) = (pos[a] + Vec3::Z * rules::TARGET_HEIGHT, pos[b] + Vec3::Z * rules::TARGET_HEIGHT);
                 ground.is_none_or(|g| g.ray(o, t - o).is_none())
             };
+            // Assassinate acquisition (ValidateTargetForCameraWithNavAndRaycast
+            // 0x0130d596): any of three rays to the target's body is clear
+            let sight = |a: usize, b: usize| {
+                let o = pos[a] + Vec3::Z * rules::TARGET_HEIGHT;
+                rules::LOOK_RAY_HEIGHTS.iter().any(|&z| {
+                    let t = pos[b] + Vec3::Z * z.max(0.1);
+                    ground.is_none_or(|g| g.ray(o, t - o).is_none())
+                })
+            };
             let back: Vec<(usize, Vec3, f32)> =
-                m.tick(&who, &los).into_iter().map(|(p, s)| { let (at, yaw) = m.spawns.get(s).copied().unwrap_or((pos[p], 0.0)); (p, at, yaw) }).collect();
+                m.tick_with(&who, &los, &sight).into_iter().map(|(p, s)| { let (at, yaw) = m.spawns.get(s).copied().unwrap_or((pos[p], 0.0)); (p, at, yaw) }).collect();
             // Escort: every round's play starts on the team spawns
             let play_start = m.events.iter().any(|e| matches!(e, mode::MatchEvent::Round(rounds::RoundEvent::Phase { phase: rounds::Phase::Play, .. })));
             let teams = match &m.mode {

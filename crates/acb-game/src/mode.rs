@@ -228,6 +228,13 @@ pub struct Presence {
     /// Camera yaw of the player's input (forward (cos, sin), see
     /// [`crate::PlayerInput::cam_yaw`]): where it looks (Assassinate).
     pub look: f32,
+    /// Lock button held (Assassinate: a press locks the highlighted player).
+    pub lock: bool,
+    /// Release button held (Assassinate: a press drops the contract).
+    pub release: bool,
+    /// In a kill or stun (retail `IsInAnyActiveConflictWithPlayer`): no
+    /// release.
+    pub conflict: bool,
 }
 
 impl Presence {
@@ -266,6 +273,9 @@ pub enum MatchEvent {
     /// Assassinate: `player`'s kill closed a chain of `chain` kills within
     /// 10 s (`GBrick_BloodBath`: a voice/message, no points).
     BloodBath { player: usize, chain: u32 },
+    /// Assassinate: `hunter` released its contract on `target` (release
+    /// button, retail CancelWithY).
+    Released { hunter: usize, target: usize },
 }
 
 /// Which rule set a [`Match`] runs.
@@ -455,16 +465,36 @@ impl Match {
 
     /// Assassinate: every living player's acquisition tick (after the start
     /// delay, like the duel's lottery).
-    fn acquire_tick(&mut self, who: &[Presence], los: &dyn Fn(usize, usize) -> bool) {
+    fn acquire_tick(&mut self, who: &[Presence], sight: &dyn Fn(usize, usize) -> bool) {
         let pos: Vec<Vec3> = who.iter().map(|w| w.pos).collect();
         let alive: Vec<bool> = (0..self.score.len()).map(|p| self.alive(p)).collect();
         for h in 0..self.acquire.len().min(who.len()) {
+            let mut a = std::mem::take(&mut self.acquire[h]);
+            let (lock, release) = a.presses(who[h].lock, who[h].release);
             if !alive[h] {
+                self.acquire[h] = a;
                 continue;
             }
-            let cand = crate::rules::looked_at(h, &pos, who[h].look, &alive, los);
+            // retail 0x0130d708: the key press drops the selected contract
+            // unless in a conflict (kill/stun) and once CancelTargetDelay
+            // (0 s) has run; a chase on it ends as an escape
+            if release && !who[h].conflict {
+                if let Some(t) = self.contracts.hunters[h].target {
+                    if self.chases[h].is_some_and(|c| c.target == t) {
+                        self.chases[h] = None;
+                        self.events.push(MatchEvent::Escaped { hunter: h, target: t });
+                        self.award(t, ESCAPE_POINTS, ScoreReason::Escape);
+                    }
+                    self.threat[h] = 0.0;
+                    self.events.push(MatchEvent::Released { hunter: h, target: t });
+                }
+                for e in self.contracts.release(h, &mut a) {
+                    self.events.push(MatchEvent::Contract(e));
+                }
+            }
+            let highlight = crate::rules::looked_at(h, &pos, who[h].look, &alive, sight);
+            let cand = a.candidate(h, &pos, &alive, highlight, lock);
             let hp = cand.is_some_and(|c| who[c].running);
-            let mut a = std::mem::take(&mut self.acquire[h]);
             let (contracts, warn) = self.contracts.acquire(h, &mut a, cand, hp);
             self.acquire[h] = a;
             self.events.extend(warn.into_iter().map(MatchEvent::Acquire));
@@ -698,7 +728,15 @@ impl Match {
     /// The clock part of a tick (after the players moved): respawn
     /// countdowns (returns who respawns where), contracts, limits.
     /// `los(a, b)`: line of sight from player `a`'s head to `b`'s.
+    #[cfg(test)]
     pub(crate) fn tick(&mut self, who: &[Presence], los: &dyn Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
+        self.tick_with(who, los, los)
+    }
+
+    /// [`Match::tick`] with `sight(a, b)`, Assassinate's acquisition line of
+    /// sight (any of [`crate::rules::LOOK_RAY_HEIGHTS`] on `b` clear from
+    /// `a`'s head).
+    pub(crate) fn tick_with(&mut self, who: &[Presence], los: &dyn Fn(usize, usize) -> bool, sight: &dyn Fn(usize, usize) -> bool) -> Vec<(usize, usize)> {
         let pos: Vec<Vec3> = who.iter().map(|w| w.pos).collect();
         let pos = &pos[..];
         let mut back = Vec::new();
@@ -728,7 +766,7 @@ impl Match {
             }
         }
         if self.ticks >= ticks(self.config.start_delay) && self.mode == Mode::Assassinate {
-            self.acquire_tick(who, los);
+            self.acquire_tick(who, sight);
         }
         if self.bonus.is_some() {
             let running: Vec<bool> = who.iter().map(|w| w.running).collect();
@@ -1138,12 +1176,50 @@ mod tests {
     }
 
     #[test]
+    fn assassinate_release_and_lock() {
+        let mut m = asn(2);
+        let mut who = vec![Presence::at(Vec3::ZERO), Presence { look: -std::f32::consts::FRAC_PI_2, ..Presence::at(Vec3::new(5.0, 0.0, 0.0)) }];
+        let mut n = 0;
+        while m.contracts.hunters[0].target.is_none() {
+            steps(&mut m, &who, 1);
+            n += 1;
+            assert!(n < 2000);
+        }
+        // a release in a kill or stun is refused
+        who[0].release = true;
+        who[0].conflict = true;
+        steps(&mut m, &who, 1);
+        assert_eq!(m.contracts.hunters[0].target, Some(1));
+        // the button is still held: no new press
+        who[0].conflict = false;
+        steps(&mut m, &who, 1);
+        assert_eq!(m.contracts.hunters[0].target, Some(1));
+        who[0].release = false;
+        steps(&mut m, &who, 1);
+        who[0].release = true;
+        m.tick(&who, &|_, _| true);
+        assert_eq!(m.contracts.hunters[0].target, None);
+        assert!(m.events.contains(&MatchEvent::Released { hunter: 0, target: 1 }));
+        assert!(m.events.contains(&MatchEvent::Contract(ContractEvent::Lost { hunter: 0, target: 1 })));
+        // a lock pressed on the cooled-down highlight holds it behind a wall
+        who[0].release = false;
+        steps(&mut m, &who, crate::rules::RELEASE_COOLDOWN_TICKS);
+        who[0].lock = true;
+        steps(&mut m, &who, 1);
+        assert_eq!(m.acquire[0].lock, Some(1));
+        for _ in 0..crate::rules::ACQUIRE_TICKS {
+            m.tick(&who, &|_, _| false);
+        }
+        assert_eq!(m.contracts.hunters[0].target, Some(1), "locked: no line of sight needed");
+    }
+
+    #[test]
     fn assassinate_no_kill_before_acquisition() {
         let mut m = asn(3);
         assert_eq!(m.mode, Mode::Assassinate);
         assert_eq!(m.config.time_limit, 600.0);
         // nobody looks at anybody: no lottery, no contract, ever
-        let who = vec![Presence { look: 3.0, ..Presence::at(Vec3::ZERO) }, Presence { look: std::f32::consts::FRAC_PI_2, ..Presence::at(Vec3::new(5.0, 0.0, 0.0)) }, Presence { look: 3.0, ..Presence::at(Vec3::new(0.0, 5.0, 0.0)) }];
+        let who = vec![Presence { look: 3.0, ..Presence::at(Vec3::ZERO) }, Presence { look: -std::f32::consts::FRAC_PI_2, ..Presence::at(Vec3::new(5.0, 0.0, 0.0)) }, Presence { look: 3.0, ..Presence::at(Vec3::new(0.0, 5.0, 0.0)) }];
         steps(&mut m, &who, 600);
         for k in 0..3 {
             for v in 0..3 {

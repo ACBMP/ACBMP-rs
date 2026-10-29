@@ -420,7 +420,7 @@ impl Client {
             if e.kind == EventKind::KillRejected && e.a as usize == self.slot {
                 self.stats.rejected += 1;
             }
-            let mine = e.a as usize == self.slot || (matches!(e.kind, EventKind::Death | EventKind::Stunned | EventKind::ContractLost | EventKind::ContractFulfilled | EventKind::Acquiring | EventKind::AcquireStopped) && e.b as usize == self.slot) || matches!(e.kind, EventKind::MatchOver | EventKind::VipEscaped | EventKind::BloodBath);
+            let mine = e.a as usize == self.slot || (matches!(e.kind, EventKind::Death | EventKind::Stunned | EventKind::ContractLost | EventKind::ContractFulfilled | EventKind::Acquiring | EventKind::AcquireStopped | EventKind::Released) && e.b as usize == self.slot) || matches!(e.kind, EventKind::MatchOver | EventKind::VipEscaped | EventKind::BloodBath);
             if trace() || mine {
                 eprintln!("net: event {}", e.describe());
             }
@@ -568,6 +568,8 @@ impl Client {
             EventKind::AcquireStopped => format!("player {} stopped acquiring you", e.a),
             EventKind::Bonus if e.a == me => format!("bonus: {}", crate::proto::bonus_names(e.b).to_uppercase()),
             EventKind::BloodBath if e.a == me => format!("BLOODBATH: your kill closed a chain of {} kills", e.b),
+            EventKind::Released if e.a == me => format!("released your contract on player {}", e.b),
+            EventKind::Released => format!("player {} released its contract on player {}", e.a, e.b),
             EventKind::BloodBath => format!("BLOODBATH: player {} closed a chain of {} kills", e.a, e.b),
             EventKind::MatchOver if e.a == crate::proto::NONE => "match over: draw".into(),
             EventKind::MatchOver if e.a == me => "match over: you win".into(),

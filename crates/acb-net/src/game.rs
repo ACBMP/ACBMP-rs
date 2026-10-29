@@ -229,6 +229,9 @@ pub fn game_state(m: &Match) -> GameState {
                 focus: a.focus.map_or(NONE, |x| x as u8),
                 look: a.look.min(u16::MAX as u32) as u16,
                 memory: a.memory.iter().map(|&(p, left)| (p as u8, left.min(u16::MAX as u32) as u16)).collect(),
+                lock: a.lock.map_or(NONE, |x| x as u8),
+                buttons: a.buttons,
+                released: a.released.map_or((NONE, 0), |(p, left)| (p as u8, left.min(u16::MAX as u32) as u16)),
             })
             .collect(),
         bonus: m.bonus.as_ref().map(|t| {
@@ -267,6 +270,9 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) -> Vec<usize> {
         a.focus = (s.focus != NONE).then_some(s.focus as usize);
         a.look = s.look as u32;
         a.memory = s.memory.iter().map(|&(p, left)| (p as usize, left as u32)).collect();
+        a.lock = (s.lock != NONE).then_some(s.lock as usize);
+        a.buttons = s.buttons;
+        a.released = (s.released.0 != NONE).then_some((s.released.0 as usize, s.released.1 as u32));
     }
     if let (Some(t), Some(b)) = (&mut m.bonus, &g.bonus) {
         let id = |x: u8| (x != NONE).then_some(x as usize);
@@ -348,6 +354,7 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
             // one event per kill (events dedup by tick, kind, player)
             MatchEvent::Bonus { .. } => None,
             MatchEvent::BloodBath { player, chain } => Some(ev(EventKind::BloodBath, player, chain as usize)),
+            MatchEvent::Released { hunter, target } => Some(ev(EventKind::Released, hunter, target)),
         })
         .chain(rounds)
         .chain(vips)
