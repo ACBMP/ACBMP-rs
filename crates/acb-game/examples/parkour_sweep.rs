@@ -1,9 +1,10 @@
 //! Climbs every wall with guidance edges on San Donato and reports how
-//! each attempt ends: `parkour_sweep MAP.forge [MAX [SKIP]]` (env ACBMP_SCHEMAS,
-//! ACBMP_EXE). A wall is a hold 1.0-4.5 m over the floor in front of it;
-//! the player starts 1.6 m out facing it and runs at it (Shift+W) for
-//! 10 s (with SWEEP_LEGS set, Shift+Space+W: freerun). Walls are
-//! deduplicated on a 3 m grid.
+//! each attempt ends: `parkour_sweep MAP.forge [MAX [SKIP]]` (env
+//! ACBMP_SCHEMAS, ACBMP_EXE; about 15 s for the whole map). A wall is a
+//! hold 1.0-4.5 m over the floor in front of it, within 200 m of the
+//! origin, deduplicated on a 3 m grid; the player starts 1.6 m out facing
+//! it and runs at it for 10 s: Shift+W, or Shift+Space+W (freerun) with
+//! SWEEP_LEGS set. SWEEP_TIMING prints each wall's worst tick.
 use std::sync::Arc;
 
 use acb_anim::BuiltinTracks;
@@ -34,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     let g = w.ground.take().unwrap();
     let mut seen = std::collections::HashSet::new();
     let mut starts = Vec::new();
-    for h in g.holds_around(glam::Vec3::ZERO, 1e5) {
+    for h in g.holds_around(glam::Vec3::ZERO, 200.0) {
         if h.top && h.length() < 0.8 {
             continue;
         }
@@ -59,6 +60,7 @@ fn main() -> anyhow::Result<()> {
     let starts: Vec<_> = starts.into_iter().skip(skip).take(max).collect();
     let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
     for (at, fwd, dz) in &starts {
+        let wall_t = std::time::Instant::now();
         w.restore(&base);
         let yaw = (-fwd.x).atan2(fwd.y);
         w.place_player(0, *at, yaw);
@@ -67,9 +69,16 @@ fn main() -> anyhow::Result<()> {
         let (mut climbed, mut top_z, mut beam_end) = (false, at.z, false);
         // first stand after climbing: (on top, beam, no headroom)
         let mut stood: Option<(bool, bool, bool)> = None;
+        let mut worst = (0.0f64, String::new());
         for _ in 0..(10.0 / DT) as usize {
             let was = w.players[0].climb.is_some();
+            let t0 = std::time::Instant::now();
             w.step(&[input]);
+            let dt_ms = t0.elapsed().as_secs_f64() * 1e3;
+            if dt_ms > worst.0 {
+                let p = &w.players[0];
+                worst = (dt_ms, format!("{:.2?} climb {} air {} beam {}", p.pos, p.climb.is_some(), p.loco.airborne(), p.loco.on_beam()));
+            }
             let p = &w.players[0];
             climbed |= p.climb.is_some();
             top_z = top_z.max(p.pos.z);
@@ -86,6 +95,9 @@ fn main() -> anyhow::Result<()> {
             None => "never stood",
         };
         *tally.entry(stood_label).or_default() += 1;
+        if std::env::var_os("SWEEP_TIMING").is_some() {
+            println!("worst tick {:.1} ms at {}; wall {:.0} ms", worst.0, worst.1, wall_t.elapsed().as_secs_f64() * 1e3);
+        }
         let p = &w.players[0];
         let g = w.ground.as_ref().unwrap();
         if p.climb.is_none() && !p.loco.airborne() {

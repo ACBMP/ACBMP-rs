@@ -12,7 +12,7 @@ fn main() -> anyhow::Result<()> {
     let g = Ground::load(&archive)?;
     let near = if a.len() >= 5 { Vec3::new(a[2].parse()?, a[3].parse()?, a[4].parse()?) } else { Vec3::ZERO };
     let count: usize = a.get(5).map_or(15, |c| c.parse().unwrap());
-    let holds = g.holds_around(near, 1e5);
+    let holds = g.holds_around(near, 200.0);
     let (mut side, mut up) = (Vec::new(), Vec::new());
     let mut dead = 0;
     for h in holds.iter().filter(|h| h.length() >= 2.0) {
