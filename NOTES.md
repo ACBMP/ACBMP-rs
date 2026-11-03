@@ -739,7 +739,7 @@ moves advance by `dt` of simulated time; same end states at `--fps 60` and
   ends on 2 m+ hang edges, 50 bridged by a side jump; 12 holds only a leap
   reaches. Retail's targeted rebound sets (`xx_h_rebound_{dir}_{front,up,
   down}_{050,300,550}cm_*_to_air`) are not used yet.
-- Low profile (no Shift) walking at a drop deeper than 1.5 m (our choice),
+- Low profile (no Shift) walking at a drop deeper than 2.5 m (retail SetBreakHard, see "Low-profile edge brake"),
   or off a beam end at any drop: stops at the edge (retail `xx_l_ledge_
   lookdown_*`, `xx_l_beam_edge_stop`; clips not played yet). F there lowers
   onto the wall below (`Ground::ledge_hold`, `Climb::pulldown`: `xx_l_ledge_
@@ -1443,7 +1443,7 @@ Can/DoEnterWallingVertical, 0x137/0x138 Can/DoFallOffEdge, 0x139 CanUnbalanceOnE
   clip of the jump kind for (reach, -3 m) plays, then the fall pose. The gap direction is the move direction.
   The homing runs inside
   the ordinary fall, so grasp, wall reception (which drops the target), haystacks, beams and landing classes
-  all apply. Low profile still stops at drops over 2 m (EdgeStop), so its 1 m fall-off is seen on 0.53-2 m
+  all apply. Low profile stops at drops over 2.5 m (was 2 m, see "Low-profile edge brake"), so its 1 m fall-off is seen on 0.53-2.5 m
   drops. Replaces `jump::leap` (LEAP_MIN_SPEED 3.5 m/s, LEAP_UP 3.0 m/s) and the plain walk-off fall.
 - Test: `tests/jump_map.rs` `fall_off_an_edge_by_profile` (San Donato roof edge x -13.1): sprint lands
   3.0 m out, Shift run 2.6 m, no rise. Gates, kills, duel, escort unchanged.
@@ -1518,3 +1518,28 @@ Retail's back eject is the rebound, a ground-style targeted jump. It is not one 
   our collision checks (`Flight::sink`) need the feet over it.
 - Gates unchanged (flights end on their targets). Sweep, Shift+W: identical. Shift+Space+W: 3 walls end "beam
   below top" where they ended "partway up" or "still on wall".
+
+## Low-profile edge brake (2026-11-03, phase3-ledge-release)
+- The player brain never sends `UnbalanceOnEdge`, so a player never enters Ground EdgeStop. The disassembly has
+  one `DoUnbalanceOnEdge` caller (IHumanGround slot 0x13a, call *0x4e8): `GroundNavigationTask::CheckForFallOffEdge`
+  01538746, the NPC navigation. The brain uses `CanUnbalanceOnEdge(gap, 0.0225)` only to gate the high-profile
+  pull-down. So `IsNarrowEdge` 00fd1e26 (EdgeStop vs NarrowObject) is NPC-only too.
+- What stops a walking player: `AssassinTaskGround::UpdateGroundMovement` 0166fb1c ~l.995-1070.
+  - Gaps come from `Human::GetBestGapInDirectionInList` (IHuman slot 0x2f): within 0.3 m, 100 deg of the
+    move, then 180 deg.
+  - The brake fires when there is a gap ahead, the stick is above 0.35, button 0 is not held, the gap is deeper
+    than 2.5 m (Gap +0x30), within 70 deg of the stick, and Gap +0x34 < 0.16 and > 0.1 m of something (fields
+    not identified).
+  - In low profile (+0x1f64 clear) it then calls `IHumanGround::SetBreakHard(true)`, slot 0x1f; the IHumanGround
+    block's zero vtable entries resolve through the bind table, `llvm-objdump --macho --bind`.
+  - `HumanGround::TestMoveCycleToMoveStopMain` reads the flag (HumanGroundData +0x122): the move cycle stops.
+  - Facing within 70 deg of the gap starts a timer. Standing there over 0.25 s, gap > 2.5 m and the LookDown
+    ability enter LookDown (slots 0x22e/0x22f).
+- Otherwise the brain's `CanFallOffEdge(gap)` (FSM test 0x57, depth >= 0.53 m, no profile gate) leads to
+  `DoFallOffEdge`: the 1 m hop in low profile.
+- Ours: the low-profile stop moves from 2.0 m (UnbalanceOnEdge's value) to 2.5 m (`human::ground::break_hard`,
+  `BREAK_HARD_DEPTH`). The pull-down with F stays at 2.0 m (`CanPullDownOnEdge`). Beam ends still stop at any
+  drop (HumanNarrowObjectBeam EdgeStop). Drops of 0.53-2.5 m are now walked off in low profile.
+  - Ours: no LookDown pose; the brake is our `loco.blocked`, not a MoveStop clip.
+  - Ours: the gap direction is the move direction, so the 70 deg cone always holds.
+- Gates, tests, kills, duel, escort unchanged.

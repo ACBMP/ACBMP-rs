@@ -100,8 +100,9 @@ Retail has two targeted-jump paths:
    target below, ballistic). Ours drops and catches while falling.
 2. ~~`Flight` warp~~: done (NOTES "Flight warp"). The end error is linear in time over the clips. Moving footholds
    (the per-tick re-read correction) are not modelled, since San Donato has none.
-3. **Brain edge commands.** `AssassinTaskGround::UpdateGroundMovement` 0166fb1c: `UnbalanceOnEdge` and
-   `IsNarrowEdge` 00fd1e26 decide EdgeStop and NarrowObject. Ours still triggers edge stop by low profile.
+3. ~~Brain edge commands~~: done (NOTES "Low-profile edge brake"). Players never get UnbalanceOnEdge, which is NPC-only;
+   low profile brakes hard (SetBreakHard) at drops over 2.5 m. Open: the LookDown pose, and the MoveStop clip on
+   the brake.
 4. **NarrowObject FreeRun as a state**: beam running, beam entry clip, and jumps and walling from beams
    (findings table, rows marked missing).
 5. **Smaller items**:
