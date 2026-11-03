@@ -1423,21 +1423,30 @@ Can/DoEnterWallingVertical, 0x137/0x138 Can/DoFallOffEdge, 0x139 CanUnbalanceOnE
   Exec*ToMoveCycle transitions, ramped in `UpdateMoveCycleMain` 00fc151a): our `locomotion::anim_speed`.
   So a sprint lands 3 m out, a run 2.6 m, low profile 1 m, each 3 m down: the `down 300cm` / `down 050cm`
   clip reaches.
-- Ballistics after the takeoff action (`HumanInAir::UpdateMainMain` 01328022, ~l.1740-1970): velocity = the
+- Ballistics after the takeoff action (`HumanInAir::UpdateMainMain` 01328022, ~l.1740-1970), only when
+  InAirData +0x1fa is set. Writers of +0x1fa = 1 (disassembly scan): `Human::ComputeDeepFootHold` (leap of faith
+  into a deep target), `HumanLedge::ReleaseToInAir` 00d86b02, `HumanLedge::ReleaseToTarget` 00d8cabb,
+  `HumanLadder::ExecuteReleaseToTarget`; cleared by `HumanInAir::ClearTargetedJumpData`. A ground
+  `DoTargetedJump` (00d058de, also the fall-off) does not set it: those jumps warp their takeoff + air clips onto
+  the target (progress (t + len1) / (len1 + len2), `Action::GetTotalDisplacementMatrix`, ~l.640-1000), the
+  model `jump::Flight` approximates. Ballistic: velocity = the
   character controller's (takeoff root motion) when the takeoff item finishes (vz forced to -1 for action
   0x1120e17b); then each tick, above the target's height: T = `GetDropTime(z, target z, vz, -9.81)` (012cf475:
   (vz + sqrt(vz^2 + 2 g max(z - tz, 0))) / g), a = `GetTargettingAcceleration` (01327fdd: 2 (target - pos -
   T v) / T^2, horizontal), dt' = min(dt, T), v += a dt', vz -= 9.81 dt', pos += v dt' + a dt'^2 / 2. At or
   below the target height the horizontal velocity is zeroed: straight down.
-- During the takeoff action (same function ~l.640-1000) the root is pulled toward the target per tick, the
-  correction clamped to 1 m (10 m in one branch, flag InAirData +0x1fc); not ported yet.
-- Ours (`human::ground::fall_off`, `human::in_air::home`, `jump::fall_off`): the gap direction is the move
-  direction; the ballistic part starts at the edge with the ground velocity (no takeoff root motion, so no
-  rise); the takeoff clip of the jump kind for (reach, -3 m) plays, then the fall pose. The homing runs inside
+- In the warp model the target is re-read per tick (foothold entity matrix; +0x1fc: offset by half of
+  +0x2b0), the correction toward it clamped to 1 m (10 m with +0x1fc).
+- Ours (`human::ground::fall_off`, `human::in_air::home`, `jump::fall_off`): target, cones and back fall are
+  retail; the path to the target is not: it flies the ballistic homing (retail's ledge-release model) instead
+  of the clip warp, from the edge with the ground velocity (no takeoff root motion, so no rise); the takeoff
+  clip of the jump kind for (reach, -3 m) plays, then the fall pose. The gap direction is the move direction.
+  The homing runs inside
   the ordinary fall, so grasp, wall reception (which drops the target), haystacks, beams and landing classes
   all apply. Low profile still stops at drops over 2 m (EdgeStop), so its 1 m fall-off is seen on 0.53-2 m
   drops. Replaces `jump::leap` (LEAP_MIN_SPEED 3.5 m/s, LEAP_UP 3.0 m/s) and the plain walk-off fall.
 - Test: `tests/jump_map.rs` `fall_off_an_edge_by_profile` (San Donato roof edge x -13.1): sprint lands
   3.0 m out, Shift run 2.6 m, no rise. Gates, kills, duel, escort unchanged.
-- Next: port the same ballistics into `jump::Flight` (targeted jumps onto tops and across gaps still warp the
-  clip path, NOTES "Freerun jumps") and the takeoff correction.
+- Next: the hang back eject / release (`HumanLedge::ReleaseToInAir` 00d86b02, `ReleaseToTarget` 00d8cabb) are
+  retail ballistic jumps: port them onto `human::in_air::home` (ours: a fixed 1.71 m/s fall off the wall, NOTES
+  "Freerun moves"); `Flight` keeps the warp model (its warp shape is ours).

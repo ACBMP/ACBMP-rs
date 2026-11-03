@@ -499,11 +499,14 @@ pub(crate) fn take_off(p: &mut Player, clips: &Clips, sk: &Skeleton, target: Vec
 /// Falls off an edge the retail way (`HumanGround::ExecuteFallOffEdge`
 /// 00fd2406, [`crate::human::ground::fall_off`]): a targeted jump to
 /// `target`, a point in the open past the edge, on the jump clips the
-/// drop picks, moving at `vel` (m/s, horizontal) as it leaves; the
-/// ballistic part homes onto the target ([`crate::human::in_air::home`])
-/// and drops straight down past it, landing, grabbing and hiding like any
-/// fall. Ours: the ballistic part starts at the edge (retail plays the
-/// takeoff clip's root motion first).
+/// drop picks, moving at `vel` (m/s, horizontal) as it leaves. Retail
+/// warps the takeoff and air clips onto the target (a ground targeted jump
+/// does not set the ballistic flag InAirData +0x1fa); ours flies there on
+/// retail's ballistic homing instead ([`crate::human::in_air::home`], the
+/// model of ledge releases), starting at the edge, so that the fall's own
+/// checks run on the way: a floor nearer than the target lands early, holds
+/// are grabbed, walls received. Past the target's height it drops straight
+/// down.
 pub(crate) fn fall_off(p: &mut Player, clips: &Clips, sk: &Skeleton, vel: Vec2, target: Vec3) {
     let d = target - p.pos;
     let main = main_kind(&weights(clips, d));

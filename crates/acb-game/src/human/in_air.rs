@@ -482,7 +482,11 @@ pub fn targeting_accel(pos: Vec2, target: Vec2, vel: Vec2, t: f32) -> Vec2 {
 }
 
 /// One tick of a targeted jump's ballistic part
-/// (`HumanInAir::UpdateMainMain` 01328022, after the takeoff action): above
+/// (`HumanInAir::UpdateMainMain` 01328022, after the takeoff action, for
+/// the jumps that set InAirData +0x1fa: `HumanLedge::ReleaseToInAir` /
+/// `ReleaseToTarget`, ladder releases and `Human::ComputeDeepFootHold`
+/// (leap of faith); other targeted jumps warp their clips onto the
+/// target instead, see `jump::Flight`): above
 /// the target the horizontal velocity homes onto it so the two meet at the
 /// target's height ([`drop_time`], [`targeting_accel`], applied for at most
 /// the drop time); at or below it the horizontal velocity is zeroed and the
