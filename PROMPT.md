@@ -96,21 +96,16 @@ Retail has two targeted-jump paths:
 
 ## Next targets (in suggested order)
 1. ~~Hang eject~~: done in phase3-ledge-release (NOTES "Hang rebound"). The back eject is the retail
-   rebound, a targeted jump (not ballistic). Still open: `ReleaseToTarget` 00d8ca6e (a hang drop onto a
-   target below, ballistic). Ours drops and catches while falling.
+   rebound, a targeted jump (not ballistic). `ReleaseToTarget` 00d8ca6e is not on the player path (see
+   NOTES "Phase 3 review"): a player release is a plain drop or a leap of faith.
 2. ~~`Flight` warp~~: done (NOTES "Flight warp"). The end error is linear in time over the clips. Moving footholds
    (the per-tick re-read correction) are not modelled, since San Donato has none.
 3. ~~Brain edge commands~~: done (NOTES "Low-profile edge brake"). Players never get UnbalanceOnEdge, which is NPC-only;
    low profile brakes hard (SetBreakHard) at drops over 2.5 m. Open: the LookDown pose, and the MoveStop clip on
    the brake.
-4. **NarrowObject FreeRun as a state**: beam running, beam entry clip, and jumps and walling from beams
-   (findings table, rows marked missing).
-5. **Smaller items**:
-   - pilotis' extra retail conditions: no freestep target, plus a gap ahead (Human vtable +0x2c0, 0.5);
-   - the TargetedLedgeGrab beam landing clips (`GetFrontFoot` 00cbb628);
-   - the ObstacleCollision bump clip;
-   - a slope state (our floors stop at 53°);
-   - ladder releases.
+4. ~~NarrowObject FreeRun~~ and 5. ~~smaller items~~: reviewed (NOTES "Phase 3 review"). Jumps off beams already
+   work; the release never targets for players; the pilotis gap gate, slopes (rare on San Donato) and ladders
+   are documented, not ported. Left: retail clips (beam entry/landing, bump, edge stop/look-down), visuals, parked.
 6. **Wave C**: tune against retail traces once the user's captures arrive (`tools/tracecmp.py`,
    `crates/acb-trace`).
 

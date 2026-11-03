@@ -1543,3 +1543,30 @@ Retail's back eject is the rebound, a ground-style targeted jump. It is not one 
   - Ours: no LookDown pose; the brake is our `loco.blocked`, not a MoveStop clip.
   - Ours: the gap direction is the move direction, so the 70 deg cone always holds.
 - Gates, tests, kills, duel, escort unchanged.
+
+## Phase 3 review: release, pilotis gate, beams (2026-11-03, phase3-ledge-release)
+- Hang release (player brain `AssassinTaskLedge::UpdateLedge` 012a8298 ~l.760-850, IHumanLedge slots +0x28
+  CanRelease, +0x2c DoRelease, +0x30/+0x34 Can/DoReleaseToTarget):
+  - With the LeapOfFaith ability and a deep target below (IHuman +0x84), `DoRelease(foothold, 0x800)`: a leap
+    of faith, which also sends `SendLeapOfFaithEvent` and switches the collision layer to 0x1c.
+  - Otherwise `DoRelease(null, 0x80000000)`: a plain drop.
+  - `ReleaseToTarget` is never called by the player brain. Our drop then catch while falling is the player
+    path. A drop over a haystack enters it through the in-air haystack contact; ours has no leap-of-faith
+    clip.
+- Pilotis gate (`HumanInAir::CheckForDefaultGrasp` 0132017a ~l.1430-1465): retail tries `CheckForPilotis` only
+  when:
+  - `IsFreeStepTargetValidAndAccessible(0x90000)` is false;
+  - `Human::IsNearGap(gap, 0.5)` (Human vtable +0x2c0) is true;
+  - Gap +0x38 is clear;
+  - and the knee sub-shape cast passed (< 20).
+  The probe direction is the gap's direction, negated. Ours: not ported. Our post search already needs a post top
+  within 0.375 m of the probe, and another per-tick gap query costs sim time (escort replays falls).
+- NarrowObject FreeRun: freerun jumps off beam ends already come out of the ground jump search (a 0.5 m gap
+  jump off the stairwell balustrade's end at 38.60 -55.07 1.01, Shift+Space+W). What remains is retail's beam
+  clip sets (entry, run, jumps from a beam), which are visuals and parked.
+- Slopes (`examples/slopes.rs`, San Donato collision by face angle):
+  - 0-45 deg: 19822 m2; 45-53: 138 m2; 53-70: 321 m2; 70-90: 20653 m2.
+  - The 45-70 deg patches are 2-2.5 m2 bevels at street level (z 0.1-0.4) and two 61 deg strips at
+    -39 41..49 4.9.
+  - So retail's slope class (45-70 deg, a slide) barely shows on this map. Not ported.
+- Ladders: none handled (no ladder entities read). Retail `HumanLadder::ExecuteReleaseToTarget` is ballistic.
