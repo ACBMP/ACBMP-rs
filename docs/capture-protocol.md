@@ -53,6 +53,15 @@ These values only exist in game-mode XML that didn't ship, so we need them from 
 - a 60 fps video of one round, if possible.
 A short `./acb-trace record` while walking next to a VIP from its spawn to its exit gives us its path on that map. The ways aren't in the PC data, so for now we author them ourselves.
 
+## Manhunt observations (optional)
+Manhunt's brick list didn't ship either. We play it with the binary's defaults and some guesses (NOTES "Manhunt"). From one Manhunt match, note:
+- the respawn delay after a hunter kills you (ours: 5 s);
+- whether the prey score for escaping a hunter's chase, and how much (ours: no escape score);
+- the score popups while hiding: the first one about 1 s after you hide, then every 5 s, 10 points alone and 20 / 30 / 50 with 1 / 2 / 3 hidden teammates nearby (the defaults, unconfirmed). Note whether blending in a crowd pays like a hiding spot;
+- the kill bonus names a hunter gets (Focus, Silent, Incognito, ...), especially whether Incognito appears (ours: never in Manhunt);
+- whether a hunter's compass shows every prey or only one best target;
+- the banners at a round's end.
+
 ## Send back
 - All `*.csv` files plus `diag.txt`.
 - The persona name and the Wine/Proton version.
