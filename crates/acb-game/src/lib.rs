@@ -565,7 +565,11 @@ impl World {
     /// Starts a Manhunt (catsmice) match: Escort's teams, rounds and team
     /// spawn groups, with no VIPs ([`rules::TeamGame::Manhunt`]: the
     /// attacking team hunts the other team's players).
-    pub fn manhunt(&mut self, archive: &Archive, mut teams: rules::Teams, config: mode::MatchConfig, spawns: Vec<(Vec3, f32)>) {
+    /// Loads the crowd (its navmesh steers the test bots) when the map has one.
+    pub fn manhunt(&mut self, archive: &Archive, builtins: Option<&BuiltinTracks>, mut teams: rules::Teams, config: mode::MatchConfig, spawns: Vec<(Vec3, f32)>) {
+        if self.crowd.is_none() {
+            self.crowd = Crowd::load(archive, builtins).ok();
+        }
         teams.game = rules::TeamGame::Manhunt;
         teams.vips.clear();
         teams.escorted.clear();

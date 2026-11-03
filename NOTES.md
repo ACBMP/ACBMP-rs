@@ -1480,5 +1480,5 @@ Full findings: `~/.cache/acbmp-re/findings/mode-manhunt.md`.
   bonuses, stuns `STUN_POINTS` (ScoreChase humiliation); escape scoring is not wired (no single-target chase).
   Round length 300 s matches the text. Kill bonuses beyond those (retail ScoreKill types) are not ported.
 - Tests: `manhunt::tests` (bonus timing, mates), `mode::tests::manhunt_hunters_kill_prey_hide_and_stun`;
-  `tools/manhunt.sh`: 2 rounds, roles swap, 0 desync on 4 clients. Its bots get stuck: the team spawns are 88 m
-  apart and the bot runs in a straight line.
+  `tools/manhunt.sh`: 2 rounds, roles swap, 0 desync on 4 clients, round 1 scores 4 kills (teams [400, 0]); its
+  `vip` bot follows the navmesh (`Nav::path`, `World::manhunt` loads the crowd) to the nearest prey.

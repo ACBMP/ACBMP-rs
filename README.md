@@ -84,9 +84,9 @@ your spot, hiding pays again once 7 s have passed. Team totals win. The HUD read
 `team 1 prey | hunter 24.3 m | team 0 100 [team 1 40] | round 1/2 play 3:12`:
 your role (hunter or prey), the distance to the nearest living enemy player
 (`target` when hunting, `hunter` when hunted), team totals, round and clock.
-`tools/manhunt.sh` runs a 2v2 on one machine (port 7953); its straight-line test
-bots rarely reach the other team across San Donato, so it checks the rounds,
-roles and sync, not kills.
+`tools/manhunt.sh` runs a 2v2 on one machine (port 7953); its test bots (`--input "0=vip"`)
+follow the navmesh to the nearest prey while hunting and press kill (round 1 scores a few
+kills; round 2 often none within the short test round).
 
 Assassinate (free-for-all, 10 min, any player count):
 

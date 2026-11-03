@@ -334,10 +334,16 @@ fn vip_chase(world: &World, me: usize) -> Option<f32> {
     }
     let p = world.players.get(me)?.pos;
     if teams.game == acb_game::rules::TeamGame::Manhunt {
-        let to = (0..teams.team.len())
+        let goal = (0..teams.team.len())
             .filter(|&o| teams.team[o] != teams.attacking_team && m.alive(o))
-            .filter_map(|o| world.players.get(o).map(|q| q.pos - p))
-            .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))?;
+            .filter_map(|o| world.players.get(o).map(|q| q.pos))
+            .min_by(|a, b| a.distance_squared(p).total_cmp(&b.distance_squared(p)))?;
+        // along the navmesh when both ends are on it, else straight at it
+        let next = world.crowd.as_ref().and_then(|c| {
+            let (from, to) = (c.nav.locate(p)?.0, c.nav.locate(goal)?.0);
+            c.nav.path(from, to, goal)?.into_iter().find(|w| w.truncate().distance(p.truncate()) > 1.0)
+        });
+        let to = next.unwrap_or(goal) - p;
         return Some(to.y.atan2(to.x));
     }
     let v = m.vips.as_ref()?;

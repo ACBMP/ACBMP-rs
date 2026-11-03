@@ -80,7 +80,7 @@ pub fn load_match(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTr
                 let game = if e.manhunt { acb_game::rules::TeamGame::Manhunt } else { acb_game::rules::TeamGame::Escort };
                 let teams = acb_game::rules::Teams { game, team: e.team.clone(), attacking_team: e.attacking, vips: Vec::new(), escorted: Vec::new() };
                 if e.manhunt {
-                    world.manhunt(archive, teams, cfg, spawns);
+                    world.manhunt(archive, builtins, teams, cfg, spawns);
                 } else {
                     world.escort(archive, builtins, teams, cfg, spawns)?;
                 }

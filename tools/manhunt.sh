@@ -3,9 +3,9 @@
 # Localhost 2v2 Manhunt: acbmp serve --mode manhunt + four headless viewers (a, c = team 0,
 # b, d = team 1; team 0 hunts in round 1) over netsim loss/latency (default 5 % loss,
 # 75 ms each way = 150 ms round trip). Every viewer runs the `vip` test bot: while its team
-# hunts it runs at the nearest living player of the other team pressing kill; the prey stand
-# at their team spawn. Rounds are shortened (intro and recap 2 s). Expect: hunter kills
-# scored (100 points each) in both rounds, "round 2: team 1 attacks", 0 desync and 0 match
+# hunts it follows the navmesh to the nearest living player of the other team pressing kill;
+# the prey stand at their spawn. Rounds are shortened (intro and recap 2 s). Expect: hunter kills
+# scored (100 points each; 2026-11-03: 4 in round 1, e.g. teams [400, 0]), 0 desync and 0 match
 # desync on all four clients. Binds port 7953 (escort.sh 7951, assassinate.sh 7952).
 # Run from the repo root after cargo build --release.
 export ACBMP_SCHEMAS=~/Music/anvilforge-py/src/anvilforge/schemas ACBMP_MULTI=~/Music/ACB/multi ACBMP_EXE=~/Music/ACB/ACBMP.exe
