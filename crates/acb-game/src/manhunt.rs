@@ -26,45 +26,64 @@ pub const RADIUS: f32 = 20.0;
 pub const BONUS: [u32; 4] = [10, 20, 30, 50];
 
 /// One prey's hide bonus timer (`GBrick_BlendedScore` +0x6c state, +0x70
-/// timer).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// timer), counted in whole sim ticks so peers agree exactly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Hide {
     #[default]
     Idle,
-    /// Hidden, waiting [`START_INTERVAL`]; seconds left.
-    Starting(f32),
-    /// Paying every [`TIME_INTERVAL`]; seconds to the next bonus.
-    Paying(f32),
-    /// Left the hiding after a bonus; seconds of [`COOLDOWN_INTERVAL`] left.
-    Cooldown(f32),
+    /// Hidden, waiting [`START_INTERVAL`]; ticks left.
+    Starting(u32),
+    /// Paying every [`TIME_INTERVAL`]; ticks to the next bonus.
+    Paying(u32),
+    /// Left the hiding after a bonus; ticks of [`COOLDOWN_INTERVAL`] left.
+    Cooldown(u32),
+}
+
+/// Seconds to whole sim ticks.
+fn ticks(secs: f32) -> u32 {
+    crate::mode::ticks(secs)
 }
 
 impl Hide {
-    /// Advances by `dt` with the prey `hidden` (hiding spot or blended, not
-    /// being killed, alive: `GBrick_BlendedScore::IsHidden` 012d2890) and
-    /// `mates` other hidden prey within [`RADIUS`]: the points earned this
-    /// step (`Update` 0130f28e, `AwardBonus` 012fd80a).
-    pub fn step(&mut self, dt: f32, hidden: bool, mates: usize) -> u32 {
-        let award = || BONUS[mates.min(BONUS.len() - 1)];
-        match *self {
-            Hide::Idle if hidden => *self = Hide::Starting(START_INTERVAL - dt),
-            Hide::Idle => {}
-            Hide::Starting(_) if !hidden => *self = Hide::Idle,
-            Hide::Paying(_) if !hidden => *self = Hide::Cooldown(COOLDOWN_INTERVAL - dt),
-            Hide::Cooldown(t) if !hidden => *self = if t - dt <= 0.0 { Hide::Idle } else { Hide::Cooldown(t - dt) },
-            Hide::Starting(t) | Hide::Paying(t) | Hide::Cooldown(t) => {
-                if t - dt <= 0.0 {
-                    *self = Hide::Paying(TIME_INTERVAL);
-                    return award();
-                }
-                *self = match *self {
-                    Hide::Starting(_) => Hide::Starting(t - dt),
-                    Hide::Paying(_) => Hide::Paying(t - dt),
-                    _ => Hide::Cooldown(t - dt),
-                };
-            }
+    /// Advances one sim tick with the prey `hidden` (hiding spot or
+    /// blended, not being killed, alive: `GBrick_BlendedScore::IsHidden`
+    /// 012d2890) and `mates` other hidden prey within [`RADIUS`]: the points
+    /// earned this tick (`Update` 0130f28e, `AwardBonus` 012fd80a).
+    pub fn step(&mut self, hidden: bool, mates: usize) -> u32 {
+        let award = BONUS[mates.min(BONUS.len() - 1)];
+        let (next, points) = match *self {
+            Hide::Idle if hidden => (Hide::Starting(ticks(START_INTERVAL) - 1), 0),
+            Hide::Idle => (Hide::Idle, 0),
+            Hide::Starting(_) if !hidden => (Hide::Idle, 0),
+            Hide::Paying(_) if !hidden => (Hide::Cooldown(ticks(COOLDOWN_INTERVAL) - 1), 0),
+            Hide::Cooldown(t) if !hidden => (if t <= 1 { Hide::Idle } else { Hide::Cooldown(t - 1) }, 0),
+            Hide::Starting(t) | Hide::Paying(t) | Hide::Cooldown(t) if t <= 1 => (Hide::Paying(ticks(TIME_INTERVAL)), award),
+            Hide::Starting(t) => (Hide::Starting(t - 1), 0),
+            Hide::Paying(t) => (Hide::Paying(t - 1), 0),
+            Hide::Cooldown(t) => (Hide::Cooldown(t - 1), 0),
+        };
+        *self = next;
+        points
+    }
+
+    /// Wire form: (state 0..=3, ticks).
+    pub fn to_parts(self) -> (u8, u32) {
+        match self {
+            Hide::Idle => (0, 0),
+            Hide::Starting(t) => (1, t),
+            Hide::Paying(t) => (2, t),
+            Hide::Cooldown(t) => (3, t),
         }
-        0
+    }
+
+    /// Inverse of [`Hide::to_parts`].
+    pub fn from_parts(state: u8, t: u32) -> Hide {
+        match state {
+            1 => Hide::Starting(t),
+            2 => Hide::Paying(t),
+            3 => Hide::Cooldown(t),
+            _ => Hide::Idle,
+        }
     }
 }
 
@@ -78,10 +97,8 @@ pub fn mates_near(at: Vec3, others: &[Vec3]) -> usize {
 mod tests {
     use super::*;
 
-    const DT: f32 = 1.0 / 60.0;
-
     fn run(h: &mut Hide, secs: f32, hidden: bool, mates: usize) -> u32 {
-        (0..(secs / DT).round() as usize).map(|_| h.step(DT, hidden, mates)).sum()
+        (0..ticks(secs)).map(|_| h.step(hidden, mates)).sum()
     }
 
     #[test]
@@ -116,6 +133,10 @@ mod tests {
         run(&mut h, 0.5, true, 0);
         run(&mut h, 0.1, false, 0);
         assert_eq!(h, Hide::Idle);
+        for x in [Hide::Idle, Hide::Starting(3), Hide::Paying(7), Hide::Cooldown(9)] {
+            let (s, t) = x.to_parts();
+            assert_eq!(Hide::from_parts(s, t), x);
+        }
     }
 
     #[test]

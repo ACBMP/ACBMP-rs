@@ -16,7 +16,8 @@ pub const MAGIC: [u8; 2] = *b"AB";
 /// acquire events.
 /// 10: Assassinate kill bonuses: bonus state in `GameState`, Bonus and
 /// BloodBath events.
-/// 12: Manhunt: the Escort rules byte is 2 (team rules as Escort, no VIPs).
+/// 12: Manhunt: the Escort rules byte is 2 (team rules as Escort, no VIPs),
+/// hide bonus timers in `GameState`.
 pub const VERSION: u8 = 12;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
@@ -478,8 +479,11 @@ pub struct GameState {
     pub escort: Option<EscortState>,
     /// Assassinate only: every player's acquisition (empty otherwise).
     pub acquire: Vec<AcquireState>,
-    /// Assassinate only: kill bonus state.
+    /// Assassinate and Manhunt: kill bonus state.
     pub bonus: Option<BonusState>,
+    /// Manhunt only: every player's hide bonus timer (state 0..=3, ticks;
+    /// `acb_game::manhunt::Hide`); empty otherwise.
+    pub hide: Vec<(u8, u16)>,
 }
 
 /// Assassinate kill bonus state (`acb_game::bonus::Tracker`; 2 + 6 per
@@ -664,6 +668,11 @@ impl GameState {
             }
             None => w.u8(0),
         }
+        w.u8(self.hide.len() as u8);
+        for &(state, t) in &self.hide {
+            w.u8(state);
+            w.u16(t);
+        }
     }
 
     fn read(r: &mut Reader, players: u8) -> Option<GameState> {
@@ -690,7 +699,9 @@ impl GameState {
                 Some(BonusState { first_blood: f == 2, players, memory })
             }
         };
-        Some(GameState { ticks_left, over, players, escort, acquire, bonus })
+        let n = r.u8()?;
+        let hide = (0..n).map(|_| Some((r.u8()?, r.u16()?))).collect::<Option<_>>()?;
+        Some(GameState { ticks_left, over, players, escort, acquire, bonus, hide })
     }
 }
 
@@ -1252,6 +1263,7 @@ mod tests {
                     AcquireState { focus: NONE, look: 0, memory: vec![(0, 119), (2, 1)], lock: NONE, buttons: 0, released: (0, 299) },
                 ],
                 bonus: Some(BonusState { first_blood: true, players: vec![(180, 1, 3, NONE), (0, NONE, 0, 0)], memory: vec![(1, 0, 599)] }),
+                hide: vec![(0, 0), (2, 299)],
             }),
         }
     }

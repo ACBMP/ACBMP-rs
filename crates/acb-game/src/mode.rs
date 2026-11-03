@@ -822,7 +822,7 @@ impl Match {
         for p in 0..self.hide.len() {
             let others: Vec<Vec3> = (0..self.hide.len()).filter(|&o| o != p && hidden[o] && team[o] == team[p]).map(|o| who[o].pos).collect();
             let mates = if hidden[p] { crate::manhunt::mates_near(who[p].pos, &others) } else { 0 };
-            let points = self.hide[p].step(crate::DT, hidden[p], mates);
+            let points = self.hide[p].step(hidden[p], mates);
             if points > 0 {
                 self.award(p, points, ScoreReason::Hide);
             }

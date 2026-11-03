@@ -1472,6 +1472,7 @@ Full findings: `~/.cache/acbmp-re/findings/mode-manhunt.md`.
   - "Hidden" (`ComputePBHIForPlayer` 011864af, +0x8d) = blended in a crowd group, a hiding spot, or Disguise.
   - Ours: `manhunt::Hide` (state machine from `Update` 0130f28e, `AwardBonus` 012fd80a, `StopBonus` 012ffad6).
     `Match::hide_tick` runs while playing, for a living prey, `Presence.hidden || blended`, not in a kill or stun.
+    The timer counts whole sim ticks and rides in `GameState.hide` (state, ticks) so a rollback restores it.
 - Ours, the plumbing: Manhunt reuses Escort's machinery (`Mode::Escort(Teams)` with `Teams.game`, rounds, team
   scores, team spawn groups, net team state); `World::manhunt` makes no VIPs. Wire: the Start escort byte is 2
   (proto v12). Server `--mode manhunt`; HUD role "prey" and the nearest enemy's distance. Result line

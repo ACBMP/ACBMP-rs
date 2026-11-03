@@ -248,6 +248,14 @@ pub fn game_state(m: &Match) -> GameState {
                 memory: t.memory.iter().map(|k| (k.killer as u8, k.victim as u8, u(k.left))).collect(),
             }
         }),
+        hide: m
+            .hide
+            .iter()
+            .map(|h| {
+                let (state, t) = h.to_parts();
+                (state, t.min(u16::MAX as u32) as u16)
+            })
+            .collect(),
     }
 }
 
@@ -288,6 +296,9 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) -> Vec<usize> {
             t.last_killer[p] = id(last);
         }
         t.memory = b.memory.iter().map(|&(k, v, left)| acb_game::bonus::Memory { killer: k as usize, victim: v as usize, left: left as u32 }).collect();
+    }
+    for (h, &(state, t)) in m.hide.iter_mut().zip(&g.hide) {
+        *h = acb_game::manhunt::Hide::from_parts(state, t as u32);
     }
     g.escort.as_ref().map(|e| apply_escort(m, e)).unwrap_or_default()
 }
