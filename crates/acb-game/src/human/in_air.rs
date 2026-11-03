@@ -191,11 +191,14 @@ pub struct Air {
     /// The drop after a (re)spawn (retail InAirData +0x3b0 ==
     /// [`crate::human::haystack::RESPAWN_DROP`]): no haystack entry.
     pub respawn: bool,
+    /// A targeted jump's target in the open (feet): the fall homes onto it
+    /// ([`home`]).
+    pub home: Option<Vec3>,
 }
 
 impl Air {
     pub fn start(z: f32, delay: Option<f32>) -> Air {
-        Air { start_z: z, time: 0.0, delay, wall_hits: 0, respawn: false }
+        Air { start_z: z, time: 0.0, delay, wall_hits: 0, respawn: false, home: None }
     }
 
     pub fn tick(&mut self, dt: f32) {
@@ -323,6 +326,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn drop_time_matches_free_fall() {
+        assert!((drop_time(3.0, 0.0, 0.0) - (6.0f32 / GRAVITY).sqrt()).abs() < 1e-5);
+        // rising first takes longer; below the target no time left to fall
+        assert!(drop_time(3.0, 0.0, 2.0) > drop_time(3.0, 0.0, 0.0));
+        assert!(drop_time(0.0, 1.0, 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn homing_meets_the_target_at_its_height() {
+        // a sprint (5.5 m/s) off a 10 m roof toward a point 3 m out, 3 m down
+        let dt = 1.0 / 60.0;
+        let target = Vec3::new(0.0, 3.0, 7.0);
+        let (mut pos, mut vel) = (Vec3::new(0.0, 0.0, 10.0), Vec3::new(0.0, 5.5, 0.0));
+        let mut at_height = None;
+        for _ in 0..240 {
+            let v = home(pos, vel, target, dt);
+            vel = v.extend(vel.z - GRAVITY * dt);
+            pos += vel * dt;
+            if at_height.is_none() && pos.z <= target.z {
+                at_height = Some(pos);
+            }
+        }
+        let hit = at_height.unwrap();
+        assert!((hit.truncate() - target.truncate()).length() < 0.1, "{hit:?}");
+        // then straight down
+        assert!((pos.truncate() - hit.truncate()).length() < 0.1, "{pos:?}");
+    }
+
+    #[test]
     fn targeted_arrival() {
         assert_eq!(arrival(1), Arrival::Hang);
         assert_eq!(arrival(0x20000), Arrival::Hang);
@@ -429,4 +461,41 @@ mod tests {
         assert!(!step_off(&[c(Vec3::X, true)], || 5.0));
         assert!(step_off_dir(&[c(steep, true)]).abs_diff_eq(Vec2::X, 1e-6));
     }
+}
+
+/// Gravity of the targeted jump's ballistic part, m/s^2
+/// (`HumanInAir::UpdateMainMain` 01328022 passes -9.81 to [`drop_time`]).
+pub const GRAVITY: f32 = 9.81;
+
+/// Seconds to fall from `z` to `target_z` starting at vertical speed `vz`
+/// (`GetDropTime` 012cf475: (vz + sqrt(vz^2 + 2 g max(z - target_z, 0))) / g).
+pub fn drop_time(z: f32, target_z: f32, vz: f32) -> f32 {
+    let h = (z - target_z).max(0.0);
+    (vz + (vz * vz + 2.0 * GRAVITY * h).sqrt()) / GRAVITY
+}
+
+/// The constant horizontal acceleration that takes `pos` moving at `vel`
+/// onto `target` in `t` seconds (`GetTargettingAcceleration` 01327fdd:
+/// 2 (target - pos - t vel) / t^2).
+pub fn targeting_accel(pos: Vec2, target: Vec2, vel: Vec2, t: f32) -> Vec2 {
+    (target - pos - vel * t) * 2.0 / (t * t)
+}
+
+/// One tick of a targeted jump's ballistic part
+/// (`HumanInAir::UpdateMainMain` 01328022, after the takeoff action): above
+/// the target the horizontal velocity homes onto it so the two meet at the
+/// target's height ([`drop_time`], [`targeting_accel`], applied for at most
+/// the drop time); at or below it the horizontal velocity is zeroed and the
+/// fall goes straight down. Returns the horizontal velocity for this tick;
+/// gravity is the caller's.
+pub fn home(pos: Vec3, vel: Vec3, target: Vec3, dt: f32) -> Vec2 {
+    if pos.z <= target.z {
+        return Vec2::ZERO;
+    }
+    let t = drop_time(pos.z, target.z, vel.z);
+    if t <= 1e-4 {
+        return Vec2::ZERO;
+    }
+    let a = targeting_accel(pos.truncate(), target.truncate(), vel.truncate(), t);
+    vel.truncate() + a * dt.min(t)
 }

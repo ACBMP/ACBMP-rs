@@ -1398,11 +1398,7 @@ guidance edge 1.0-4.5 m over the floor in front of it, deduplicated on a 3 m gri
   one is still taken when nothing else is in reach (rejecting them outright lost 22 walls whose only top
   is behind a canopy). The wall run's hold may stand 0.7 m out from the wall face it hits (was 0.4 m either
   way), for eaves over recessed walls.
-- Leap (ours): freerunning (HP + Legs, the jump gate of `human::jump::freerun`) off an edge with no jump
-  target now jumps instead of walking off: `jump::leap`, the run's speed along the facing (at least
-  `LEAP_MIN_SPEED` 3.5 m/s) and `LEAP_UP` 3.0 m/s up (0.46 m rise), takeoff clip `front 300cm` then the run
-  fall pose; it lands, grabs and hides like a fall. Retail values not measured (no capture yet). Before, any
-  gap whose floor was more than 3.2 m down (or outside the detection polygon) was a plain fall.
+- Leap: replaced by retail FallOffEdge, see "Falling off an edge" below.
 - Step off (ours, as NOTES "Freerun moves" already described): F at a low profile edge stop with no wall below
   to lower onto steps over the edge (to where the floor drops, up to 0.8 m out, wall and fall-box checked)
   and falls at 1.2 m/s. Before, F there did nothing, so a beam end or roof edge without a hold had no way down
@@ -1410,3 +1406,38 @@ guidance edge 1.0-4.5 m over the floor in front of it, deduplicated on a 3 m gri
 - Open: guidance-edge dead ends (a lintel under an overhang with no hold above) stay unclimbable; retail
   freerun up a 1.2 m wall needs Legs (Shift alone bumps), as before.
 
+## Falling off an edge, targeted-jump ballistics (2026-11-03, phase3-fall-off-edge)
+Retail never walks off an edge: `AssassinTaskGround::UpdateGroundMovement` (0166fb1c) calls
+IHumanGround slot 0x137/0x138 `CanFallOffEdge(gap)` / `DoFallOffEdge(gap, f)` with f = 1.0 when its
+high-profile flag (+0x1f64, the flag that also sets `SetMovementType(1)`) is set, else 0.0, when no jump target
+was taken (`GetBestEdgeJumpTargetIndex` -1; the detector `GetJumpTargetListInDirection` 0122626a adds no
+fallback target). IHumanGround slots, from the HumanGround vtable 02c2ab60 (IHumanGround thunk block from byte +0xbc8, entry 754):
+4/6 Can/DoJumpToTarget, 8/9 Can/DoOverHeadJumpToTarget, 0xc/0xd Can/DoJumpImpulsion, 0x18/0x19
+Can/DoEnterWallingVertical, 0x137/0x138 Can/DoFallOffEdge, 0x139 CanUnbalanceOnEdge, 0x13b IsInEdgeStop,
+0x143 CanPullDownOnEdge, 0x22e/0x22f Can/DoEnterLookDown, 0x23b/0x23c Can/DoEnterHayStack.
+- `HumanGround::ExecuteFallOffEdge` (00fd2406): angle a between the gap direction (Gap +0x20) and the facing
+  (both flat). |a| >= 120 deg: backward fall action 0x935ce89e, landing-test delay 12000 ticks (0.4 s), no jump.
+  Else direction = facing (|a| <= 60 deg) or the gap direction turned 60 deg toward the facing; target = feet +
+  dir * (1 + 2 * HumanGround+0x904 * f) - 3 m up; `Human::DoTargetedJump(target, source 0 ground, landing
+  intention 1, front foot)`. +0x904 is the move cycle's normalized anim speed (written 0.2/0.6/1.0 by the
+  Exec*ToMoveCycle transitions, ramped in `UpdateMoveCycleMain` 00fc151a): our `locomotion::anim_speed`.
+  So a sprint lands 3 m out, a run 2.6 m, low profile 1 m, each 3 m down: the `down 300cm` / `down 050cm`
+  clip reaches.
+- Ballistics after the takeoff action (`HumanInAir::UpdateMainMain` 01328022, ~l.1740-1970): velocity = the
+  character controller's (takeoff root motion) when the takeoff item finishes (vz forced to -1 for action
+  0x1120e17b); then each tick, above the target's height: T = `GetDropTime(z, target z, vz, -9.81)` (012cf475:
+  (vz + sqrt(vz^2 + 2 g max(z - tz, 0))) / g), a = `GetTargettingAcceleration` (01327fdd: 2 (target - pos -
+  T v) / T^2, horizontal), dt' = min(dt, T), v += a dt', vz -= 9.81 dt', pos += v dt' + a dt'^2 / 2. At or
+  below the target height the horizontal velocity is zeroed: straight down.
+- During the takeoff action (same function ~l.640-1000) the root is pulled toward the target per tick, the
+  correction clamped to 1 m (10 m in one branch, flag InAirData +0x1fc); not ported yet.
+- Ours (`human::ground::fall_off`, `human::in_air::home`, `jump::fall_off`): the gap direction is the move
+  direction; the ballistic part starts at the edge with the ground velocity (no takeoff root motion, so no
+  rise); the takeoff clip of the jump kind for (reach, -3 m) plays, then the fall pose. The homing runs inside
+  the ordinary fall, so grasp, wall reception (which drops the target), haystacks, beams and landing classes
+  all apply. Low profile still stops at drops over 2 m (EdgeStop), so its 1 m fall-off is seen on 0.53-2 m
+  drops. Replaces `jump::leap` (LEAP_MIN_SPEED 3.5 m/s, LEAP_UP 3.0 m/s) and the plain walk-off fall.
+- Test: `tests/jump_map.rs` `fall_off_an_edge_by_profile` (San Donato roof edge x -13.1): sprint lands
+  3.0 m out, Shift run 2.6 m, no rise. Gates, kills, duel, escort unchanged.
+- Next: port the same ballistics into `jump::Flight` (targeted jumps onto tops and across gaps still warp the
+  clip path, NOTES "Freerun jumps") and the takeoff correction.
