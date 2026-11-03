@@ -69,7 +69,9 @@ Work one mechanic at a time: find it in the binary, port it, test it, run the re
    updated header.
 4. `tools/kills.sh`: 8 granted.
 5. `tools/duel.sh`: a 100, b 0, 0 desync.
-6. `tools/escort.sh`: [270, 130], 0 desync. It binds port 7951, so never run two at once.
+6. `tools/escort.sh`: 0 desync and 0 match desync on all clients, "match over". The team scores depend on
+   netsim timing and vary run to run ([270, 130], [270, 110] and [290, 30] seen). It binds port 7951, so never run
+   two at once.
    Sim cost matters: clients replay falling ticks, and a slow query breaks escort (see "Phase 3 leftovers",
    pilotis).
 
@@ -96,9 +98,8 @@ Retail has two targeted-jump paths:
 1. ~~Hang eject~~: done in phase3-ledge-release (NOTES "Hang rebound"). The back eject is the retail
    rebound, a targeted jump (not ballistic). Still open: `ReleaseToTarget` 00d8ca6e (a hang drop onto a
    target below, ballistic). Ours drops and catches while falling.
-2. **`Flight` warp fidelity.** `HumanInAir::UpdateMainMain` 01328022 ~l.640-1000: progress
-   (t + len1)/(len1 + len2) over takeoff + air clips (`Action::GetTotalDisplacementMatrix`). The per-tick
-   correction toward the re-read target is clamped to 1 m (10 m with +0x1fc). Our warp shape is ours.
+2. ~~`Flight` warp~~: done (NOTES "Flight warp"). The end error is linear in time over the clips. Moving footholds
+   (the per-tick re-read correction) are not modelled, since San Donato has none.
 3. **Brain edge commands.** `AssassinTaskGround::UpdateGroundMovement` 0166fb1c: `UnbalanceOnEdge` and
    `IsNarrowEdge` 00fd1e26 decide EdgeStop and NarrowObject. Ours still triggers edge stop by low profile.
 4. **NarrowObject FreeRun as a state**: beam running, beam entry clip, and jumps and walling from beams

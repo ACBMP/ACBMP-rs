@@ -515,9 +515,10 @@ its exact byte length and by key continuity (`acbmp animstats`).
     0.267 / 0.4 / 0.733 s), down 050 -3.40 m 0.5 m 0.667 s, down 300 -3.0 m
     2.5 m 0.533 s, down 550 -3.01 m 5.22 m 0.867 s. `Flight` blends the two
     nearest direction classes by height and the distance classes by
-    distance, warps the end error (horizontal linear, vertical early up /
-    late down), adds sqrt(2h/g) for extra drop; closed form in elapsed
-    time, so 60 Hz tick and --fps 144 agree exactly.
+    distance, warps the end error linearly in time on all axes over the
+    clips' length (retail, see "Flight warp" below; until 2026-11-03 the
+    vertical was eased and an extra drop added sqrt(2h/g)); closed form in
+    elapsed time, so 60 Hz tick and --fps 144 agree exactly.
   - Up onto a top (rise > STEP): the clips' root rises in a straight line
     and reaches the top only at the end, so the feet cut the edge (0.52 m
     deep on the parapet). Instead the vertical is a ballistic arc to 0.1 m
@@ -1496,3 +1497,24 @@ Retail's back eject is the rebound, a ground-style targeted jump. It is not one 
   - Test `tests/jump_map.rs` `rebound_targets`.
 - Check in Wave C: how far a retail rebound off a tall wall really goes (8 m by this reading).
 - Next: `Flight` warp fidelity (PROMPT target 2).
+
+## Flight warp (2026-11-03, phase3-ledge-release)
+- Retail `Human::ComputeTargetedJumpData` (00d04b86):
+  - InAirData +0x1e4 / +0x1e8 = the takeoff and air action lengths; +0x1ec / +0x1f0 are the second pair.
+  - +0x50 = the start matrix; +0x90 = the air action's displacement.
+  - +0xe0 = target - (start x takeoff total displacement x air total displacement), i.e. where the clips end.
+  - +0x1fb = rotate toward the target's orientation.
+- `HumanInAir::UpdateMainMain` (01328022, l.640-1110):
+  - The root is start x the clips' displacement so far, plus progress x (+0xe0 + correction).
+  - progress = t / (len1 + len2) in the takeoff and (t + len1) / (len1 + len2) in the air clip, capped at 1.
+  - So the end error is spread linearly in time, on every axis, and the flight lasts exactly the clips.
+  - The correction is the foothold entity's movement since takeoff (target re-read from its matrix), clamped to
+    1 m per tick (10 m with +0x1fc, which also offsets the target by half of +0x2b0). San Donato has no moving
+    footholds, so ours has none.
+  - With +0x1fb the orientation slerps toward the target's by the action's progress.
+- Ours (`jump::Flight::new`): the vertical error is now linear in time like the horizontal, with no extra fall
+  time (was: ease-out up / ease-in down, plus sqrt(2h/g) when ending lower). Still ours: the ballistic arc and
+  `u^lag` hold-back for jumps up onto a top (`edge`). Retail warps the up clips straight through the edge, while
+  our collision checks (`Flight::sink`) need the feet over it.
+- Gates unchanged (flights end on their targets). Sweep, Shift+W: identical. Shift+Space+W: 3 walls end "beam
+  below top" where they ended "partway up" or "still on wall".
