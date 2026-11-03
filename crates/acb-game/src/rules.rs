@@ -818,15 +818,29 @@ pub enum Kind {
     Npc,
 }
 
-/// Team setup of an Escort (teamvip) match: no contracts, the relation
-/// follows from team and role. Retail builds killer loops instead
-/// (`GiveTargetsAndAssassinsToThisVipHunter` 0x012d2570: every enemy
-/// player hunts the hunter, the hunter hunts every VIP;
-/// `GiveTargetsToThisProtector` 0x012d2674: the protector hunts every
+/// Which team game a [`Teams`] match plays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TeamGame {
+    /// Escort (teamvip): hunters kill VIPs, protectors kill hunters.
+    #[default]
+    Escort,
+    /// Manhunt (catsmice): the attacking team hunts every player of the
+    /// other team (retail `GameInfo::SetupTeamLoop_CatsMice` 0117f9d8: a
+    /// killer loop from every hunter to every member of its target team);
+    /// the prey ([`Role::Protector`]) can only stun hunters.
+    Manhunt,
+}
+
+/// Team setup of an Escort (teamvip) or Manhunt (catsmice) match: no
+/// contracts, the relation follows from team and role. Retail builds
+/// killer loops instead (`GiveTargetsAndAssassinsToThisVipHunter`
+/// 0x012d2570: every enemy player hunts the hunter, the hunter hunts every
+/// VIP; `GiveTargetsToThisProtector` 0x012d2674: the protector hunts every
 /// enemy player) and checks them with `IsAssassinFor`; teammates are never
 /// in each other's loops, so there is no friendly fire (our reading).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Teams {
+    pub game: TeamGame,
     /// Team of each player (index = player).
     pub team: Vec<Team>,
     /// The team hunting the VIPs this round.
@@ -842,7 +856,12 @@ pub struct Teams {
 impl Teams {
     /// Players alternate teams by slot (0, 1, 0, 1, ...); team 0 attacks first.
     pub fn alternating(players: usize) -> Teams {
-        Teams { team: (0..players).map(|p| (p % 2) as Team).collect(), attacking_team: 0, vips: Vec::new(), escorted: Vec::new() }
+        Teams { game: TeamGame::Escort, team: (0..players).map(|p| (p % 2) as Team).collect(), attacking_team: 0, vips: Vec::new(), escorted: Vec::new() }
+    }
+
+    /// [`Teams::alternating`] for a Manhunt match.
+    pub fn manhunt(players: usize) -> Teams {
+        Teams { game: TeamGame::Manhunt, ..Teams::alternating(players) }
     }
 
     pub fn role(&self, p: usize) -> Role {
@@ -868,7 +887,23 @@ impl Teams {
         if of == body {
             return Relation::Other;
         }
-        team_relation(self.team[of], self.role(of), self.kind(body), self.attacking_team)
+        match self.game {
+            TeamGame::Escort => team_relation(self.team[of], self.role(of), self.kind(body), self.attacking_team),
+            TeamGame::Manhunt => manhunt_relation(self.team[of], self.role(of), self.kind(body)),
+        }
+    }
+}
+
+/// Manhunt's kill/stun relation: hunter -> enemy player = Target (it holds
+/// every prey as a contract, `SetupTeamLoop_CatsMice`), prey -> hunter =
+/// Pursuer (stun only; retail scores it as a humiliation), teammates =
+/// Other, crowd = Npc.
+pub fn manhunt_relation(of_team: Team, of_role: Role, other: Kind) -> Relation {
+    match (of_role, other) {
+        (_, Kind::Player(t)) if t == of_team => Relation::Other,
+        (Role::Hunter, Kind::Player(_)) => Relation::Target,
+        (Role::Protector, Kind::Player(_)) => Relation::Pursuer,
+        (_, Kind::Npc | Kind::Vip | Kind::Escorted) => Relation::Npc,
     }
 }
 

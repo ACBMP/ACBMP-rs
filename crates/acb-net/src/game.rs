@@ -77,8 +77,13 @@ pub fn load_match(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTr
         match escort {
             Some(e) => {
                 anyhow::ensure!(e.team.len() == slots.len(), "escort: {} teams for {} slots", e.team.len(), slots.len());
-                let teams = acb_game::rules::Teams { team: e.team.clone(), attacking_team: e.attacking, vips: Vec::new(), escorted: Vec::new() };
-                world.escort(archive, builtins, teams, cfg, spawns)?;
+                let game = if e.manhunt { acb_game::rules::TeamGame::Manhunt } else { acb_game::rules::TeamGame::Escort };
+                let teams = acb_game::rules::Teams { game, team: e.team.clone(), attacking_team: e.attacking, vips: Vec::new(), escorted: Vec::new() };
+                if e.manhunt {
+                    world.manhunt(archive, teams, cfg, spawns);
+                } else {
+                    world.escort(archive, builtins, teams, cfg, spawns)?;
+                }
                 if let Some(m) = &mut world.mode {
                     let n = m.rounds.as_ref().map_or(2, |r| r.team_score.len());
                     m.rounds = Some(acb_game::rounds::Rounds::new(n, e.intro, cfg.time_limit, e.recap));

@@ -172,6 +172,8 @@ pub enum ScoreReason {
     Checkpoint,
     /// Escort: a VIP reached its way's end (protecting team).
     Protect,
+    /// Manhunt: a prey's hide bonus ([`crate::manhunt`]).
+    Hide,
 }
 
 /// `GBrick_Escape` chase phases (`GetNewPhase` 0x00c0f710): in sight or
@@ -327,6 +329,8 @@ pub struct Match {
     pub acquire: Vec<Acquire>,
     /// Assassinate: kill bonus and BloodBath state (others: `None`).
     pub bonus: Option<crate::bonus::Tracker>,
+    /// Manhunt: per player, its hide bonus timer (others: empty).
+    pub hide: Vec<crate::manhunt::Hide>,
 }
 
 /// Seconds to whole ticks.
@@ -341,7 +345,8 @@ impl Match {
     pub fn escort(teams: Teams, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
         let n = teams.team.iter().copied().chain([teams.attacking_team]).max().map_or(2, |t| t as usize + 1).max(2);
         let rounds = crate::rounds::Rounds::retail(n, config.time_limit);
-        Match { mode: Mode::Escort(teams.clone()), rounds: Some(rounds), ..Match::new(teams.team.len(), config, spawns) }
+        let hide = if teams.game == crate::rules::TeamGame::Manhunt { vec![crate::manhunt::Hide::Idle; teams.team.len()] } else { Vec::new() };
+        Match { mode: Mode::Escort(teams.clone()), rounds: Some(rounds), hide, ..Match::new(teams.team.len(), config, spawns) }
     }
 
     /// Escort: whether a round is being played (Duel: always).
@@ -416,6 +421,7 @@ impl Match {
             rounds: None,
             acquire: Vec::new(),
             bonus: None,
+            hide: Vec::new(),
         }
     }
 
@@ -768,6 +774,7 @@ impl Match {
         if self.ticks >= ticks(self.config.start_delay) && self.mode == Mode::Assassinate {
             self.acquire_tick(who, sight);
         }
+        self.hide_tick(who);
         if self.bonus.is_some() {
             let running: Vec<bool> = who.iter().map(|w| w.running).collect();
             let alive: Vec<bool> = (0..who.len()).map(|p| self.alive(p)).collect();
@@ -788,6 +795,31 @@ impl Match {
             self.events.push(MatchEvent::Over { winner });
         }
         back
+    }
+
+    /// Manhunt: the prey's hide bonuses (`GBrick_BlendedScore::Update`
+    /// 0130f28e): a living prey in a hiding spot or blended, and not in a
+    /// kill or stun, earns [`crate::manhunt::BONUS`] by the hidden prey of
+    /// its team within [`crate::manhunt::RADIUS`] (itself included) while a
+    /// round is played.
+    fn hide_tick(&mut self, who: &[Presence]) {
+        let Mode::Escort(teams) = &self.mode else { return };
+        if self.hide.is_empty() {
+            return;
+        }
+        let playing = self.playing();
+        let hidden: Vec<bool> = (0..self.hide.len())
+            .map(|p| playing && teams.role(p) == crate::rules::Role::Protector && self.alive(p) && who.get(p).is_some_and(|w| (w.hidden || w.blended) && !w.conflict))
+            .collect();
+        let team = teams.team.clone();
+        for p in 0..self.hide.len() {
+            let others: Vec<Vec3> = (0..self.hide.len()).filter(|&o| o != p && hidden[o] && team[o] == team[p]).map(|o| who[o].pos).collect();
+            let mates = if hidden[p] { crate::manhunt::mates_near(who[p].pos, &others) } else { 0 };
+            let points = self.hide[p].step(crate::DT, hidden[p], mates);
+            if points > 0 {
+                self.award(p, points, ScoreReason::Hide);
+            }
+        }
     }
 
     /// Escort: the round clock. A round's play starts with a fresh VIP
@@ -1018,6 +1050,49 @@ mod tests {
         // hunter 2 stuns protector 3 (its pursuer)
         m.on_action(2, 3, crate::kill::STUN);
         assert_eq!(m.score[2], STUN_POINTS);
+    }
+
+    /// Manhunt: team 0 hunts every player of team 1 (kills score), the
+    /// prey stun hunters (humiliation) and earn the hide bonus while hidden,
+    /// more with a hidden teammate within 20 m; round 2 swaps the roles.
+    #[test]
+    fn manhunt_hunters_kill_prey_hide_and_stun() {
+        let spawns = vec![(Vec3::ZERO, 0.0)];
+        let cfg = MatchConfig { time_limit: 10.0, score_limit: 0, respawn_delay: 1.0, start_delay: 0.0 };
+        let mut m = Match::escort(Teams::manhunt(4), cfg, spawns);
+        m.rounds = Some(crate::rounds::Rounds::new(2, 0.0, 10.0, 1.0));
+        let idle: Vec<Presence> = (0..4).map(|i| Presence::at(Vec3::new(i as f32 * 30.0, 0.0, 0.0))).collect();
+        m.tick(&idle, &|_, _| true);
+        assert!(m.playing());
+        assert_eq!(m.relation(0, 1), Relation::Target);
+        assert_eq!(m.relation(0, 3), Relation::Target);
+        assert_eq!(m.relation(1, 0), Relation::Pursuer);
+        assert_eq!(m.relation(0, 2), Relation::Other);
+        assert_eq!(m.relation(1, 9), Relation::Npc);
+        // prey 1 and 3 hidden 10 m apart: 20 points each after 1 s, again 5 s later
+        let mut who: Vec<Presence> = [0.0, 30.0, 60.0, 40.0].iter().map(|&x| Presence::at(Vec3::new(x, 0.0, 0.0))).collect();
+        who[1].hidden = true;
+        who[3].blended = true;
+        who[0].hidden = true; // a hidden hunter earns nothing
+        for _ in 0..ticks(1.1) {
+            m.tick(&who, &|_, _| true);
+        }
+        assert_eq!((m.score[0], m.score[1], m.score[3]), (0, 20, 20));
+        assert_eq!(m.rounds.as_ref().unwrap().team_score, vec![0, 40]);
+        // hunter 0 kills prey 1; prey 3 stuns hunter 2
+        m.on_action(0, 1, 0);
+        assert_eq!(m.score[0], KILL_POINTS);
+        m.on_action(3, 2, crate::kill::STUN);
+        assert_eq!(m.score[3], 20 + STUN_POINTS);
+        // a prey cannot score a kill on a hunter
+        m.on_action(3, 0, 0);
+        assert_eq!(m.score[3], 20 + STUN_POINTS);
+        // round 2: team 1 hunts
+        while m.rounds.as_ref().unwrap().round == 0 {
+            m.tick(&who, &|_, _| true);
+        }
+        assert_eq!(m.relation(1, 0), Relation::Target);
+        assert_eq!(m.relation(0, 1), Relation::Pursuer);
     }
 
     /// Retail VIP rule (`SortByVIPdistance` 0x0110fad8): beyond 35 m of

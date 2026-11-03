@@ -324,7 +324,8 @@ fn assassin_hud(world: &World, me: usize, rel: impl Fn(f32) -> f32) -> Option<hu
 
 /// Controls from held and tapped keys and the camera yaw.
 /// `--input` key `vip`: while player `me` hunts in an Escort round, the
-/// camera yaw that runs it at the nearest targetable VIP.
+/// camera yaw that runs it at the nearest targetable VIP (Manhunt: at the
+/// nearest living player of the hunted team).
 fn vip_chase(world: &World, me: usize) -> Option<f32> {
     let m = world.mode.as_ref()?;
     let acb_game::mode::Mode::Escort(teams) = &m.mode else { return None };
@@ -332,6 +333,13 @@ fn vip_chase(world: &World, me: usize) -> Option<f32> {
         return None;
     }
     let p = world.players.get(me)?.pos;
+    if teams.game == acb_game::rules::TeamGame::Manhunt {
+        let to = (0..teams.team.len())
+            .filter(|&o| teams.team[o] != teams.attacking_team && m.alive(o))
+            .filter_map(|o| world.players.get(o).map(|q| q.pos - p))
+            .min_by(|a, b| a.length_squared().total_cmp(&b.length_squared()))?;
+        return Some(to.y.atan2(to.x));
+    }
     let v = m.vips.as_ref()?;
     let targets = v.targets();
     let to = v

@@ -68,6 +68,26 @@ edge spot overlap. `tools/escort.sh` runs a 2v2 on one machine with 5 % loss and
 150 ms round trip; its viewers use the test input `--input "0=vip"` (while
 your team hunts, run at the nearest VIP pressing kill).
 
+Manhunt (catsmice, 2v2 up to 4v4, two rounds of 5 minutes, roles swap):
+
+    ./target/release/acbmp serve $M/DataPC_AC2MP_SanDonato.forge --players 4 --mode manhunt
+    # clients exactly as for the duel (four of them)
+
+Teams, spawn groups, rounds and the flags (`--teams`, `--attacking`, `--intro`,
+`--recap`, `--time-limit` per round) work as in Escort, without VIPs. The
+attacking team hunts every player of the other team: a kill scores 100 (+100 for
+an air or drop kill, +200 from a haystack). The prey cannot kill hunters, only
+stun them (200). Prey also score by hiding: in a hiding spot or blended in a
+crowd group, the first bonus comes after 1 s and then one every 5 s: 10 points
+alone, 20 / 30 / 50 with 1 / 2 / 3 hidden teammates within 20 m. After you leave
+your spot, hiding pays again once 7 s have passed. Team totals win. The HUD reads e.g.
+`team 1 prey | hunter 24.3 m | team 0 100 [team 1 40] | round 1/2 play 3:12`:
+your role (hunter or prey), the distance to the nearest living enemy player
+(`target` when hunting, `hunter` when hunted), team totals, round and clock.
+`tools/manhunt.sh` runs a 2v2 on one machine (port 7953); its straight-line test
+bots rarely reach the other team across San Donato, so it checks the rounds,
+roles and sync, not kills.
+
 Assassinate (free-for-all, 10 min, any player count):
 
     ./target/release/acbmp serve $M/DataPC_AC2MP_SanDonato.forge --players 4 --mode assassinate

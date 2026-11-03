@@ -658,11 +658,25 @@ impl Client {
         let role = t.team.get(me).map(|_| t.role(me));
         let mut s = match (my_team, role) {
             (Some(tm), Some(Role::Hunter)) => format!("team {tm} hunter"),
+            (Some(tm), Some(Role::Protector)) if t.game == acb_game::rules::TeamGame::Manhunt => format!("team {tm} prey"),
             (Some(tm), Some(Role::Protector)) => format!("team {tm} protector"),
             _ => "spectator".into(),
         };
         if let Some(rs) = m.respawn.get(me).copied().flatten() {
             s += &format!(" | respawn in {:.1} s", rs as f32 / TICK_HZ as f32);
+        } else if t.game == acb_game::rules::TeamGame::Manhunt {
+            // Manhunt: the nearest living enemy player (loc 0x4db40 "Find and
+            // kill your TARGETS." / 0x4db41 "Escape from your HUNTERS.")
+            let p = world.players.get(me).map(|p| p.pos).unwrap_or_default();
+            let nearest = (0..t.team.len())
+                .filter(|&o| Some(t.team[o]) != my_team && m.alive(o))
+                .filter_map(|o| world.players.get(o).map(|q| q.pos.distance(p)))
+                .min_by(f32::total_cmp);
+            let what = if role == Some(Role::Hunter) { "target" } else { "hunter" };
+            s += &match nearest {
+                Some(d) => format!(" | {what} {d:.1} m"),
+                None => format!(" | no {what}"),
+            };
         } else if let Some(v) = &m.vips {
             let p = world.players.get(me).map(|p| p.pos).unwrap_or_default();
             let hunting = role == Some(Role::Hunter);

@@ -16,7 +16,8 @@ pub const MAGIC: [u8; 2] = *b"AB";
 /// acquire events.
 /// 10: Assassinate kill bonuses: bonus state in `GameState`, Bonus and
 /// BloodBath events.
-pub const VERSION: u8 = 11;
+/// 12: Manhunt: the Escort rules byte is 2 (team rules as Escort, no VIPs).
+pub const VERSION: u8 = 12;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -604,6 +605,9 @@ pub struct EscortRules {
     pub attacking: u8,
     pub intro: f32,
     pub recap: f32,
+    /// Manhunt (catsmice) instead of Escort: same teams and rounds, the
+    /// attacking team hunts the other team's players, no VIPs.
+    pub manhunt: bool,
 }
 
 impl GameState {
@@ -885,7 +889,7 @@ impl Msg {
                 w.u32(crowd.seed);
                 match escort {
                     Some(e) => {
-                        w.u8(1);
+                        w.u8(if e.manhunt { 2 } else { 1 });
                         w.u8(e.team.len() as u8);
                         e.team.iter().for_each(|t| w.u8(*t));
                         w.u8(e.attacking);
@@ -968,10 +972,11 @@ impl Msg {
                 }
                 let rules = if r.u8()? != 0 { Some(read_config(&mut r)?) } else { None };
                 let crowd = CrowdConfig { count: r.u16()?, seed: r.u32()? };
-                let escort = if r.u8()? != 0 {
+                let kind = r.u8()?;
+                let escort = if kind != 0 {
                     let n = r.u8()?;
                     let team = (0..n).map(|_| r.u8()).collect::<Option<_>>()?;
-                    Some(EscortRules { team, attacking: r.u8()?, intro: r.f32()?, recap: r.f32()? })
+                    Some(EscortRules { team, attacking: r.u8()?, intro: r.f32()?, recap: r.f32()?, manhunt: kind == 2 })
                 } else {
                     None
                 };
@@ -1279,7 +1284,7 @@ mod tests {
                 slots: vec![],
                 rules: Some(MatchConfig { time_limit: 120.0, score_limit: 500, respawn_delay: 5.0, start_delay: 3.0 }),
                 crowd: CrowdConfig { count: 40, seed: 0xdead_beef },
-                escort: Some(EscortRules { team: vec![0, 1, 0, 1], attacking: 0, intro: 2.0, recap: 3.0 }),
+                escort: Some(EscortRules { team: vec![0, 1, 0, 1], attacking: 0, intro: 2.0, recap: 3.0, manhunt: true }),
                 assassinate: false,
             },
             Msg::Snapshot(s),
