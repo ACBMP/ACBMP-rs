@@ -529,20 +529,39 @@ pub(crate) fn drive(
                 p.vel = Vec3::ZERO;
                 p.loco.resume(pose.clone());
             }
-            Outcome::Drop(v) | Outcome::Eject(v) => {
-                if matches!(outcome, Outcome::Eject(_)) {
-                    p.catch_block = EJECT_NO_CATCH;
-                    if crate::trace() {
-                        eprintln!("eject at {:.2?} v {:.2?}", p.pos.to_array(), v.to_array());
-                    }
-                }
+            Outcome::Drop(v) => {
                 p.climb = None;
                 p.loco.resume(pose.clone());
                 p.loco.start_fall();
                 p.vel = v;
                 p.fall_from = p.pos.z;
-                let delay = if matches!(outcome, Outcome::Eject(_)) { EJECT_NO_CATCH } else { 0.0 };
-                p.air = Air::start(p.pos.z, Some(delay));
+                p.air = Air::start(p.pos.z, Some(0.0));
+            }
+            Outcome::Eject(away) => {
+                // retail rebound (`HumanLedge::ProcessReboundTransition`
+                // 00d8d890 -> `Human::DoTargetedJumpOrFarthestJump`): a
+                // targeted jump to the best jump target along `away` (ours:
+                // the freerun gap search, a hang beating a floor more than
+                // 1.75 m lower), else to the farthest foothold 8 m out and
+                // 3 m down (`human::ledge::farthest`), flown like a fall
+                // off an edge
+                p.climb = None;
+                p.loco.resume(pose.clone());
+                p.catch_block = EJECT_NO_CATCH;
+                let floor = jump::target(ground, clips, p.pos, away, true);
+                let low = |t: &(Vec3, jump::Flight, bool)| t.0.z < p.pos.z - 1.75;
+                let to = if floor.as_ref().is_none_or(low) { jump::hang_target(ground, clips, p.pos, away).or(floor) } else { floor };
+                match to {
+                    Some((target, flight, _)) => {
+                        let why = if flight.grab.is_some() { "rebound to a hang" } else { "rebound" };
+                        jump::take_off(p, clips, sk, target, flight, why);
+                    }
+                    None => {
+                        let target = human::ledge::farthest(p.pos, away);
+                        jump::fall_off(p, clips, sk, away * crate::climb::EJECT_SPEED, target);
+                        p.air.delay = Some(EJECT_NO_CATCH);
+                    }
+                }
             }
         }
         bodies[me].show(p.entity(), pose);

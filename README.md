@@ -127,9 +127,13 @@ Controls (on foot):
 | Esc | quit |
 
 On a wall: W/S/A/D climb up/down/left/right (fixed directions, not camera
-relative); F + S or F alone jumps back off the wall, F + A/D jumps sideways
-across a gap, F + W leaps to a hold above; Shift + A/D at the end of an edge
-also side-jumps. W at the top edge pulls up over it onto the floor behind (also onto narrow tops: wall tops, posts, centred) when there is room to stand there. A fall grabs a hold up to 1.2 m ahead only in its first
+relative); F + W, or F alone, leaps to a hold 0.9-2.6 m above; F + A/D jumps
+sideways across a gap to a hold; Shift + A/D at the end of an edge also
+side-jumps. With no hold for those, and with F + S, you push off the wall
+(retail rebound): a jump out to the best landing behind you (a floor up to
+3 m lower, or a hang across), or with none in reach out 8 m and 3 m down, then
+straight down (F + A/D push off almost along the wall, 89 deg from straight
+out). W at the top edge pulls up over it onto the floor behind (also onto narrow tops: wall tops, posts, centred) when there is room to stand there. A fall grabs a hold up to 1.2 m ahead only in its first
 2 m (retail); after that you go down. Drops under 0.53 m are stepped down,
 deeper ones fallen off, unless something blocks the space just past the
 edge (a railing, a wall, a low overhang: you stay on the edge). A short

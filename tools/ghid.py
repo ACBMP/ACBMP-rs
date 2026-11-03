@@ -11,7 +11,10 @@ Decompiles are cached in ~/.cache/acbmp-re/dec/<program>/<addr>.c with every `fu
 by its symbol name, so nobody decompiles the same function twice. Read them with grep / sed -n ranges.
 Ghidra: headless GhidraMCP on 127.0.0.1:8090 (see HANDOFF.md). Mac addresses = Ghidra addresses.
 """
-import argparse, bisect, json, os, re, subprocess, sys, urllib.parse, urllib.request
+import os, sys
+# tools/dis.py would shadow the stdlib `dis` that argparse imports (Python 3.14)
+sys.path = [p for p in sys.path if os.path.abspath(p or '.') != os.path.dirname(os.path.abspath(__file__))]
+import argparse, bisect, json, re, subprocess, urllib.parse, urllib.request
 
 CACHE = os.path.expanduser('~/.cache/acbmp-re')
 SYMS = os.path.join(CACHE, 'syms.txt')

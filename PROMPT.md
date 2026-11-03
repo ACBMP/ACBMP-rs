@@ -37,7 +37,8 @@ Work one mechanic at a time: find it in the binary, port it, test it, run the re
 - RE: the Mac build `~/Music/acbmp_sf.exe` has full symbols, and its addresses are the Ghidra addresses.
   Start the headless GhidraMCP on :8090 (HANDOFF.md "Paths"), then load `/acbmp_sf.exe`. The user can't run
   Ghidra; you manage it, and stop it when done.
-- Use `tools/ghid.py` for everything RE:
+- Use `tools/ghid.py` for everything RE (`python3 tools/ghid.py`; elsewhere in tools/ run Python with `-P`, since
+  `tools/dis.py` shadows the stdlib `dis` on Python 3.14):
   - `sym REGEX` finds a symbol;
   - `dec ADDR|SYMBOL` decompiles into the cache `~/.cache/acbmp-re/dec/<prog>/<addr>.c` and prints only the
     path;
@@ -63,7 +64,7 @@ Work one mechanic at a time: find it in the binary, port it, test it, run the re
 ## Regression (after every change, in this order)
 1. `cargo build --release`: the scripts run `./target/release` binaries and don't build.
 2. `cargo test --release` with the data env vars set.
-3. `tools/gates.sh`: 10 runs at 60 and 144 fps. The expected final positions are in the script header (for
+3. `tools/gates.sh`: 11 runs at 60 and 144 fps. The expected final positions are in the script header (for
    example parapet -10.09 -0.36 6.59, sidejump speed 1.57). A changed gate needs a reason in NOTES, plus an
    updated header.
 4. `tools/kills.sh`: 8 granted.
@@ -85,15 +86,16 @@ Ported:
 - retail FallOffEdge: a targeted jump to 1 + 2·anim speed m out (high profile) or 1 m (low profile), 3 m
   down, within a 60° cone, with a backward fall at 120° or more;
 - retail targeted-jump ballistics (`human::in_air::home`: `GetDropTime` + `GetTargettingAcceleration`).
+- retail hang rebound (back eject): leap first, stick cones, best target or the farthest foothold 8 m out
+  (`human::ledge`).
 Retail has two targeted-jump paths:
 - clip warp onto the target: ground jumps, approximated by our `jump::Flight`;
 - ballistic homing: only when InAirData +0x1fa is set, for ledge, ladder and leap-of-faith releases.
 
 ## Next targets (in suggested order)
-1. **Hang eject and release ballistics.** `HumanLedge::ReleaseToInAir` 00d86b02 and `ReleaseToTarget`
-   00d8cabb set +0x1fa, so they are true ballistic jumps. Port their targets and velocities onto
-   `human::in_air::home`. Ours is a fixed 1.71 m/s fall off the wall (NOTES "Freerun moves"); the gate
-   `eject` ends -14.86 43.99 2.25 today and will move, so justify the new value.
+1. ~~Hang eject~~: done in phase3-ledge-release (NOTES "Hang rebound"). The back eject is the retail
+   rebound, a targeted jump (not ballistic). Still open: `ReleaseToTarget` 00d8ca6e (a hang drop onto a
+   target below, ballistic). Ours drops and catches while falling.
 2. **`Flight` warp fidelity.** `HumanInAir::UpdateMainMain` 01328022 ~l.640-1000: progress
    (t + len1)/(len1 + len2) over takeoff + air clips (`Action::GetTotalDisplacementMatrix`). The per-tick
    correction toward the re-read target is clamped to 1 m (10 m with +0x1fc). Our warp shape is ours.

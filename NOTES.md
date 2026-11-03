@@ -725,9 +725,8 @@ moves advance by `dt` of simulated time; same end states at `--fps 60` and
 
 ### Freerun moves (wall jumps, ledges, falls)
 - Jump button: `PlayerInput.jump`, viewer key F. On the wall (in hold
-  wait): F (+S) back eject = `xx_h_hangwall_tr_rebound_footl` (0.2 s in
-  place) then a fall at 1.71 m/s off the wall (`xx_h_rebound_footl_tr_fall`
-  moves the root 0.80 m back in 0.467 s), no hold grabbing for 0.467 s;
+  wait): F (+S) back eject = retail rebound (see "Hang rebound" below; it
+  was a plain 1.71 m/s fall off the wall until 2026-11-03);
   F+W leap to a hold 0.9-2.6 m up (`xx_h_climbing_{hangwall,climb1m}_jump_
   straight_{120,180,240}cm_jump_targeted[_start|_tr_hangwall]`, root rises
   exactly 1.2/1.8/2.4 m; the nearest size is used); F+A/D, or Shift+A/D at a
@@ -756,7 +755,7 @@ moves advance by `dt` of simulated time; same end states at `--fps 60` and
   ApplyDeath; ragdoll hurt landing from 5.25 m. `Player.landing` keeps
   (height, damage %, type) of the last touchdown; ACBMP_TRACE prints `land:`.
   Health/death are not applied to the match yet (mode.rs).
-- Gates (tools/gates.sh, identical at 60/144 fps): eject, sidejump, leap,
+- Gates (tools/gates.sh, identical at 60/144 fps): eject, rebound, sidejump, leap,
   pulldown, beamend, roll (end positions in its header).
 
 ## MP rules (`acb-game/src/rules.rs`)
@@ -1450,3 +1449,50 @@ Can/DoEnterWallingVertical, 0x137/0x138 Can/DoFallOffEdge, 0x139 CanUnbalanceOnE
 - Next: the hang back eject / release (`HumanLedge::ReleaseToInAir` 00d86b02, `ReleaseToTarget` 00d8cabb) are
   retail ballistic jumps: port them onto `human::in_air::home` (ours: a fixed 1.71 m/s fall off the wall, NOTES
   "Freerun moves"); `Flight` keeps the warp model (its warp shape is ours).
+
+## Hang rebound (back eject) (2026-11-03, phase3-ledge-release)
+Retail's back eject is the rebound, a ground-style targeted jump. It is not one of the ballistic ledge releases.
+- Brain `AssassinTaskLedge::UpdateLedge` (012a8298, ~l.615-745, 1430-1600):
+  - The stick (dead zone 0.35: none = straight away from the wall) is measured against "away from the wall".
+  - With high profile (+0x1f64) and the jump press (+0x1f5e), no stick or the stick more than 120 deg from away
+    first tries the climb leap up (ClimbLeap ability).
+  - Then, if the stick is within 135 deg of away: inside 60 deg the jump direction is the stick, beyond that
+    away turned 89 deg (0x3fc6d3f2 rad) to the stick's side. More than 135 deg (into the wall): no rebound.
+  - Target: `Human::GetJumpTargetListInDirection` 00d078f8 (origin 0.15 m along the direction and 6 m down,
+    search 9 m x ForwardJumpDetectionScale, jump source = Human +0x960: 0 on a hang, so the ground polygon; 3 in
+    a swing, 4 in a hand pass-over), then `GetBestEdgeJumpTargetIndex` 0129cc3a. For plain floors that picks
+    the highest one under 45 deg slope and no more than 3 m below.
+  - No target: IHuman slot +0x78 = `Human::GetFarthestFootHoldInDirection` 00d14144 (detection type 0, no gap):
+    position + dir x the detection curve's far point (slot 1, point n-2 = 8.0 m x scale), 3 m down. Swing:
+    4.5 m out, 2.3 down; pass-over or type 2: 3 m.
+  - Then `IHumanLedge::DoRebound` (sub-vtable 02c10cfc, slot +0x1c; CanRebound +0x18).
+- `HumanLedge::ProcessReboundTransition` 00d8d890: when the preparation action ends,
+  `Human::DoTargetedJumpOrFarthestJump` 00d06d30 (source 2, direction = -entity forward). A foothold whose entity
+  handle (+0x5c) is invalid (positions, farthest footholds) goes straight to `DoTargetedJump`. A valid but dead
+  handle falls back to the farthest foothold (Human vtable +0x1dc).
+- Not the rebound: `HumanLedge::ReleaseToInAir` 00d86ac2 is a drop. It takes action 0x1120e17b on a wall hang,
+  0x1120e179 when hanging free, with a 0.2 s blend, sets InAirData +0x1f4 = 2/3 and +0x190 = position + 1.1 / 2.4 m
+  up (not the fall height: `ComputeFallHeight` 0130f790 reads +0xd8), and is ballistic (+0x1fa) only when given a
+  foothold. `ReleaseToTarget` 00d8ca6e drops onto a target below. It blends two drop actions by
+  (hands - 1 m - target z) / 16 m and sets +0x1fa.
+- Ours (`human::ledge`, `Climb::plan_jump`, player.rs `Outcome::Eject`):
+  - Direction and leap-first are retail. The stick is the wall-relative W/A/S/D, so no stick = straight away,
+    S = away, W = into the wall (leap only), A/D = along the wall (89 deg).
+  - Ours: A/D try our side jump to a hold first.
+  - Ours: the target search is our freerun gap search (`jump::target` off the edge, a hang across via
+    `jump::hang_target` beating a floor more than 1.75 m lower), not retail's highest-target pick.
+  - A target is flown with `jump::Flight` (the warp model, on the ground jump clips: retail's
+    `xx_h_rebound_{dir}_{front,up,down}_{050,300,550}cm_*_to_air` sets have the same kinds but are not loaded).
+  - No target: the farthest foothold, flown like a fall off an edge (ballistic homing stand-in, starting at
+    1.71 m/s off the wall).
+  - Ours: none from a free hang. The 0.467 s catch block is kept.
+- Probe `examples/rebounds.rs`: of 983 San Donato wall hangs, 333 rebound to a floor, 186 to a hang across and
+  464 to the farthest foothold.
+- Gates:
+  - `eject` moves -14.86 43.99 2.25 -> -14.03 43.99 2.21: the street at the wall's foot, 2.8 m down, is now the
+    rebound's target, so you land there instead of 1.28 m out.
+  - New gate `rebound` (10 m hang on the west tower, F) ends at -46.79 13.18 -0.01: 8 m out, then straight
+    down, 30 % fall damage.
+  - Test `tests/jump_map.rs` `rebound_targets`.
+- Check in Wave C: how far a retail rebound off a tall wall really goes (8 m by this reading).
+- Next: `Flight` warp fidelity (PROMPT target 2).
