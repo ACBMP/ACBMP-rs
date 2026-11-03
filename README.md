@@ -75,8 +75,8 @@ Manhunt (catsmice, 2v2 up to 4v4, two rounds of 5 minutes, roles swap):
 
 Teams, spawn groups, rounds and the flags (`--teams`, `--attacking`, `--intro`,
 `--recap`, `--time-limit` per round) work as in Escort, without VIPs. The
-attacking team hunts every player of the other team: a kill scores 100 (+100 for
-an air or drop kill, +200 from a haystack). The prey cannot kill hunters, only
+attacking team hunts every player of the other team: a kill scores 100 plus the Assassinate kill bonuses except Incognito (+100 for
+an air or drop kill, +200 from a haystack; Focus, Silent or Unspotted, First Blood, Revenge as in Assassinate). The prey cannot kill hunters, only
 stun them (200). Prey also score by hiding: in a hiding spot or blended in a
 crowd group, the first bonus comes after 1 s and then one every 5 s: 10 points
 alone, 20 / 30 / 50 with 1 / 2 / 3 hidden teammates within 20 m. After you leave

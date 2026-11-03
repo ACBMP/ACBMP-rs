@@ -1478,6 +1478,8 @@ Full findings: `~/.cache/acbmp-re/findings/mode-manhunt.md`.
   `manhunt result ...`.
 - [R], ours, our reading: the brick list did not ship. Kills score `KILL_POINTS` with the acrobatic and haystack
   bonuses, stuns `STUN_POINTS` (ScoreChase humiliation); escape scoring is not wired (no single-target chase).
+  Kill bonuses: the Assassinate set (`bonus::Tracker`; loc 0x4db3f "execute quality kills"), without Incognito
+  (ours: team modes have no threat meter); `tools/manhunt.sh` round 1: 4 kills, teams [800, 0].
   Round length 300 s matches the text. Kill bonuses beyond those (retail ScoreKill types) are not ported.
 - Tests: `manhunt::tests` (bonus timing, mates), `mode::tests::manhunt_hunters_kill_prey_hide_and_stun`;
   `tools/manhunt.sh`: 2 rounds, roles swap, 0 desync on 4 clients, round 1 scores 4 kills (teams [400, 0]); its

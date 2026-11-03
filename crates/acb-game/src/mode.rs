@@ -345,8 +345,12 @@ impl Match {
     pub fn escort(teams: Teams, config: MatchConfig, spawns: Vec<(Vec3, f32)>) -> Match {
         let n = teams.team.iter().copied().chain([teams.attacking_team]).max().map_or(2, |t| t as usize + 1).max(2);
         let rounds = crate::rounds::Rounds::retail(n, config.time_limit);
-        let hide = if teams.game == crate::rules::TeamGame::Manhunt { vec![crate::manhunt::Hide::Idle; teams.team.len()] } else { Vec::new() };
-        Match { mode: Mode::Escort(teams.clone()), rounds: Some(rounds), hide, ..Match::new(teams.team.len(), config, spawns) }
+        let manhunt = teams.game == crate::rules::TeamGame::Manhunt;
+        let hide = if manhunt { vec![crate::manhunt::Hide::Idle; teams.team.len()] } else { Vec::new() };
+        // Manhunt kill bonuses: loc 0x4db3f "execute quality kills" (ours:
+        // the Assassinate set, see `kill_bonuses`)
+        let bonus = manhunt.then(|| crate::bonus::Tracker::new(teams.team.len()));
+        Match { mode: Mode::Escort(teams.clone()), rounds: Some(rounds), hide, bonus, ..Match::new(teams.team.len(), config, spawns) }
     }
 
     /// Escort: whether a round is being played (Duel: always).
@@ -588,13 +592,16 @@ impl Match {
         self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1) + 1);
     }
 
-    /// Assassinate: the [`crate::bonus`] points of `killer`'s scoring kill
-    /// of `victim` (one [`MatchEvent::Bonus`] each). Others: 0.
+    /// Assassinate and Manhunt: the [`crate::bonus`] points of `killer`'s
+    /// scoring kill of `victim` (one [`MatchEvent::Bonus`] each). Others: 0.
+    /// Manhunt has no threat meter of ours (team modes hold no contracts),
+    /// so no Incognito there (ours); the others apply as in Assassinate.
     fn kill_bonuses(&mut self, killer: usize, victim: usize) -> u32 {
         let Some(t) = &self.bonus else { return 0 };
         let mut s = t.situation(killer, victim);
         s.chasing = self.chases.get(killer).is_some_and(|c| c.is_some());
-        s.incognito = self.threat_of.get(killer) != Some(&Some(victim)) || self.threat[killer] <= 0.0;
+        let team_mode = matches!(self.mode, Mode::Escort(_));
+        s.incognito = !team_mode && (self.threat_of.get(killer) != Some(&Some(victim)) || self.threat[killer] <= 0.0);
         let list = crate::bonus::bonuses(&s);
         self.events.extend(list.iter().map(|&b| MatchEvent::Bonus { player: killer, bonus: b }));
         list.iter().map(|b| b.points()).sum()
@@ -1080,8 +1087,11 @@ mod tests {
         assert_eq!((m.score[0], m.score[1], m.score[3]), (0, 20, 20));
         assert_eq!(m.rounds.as_ref().unwrap().team_score, vec![0, 40]);
         // hunter 0 kills prey 1; prey 3 stuns hunter 2
+        m.events.clear();
         m.on_action(0, 1, 0);
-        assert_eq!(m.score[0], KILL_POINTS);
+        let bonus: Vec<crate::bonus::Bonus> = m.events.iter().filter_map(|e| if let MatchEvent::Bonus { bonus, .. } = e { Some(*bonus) } else { None }).collect();
+        assert!(bonus.contains(&crate::bonus::Bonus::FirstBlood) && !bonus.contains(&crate::bonus::Bonus::Incognito), "{bonus:?}");
+        assert_eq!(m.score[0], KILL_POINTS + bonus.iter().map(|b| b.points()).sum::<u32>());
         m.on_action(3, 2, crate::kill::STUN);
         assert_eq!(m.score[3], 20 + STUN_POINTS);
         // a prey cannot score a kill on a hunter
