@@ -667,6 +667,12 @@ pub(crate) fn drive(
             }
         } else if p.loco.airborne() {
             p.obstacle = None;
+            // a targeted jump into the open homes onto its target
+            if let Some(t) = p.air.home {
+                let v = human::in_air::home(p.pos, p.vel, t, dt);
+                p.vel.x = v.x;
+                p.vel.y = v.y;
+            }
             p.vel.z -= jump::GRAVITY * dt;
             p.catch_block = (p.catch_block - dt).max(0.0);
             // fall height counts from the highest point (retail
@@ -711,6 +717,7 @@ pub(crate) fn drive(
                     p.yaw = (-n.x).atan2(n.y);
                     p.vel.x = 0.0;
                     p.vel.y = 0.0;
+                    p.air.home = None;
                 }
             }
             // retail InAir -> StepOff (00cef704): falling onto a surface
@@ -911,15 +918,23 @@ pub(crate) fn drive(
                         eprintln!("edge: fall blocked at {:.2} {:.2} {:.2}", to.x, to.y, to.z);
                     }
                     to = p.pos;
-                } else if ledge && running {
-                    // freerunning off an edge with nothing to jump to
-                    jump::leap(p, clips, sk, delta / dt.max(1e-4));
                 } else if ledge {
-                    p.loco.start_fall();
-                    p.vel = (delta / dt.max(1e-4)).extend(0.0);
-                    p.fall_from = p.pos.z;
-                    p.air = Air::start(p.pos.z, Some(0.0));
-                    p.edge = None;
+                    // off the edge with nothing to jump to: retail
+                    // FallOffEdge, a targeted jump into the open (farther
+                    // in high profile and the faster the move), or backing
+                    // over it a plain fall
+                    let vel = delta / dt.max(1e-4);
+                    let high = input.run || input.sprint;
+                    match human::ground::fall_off(p.pos, fwd, delta / len, crate::locomotion::anim_speed(p.loco.speed), high) {
+                        human::ground::FallOff::Target(t) => jump::fall_off(p, clips, sk, vel, t),
+                        human::ground::FallOff::Back => {
+                            p.loco.start_fall();
+                            p.vel = vel.extend(0.0);
+                            p.fall_from = p.pos.z;
+                            p.air = Air::start(p.pos.z, Some(human::ground::FALL_OFF_BACK_DELAY));
+                            p.edge = None;
+                        }
+                    }
                 }
                 // shoulder past people rather than through them (walls win)
                 let mut push = Vec2::ZERO;

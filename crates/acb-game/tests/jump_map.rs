@@ -271,31 +271,44 @@ fn turning_starts_move_at_once() {
     }
 }
 
-/// Freerunning (Shift + Space) off the 6.3 m roof east of the first spawn
-/// (edge at x = -13.1, 3.9 m down to the next roof, no jump target in
-/// reach): a leap that rises before it falls, landing well out.
+/// Off the 6.3 m roof east of the first spawn (edge at x = -13.1, 3.9 m
+/// down to the next roof, no jump target in reach), retail FallOffEdge
+/// (00fd2406): a targeted jump to 1 + 2 * anim speed metres out in high
+/// profile (sprint 3 m, run 2.6 m; low profile 1 m, but low profile stops
+/// at a drop this deep), 3 m down; past that height
+/// straight down. No rise (ours: the ballistic part starts at the edge).
 #[test]
-fn freerun_leap_off_an_edge() {
+fn fall_off_an_edge_by_profile() {
     let Some(d) = data() else { return };
-    let mut w = player_at(&d, [-8.0, 43.5, 6.5, 90.0]);
-    let run = PlayerInput { forward: true, run: true, sprint: true, cam_yaw: std::f32::consts::PI, ..PlayerInput::default() };
-    let z0 = w.players[0].pos.z;
-    let (mut peak, mut left_at) = (z0, None);
-    for _ in 0..(3.0 / DT) as usize {
-        w.step(&[run]);
+    let west = std::f32::consts::PI;
+    let sprint = PlayerInput { forward: true, run: true, sprint: true, cam_yaw: west, ..PlayerInput::default() };
+    let run = PlayerInput { forward: true, run: true, cam_yaw: west, ..PlayerInput::default() };
+    // high profile: 1 + 2 * anim speed, run (0.8) to sprint (1.0)
+    for (input, want, name) in [(sprint, 2.6..3.05, "sprint"), (run, 2.5..2.7, "run")] {
+        let mut w = player_at(&d, [-8.0, 43.5, 6.5, 90.0]);
+        let mut left_at = None;
+        let mut peak = f32::MIN;
+        for _ in 0..(4.0 / DT) as usize {
+            w.step(&[input]);
+            let p = &w.players[0];
+            if p.loco.airborne() && left_at.is_none() {
+                left_at = Some(p.pos);
+            }
+            if left_at.is_some() && p.loco.airborne() {
+                peak = peak.max(p.pos.z);
+            }
+            if left_at.is_some() && !p.loco.airborne() {
+                break;
+            }
+        }
+        let from = left_at.unwrap_or_else(|| panic!("{name}: never left the roof"));
         let p = &w.players[0];
-        if p.loco.airborne() && left_at.is_none() {
-            left_at = Some(p.pos);
-        }
-        if left_at.is_some() && p.loco.airborne() {
-            peak = peak.max(p.pos.z);
-        }
+        println!("{name}: left at {from:.2?}, peak +{:.2} m, landed {:.2?}", peak - from.z, p.pos);
+        assert!(!p.loco.airborne(), "{name}: still in the air at {:?}", p.pos);
+        assert!(peak - from.z < 0.01, "{name}: rose {:.2} m", peak - from.z);
+        let out = from.x - p.pos.x;
+        assert!(want.contains(&out), "{name}: landed {out:.2} m out, want {want:?}");
     }
-    let from = left_at.expect("never left the roof");
-    let p = &w.players[0];
-    println!("left at {from:.2?}, peak +{:.2} m, now {:.2?}", peak - from.z, p.pos);
-    assert!(peak - from.z > 0.3, "no jump arc: peak {peak} from {from:?}");
-    assert!(from.x - p.pos.x > 6.0, "landed only {:.2} m out", from.x - p.pos.x);
 }
 
 /// Walking (low profile) to the end of the stairwell balustrade stops

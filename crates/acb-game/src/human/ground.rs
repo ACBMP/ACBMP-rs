@@ -144,6 +144,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fall_off_target_by_profile_and_speed() {
+        let (pos, y) = (Vec3::new(1.0, 2.0, 10.0), Vec2::Y);
+        let at = |s: f32, high: bool| match fall_off(pos, y, y, s, high) {
+            FallOff::Target(t) => t,
+            FallOff::Back => panic!("back"),
+        };
+        // low profile: 1 m out whatever the speed; 3 m down
+        assert!((at(0.8, false) - Vec3::new(1.0, 3.0, 7.0)).length() < 1e-5);
+        // high profile: run 2.6 m, sprint 3 m
+        assert!((at(0.8, true).y - 4.6).abs() < 1e-5);
+        assert!((at(1.0, true).y - 5.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn fall_off_direction_cone() {
+        let pos = Vec3::ZERO;
+        let dir = |facing: Vec2| match fall_off(pos, facing, Vec2::Y, 0.0, false) {
+            FallOff::Target(t) => t.truncate(),
+            FallOff::Back => Vec2::ZERO,
+        };
+        // within 60 deg: along the facing
+        let f = Vec2::from_angle(0.9).rotate(Vec2::Y);
+        assert!((dir(f) - f).length() < 1e-5);
+        // 90 deg off: the gap direction turned 60 deg toward the facing
+        let side = dir(Vec2::X);
+        assert!((side.angle_to(Vec2::Y).abs() - FALL_OFF_CONE).abs() < 1e-5);
+        assert!(side.x > 0.0);
+        // backing over it (120 deg and more): a plain fall
+        assert_eq!(fall_off(pos, -Vec2::Y, Vec2::Y, 1.0, true), FallOff::Back);
+        assert_eq!(fall_off(pos, Vec2::from_angle(2.1).rotate(Vec2::Y), Vec2::Y, 1.0, true), FallOff::Back);
+    }
+
+    #[test]
     fn fall_off_edge_is_053() {
         assert_eq!(edge(0.2), Edge::Step);
         assert_eq!(edge(0.52), Edge::Step);
@@ -187,4 +220,53 @@ mod tests {
         assert!((c.z - FALL_BOX_HALF.z - 4.7).abs() < 1e-6);
         assert!((c.z + FALL_BOX_HALF.z - 6.7).abs() < 1e-6);
     }
+}
+
+/// Falling off an edge (`HumanGround::ExecuteFallOffEdge` 00fd2406, from
+/// `DoFallOffEdge(gap, f)`): not a plain drop but a targeted jump
+/// (`Human::DoTargetedJump`, ground source, landing intention 1) to a point
+/// in the open past the edge, this far below the feet, metres...
+pub const FALL_OFF_DROP: f32 = 3.0;
+/// ...and `FALL_OFF_REACH + 2 * anim speed * f` ahead, metres, where `f` is
+/// 1 in high profile and 0 in low profile
+/// (`AssassinTaskGround::UpdateGroundMovement` 0166fb1c passes 1.0 when its
+/// high-profile flag +0x1f64 is set) and the anim speed is the move cycle's
+/// normalized speed (HumanGround +0x904, our [`crate::locomotion::anim_speed`]:
+/// 0.2 walk, 0.8 run, 1.0 sprint). A sprint lands 3 m out, a run 2.6 m:
+/// the `down 300cm` jump clips' reach.
+pub const FALL_OFF_REACH: f32 = 1.0;
+/// The jump goes along the facing when it is within this of the gap's
+/// direction, else along the gap direction turned this far toward the
+/// facing, radians (00fd2406: 1.0471976)...
+pub const FALL_OFF_CONE: f32 = std::f32::consts::FRAC_PI_3;
+/// ...and from this far off (backing over the edge) there is no jump: the
+/// backward fall action (0x935ce89e) with a 0.4 s landing-test delay
+/// (12000 ticks of 30000 per second), radians (00fd2406: 2.0943952).
+pub const FALL_OFF_BACK: f32 = 2.0 * std::f32::consts::FRAC_PI_3;
+/// That backward fall's landing-test delay, seconds.
+pub const FALL_OFF_BACK_DELAY: f32 = 0.4;
+
+/// How a fall off an edge goes ([`fall_off`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FallOff {
+    /// Backing over the edge: a plain fall, landing tests after
+    /// [`FALL_OFF_BACK_DELAY`].
+    Back,
+    /// A targeted jump to this point (feet), [`crate::human::in_air::home`].
+    Target(Vec3),
+}
+
+/// The fall off an edge at `pos` facing `facing` over a gap that lies along
+/// `gap` (both horizontal, unit), moving at normalized anim speed
+/// `anim_speed`, `high` in high profile (`ExecuteFallOffEdge` 00fd2406).
+/// Ours: `gap` is the move direction (retail's gap direction from the edge
+/// detector, +0x20 of `IHuman::Gap`).
+pub fn fall_off(pos: Vec3, facing: Vec2, gap: Vec2, anim_speed: f32, high: bool) -> FallOff {
+    let a = gap.angle_to(facing);
+    if !(a.abs() < FALL_OFF_BACK) {
+        return FallOff::Back;
+    }
+    let dir = if a.abs() <= FALL_OFF_CONE { facing } else { Vec2::from_angle(FALL_OFF_CONE.copysign(a)).rotate(gap) };
+    let reach = FALL_OFF_REACH + 2.0 * anim_speed * if high { 1.0 } else { 0.0 };
+    FallOff::Target(pos + (dir * reach).extend(-FALL_OFF_DROP))
 }

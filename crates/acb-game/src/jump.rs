@@ -496,30 +496,35 @@ pub(crate) fn take_off(p: &mut Player, clips: &Clips, sk: &Skeleton, target: Vec
     p.flight = Some(flight);
 }
 
-/// Untargeted freerun leap: Legs at an edge with no jump target in reach
-/// still jumps (retail's freerun jump into the open, as off a roof with
-/// nothing ahead), at the run's speed but at least this, m/s (ours)...
-pub const LEAP_MIN_SPEED: f32 = 3.5;
-/// ...and this fast upward, m/s (ours: a 0.46 m rise, the arc of the
-/// `front 300cm` jump clips).
-pub const LEAP_UP: f32 = 3.0;
-/// The jump kind whose takeoff clip a leap plays ([`locomotion::JUMPS`]:
-/// front 300cm).
-const LEAP_KIND: usize = 3;
-
-/// Leaps off an edge along the facing with horizontal ground velocity
-/// `vel` (m/s); then a ballistic fall that lands, grabs or hides like any
-/// other (no target).
-pub(crate) fn leap(p: &mut Player, clips: &Clips, sk: &Skeleton, vel: Vec2) {
-    let fwd = Vec2::new(-p.yaw.sin(), p.yaw.cos());
-    let speed = vel.dot(fwd).max(LEAP_MIN_SPEED);
-    p.loco.start_leap(clips, sk, LEAP_KIND);
-    p.vel = (fwd * speed).extend(LEAP_UP);
+/// Falls off an edge the retail way (`HumanGround::ExecuteFallOffEdge`
+/// 00fd2406, [`crate::human::ground::fall_off`]): a targeted jump to
+/// `target`, a point in the open past the edge, on the jump clips the
+/// drop picks, moving at `vel` (m/s, horizontal) as it leaves. Retail
+/// warps the takeoff and air clips onto the target (a ground targeted jump
+/// does not set the ballistic flag InAirData +0x1fa); ours flies there on
+/// retail's ballistic homing instead ([`crate::human::in_air::home`], the
+/// model of ledge releases), starting at the edge, so that the fall's own
+/// checks run on the way: a floor nearer than the target lands early, holds
+/// are grabbed, walls received. Past the target's height it drops straight
+/// down.
+pub(crate) fn fall_off(p: &mut Player, clips: &Clips, sk: &Skeleton, vel: Vec2, target: Vec3) {
+    let d = target - p.pos;
+    let main = main_kind(&weights(clips, d));
+    p.loco.start_leap(clips, sk, main);
+    p.yaw = (-d.x).atan2(d.y);
+    p.vel = vel.extend(0.0);
     p.fall_from = p.pos.z;
-    p.air = crate::human::Air::start(p.pos.z, Some(0.0));
+    p.air = crate::human::Air { home: Some(target), ..crate::human::Air::start(p.pos.z, Some(0.0)) };
     p.edge = None;
     if crate::trace() {
-        eprintln!("jump: leap (no target) from {:.2?} at {speed:.2} m/s", p.pos.to_array());
+        eprintln!(
+            "jump: fall off edge ({} {}) from {:.2?} to {:.2?} at {:.2} m/s",
+            locomotion::JUMPS[main].0,
+            locomotion::JUMPS[main].1,
+            p.pos.to_array(),
+            target.to_array(),
+            vel.length()
+        );
     }
 }
 
