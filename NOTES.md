@@ -1450,3 +1450,17 @@ Can/DoEnterWallingVertical, 0x137/0x138 Can/DoFallOffEdge, 0x139 CanUnbalanceOnE
 - Next: the hang back eject / release (`HumanLedge::ReleaseToInAir` 00d86b02, `ReleaseToTarget` 00d8cabb) are
   retail ballistic jumps: port them onto `human::in_air::home` (ours: a fixed 1.71 m/s fall off the wall, NOTES
   "Freerun moves"); `Flight` keeps the warp model (its warp shape is ours).
+
+## Crowd of every persona, 60 by default (2026-11-04, phase4-crowd)
+- Characters: the crowd now uses `crowd_characters`, every `AC2MP_IDxx_MainTemplate_NPC` builder in DataPC (14:
+  ID07, 08, 10, 14, 15, 17, 18, 20, 22-27), sorted by name and assigned round-robin, instead of the players'
+  `--character` list. All 14 load (+1.9 s startup with 60 NPCs). Retail ties the crowd to the players' skins
+  (`GBrick_PlayerReady::SetSkinsAndCrowdReadyCallback` 013c2ed8, `SkinInCrowdInfo`; its builder has no direct
+  caller in the Mac build, so it is probably filled from the network). Ours: every persona, not only the players'.
+- Count: `acb_game::DEFAULT_CROWD` = 60 for the viewer and `acbmp serve`. PLACEHOLDER: retail's count is not
+  traced. Sim cost (`tickbench MAP [CROWD]`): 0.38 ms per tick with 60, 0.76 with 120 (0.02 with none).
+  4-client escort on one PC: 30 NPCs normal, 60 raises rtt to 300+ ms (five renderers on one machine), 0 desync
+  either way.
+- The crowd nudges the player, e.g. the tickbench climb ends at 44.23 instead of 43.99. So gates.sh, kills.sh,
+  duel.sh, escort.sh and assassinate(4).sh pin `--crowd 0` to keep their baselines. `acb-net/tests/crowd_map.rs`
+  plays 10 s (was 7) because 14 characters load per peer.

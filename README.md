@@ -15,10 +15,14 @@ Setup (once per shell):
     export ACBMP_EXE=~/Music/ACB/ACBMP.exe
     M=~/Music/ACB/multi
 
-Single player on San Donato (free play, crowd of 20 lookalike NPCs to kill):
+Single player on San Donato (free play, a crowd of 60 civilians to kill or blend into):
 
     ./target/release/acb-viewer $M/DataPC_AC2MP_SanDonato.forge \
-        --character AC2MP_ID07_MainTemplate_Player --play --crowd 20
+        --character AC2MP_ID07_MainTemplate_Player --play
+
+The crowd uses every MP persona's lookalike (the 14 `AC2MP_IDxx_MainTemplate_NPC`
+characters, round-robin). `--crowd N` sets another count, `--crowd 0` none. The
+default of 60 is our choice: retail's count isn't known yet.
 
 Two-player duel (Wanted rules: contracts, kills score, respawns, 5 min):
 
@@ -29,9 +33,10 @@ Two-player duel (Wanted rules: contracts, kills score, respawns, 5 min):
         --connect HOST:7777 --name alice
 
 The server waits for `--players` clients, then starts. `--time-limit S`
-changes the match length, `--mode free` drops the match rules, `--crowd N`
-(and `--crowd-seed S`) adds N wandering NPCs that every client simulates
-too (blending works online; clients need no flag, the server sends it).
+changes the match length, `--mode free` drops the match rules. Matches have
+the same crowd of 60 civilians by default, which every client simulates too
+(blending works online; clients need no flag, the server sends it): `--crowd N`
+for another count, 0 for none, and `--crowd-seed S` for other paths.
 
 Escort (teamvip, 2v2 up to 4v4, two rounds with the attacking team swapped):
 

@@ -11,7 +11,7 @@
 export ACBMP_SCHEMAS=~/Music/anvilforge-py/src/anvilforge/schemas ACBMP_MULTI=~/Music/ACB/multi ACBMP_EXE=~/Music/ACB/ACBMP.exe
 M=~/Music/ACB/multi; O=${ESCORT_OUT:-$(mktemp -d)}; mkdir -p $O
 play=${1:-40}; sim=${2:-loss=5%,delay=75ms,jitter=10ms}; shift $(( $# < 2 ? $# : 2 ))
-./target/release/acbmp serve $M/DataPC_AC2MP_SanDonato.forge --port 7951 --players 4 --mode escort --time-limit $play --intro 2 --recap 2 "$@" > $O/serve.txt 2>&1 &
+./target/release/acbmp serve $M/DataPC_AC2MP_SanDonato.forge --port 7951 --crowd 0 --players 4 --mode escort --time-limit $play --intro 2 --recap 2 "$@" > $O/serve.txt 2>&1 &
 sleep 0.5
 v() { WAYLAND_DISPLAY=wayland-1 XDG_RUNTIME_DIR=/run/user/1000 ACBMP_TRACE=1 timeout 400 ./target/release/acb-viewer $M/DataPC_AC2MP_SanDonato.forge --connect 127.0.0.1:7951 --name $1 --netsim $sim --character AC2MP_ID07_MainTemplate_Player --play --exe $ACBMP_EXE --input "0=vip" --fps $2 --capture $O/$1.png --capture-after 600 > $O/$1.txt 2>&1; }
 v a 60 &

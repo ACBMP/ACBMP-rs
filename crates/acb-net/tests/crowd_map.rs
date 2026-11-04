@@ -110,7 +110,8 @@ fn crowd_over_lossy_localhost() {
                 netsim: NetSim::default(),
                 at: vec![Some([31.0, 20.4, 0.02, -90.0]), Some([41.0, 20.4, 0.02, 90.0])],
                 log: None,
-                duration: Some(7.0),
+                // 14 crowd characters load per peer before play: room for > 50 common ticks
+                duration: Some(10.0),
                 rules: Some(acb_net::mode::MatchConfig { time_limit: 60.0, score_limit: 1000, respawn_delay: 5.0, start_delay: 3.0 }),
                 crowd: CROWD,
                 escort: None,

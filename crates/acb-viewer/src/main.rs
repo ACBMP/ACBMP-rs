@@ -73,9 +73,9 @@ struct Args {
     /// space)
     #[arg(long, value_delimiter = ',')]
     hold: Vec<String>,
-    /// Add this many NPCs wandering the navmesh (round-robin over
-    /// --character)
-    #[arg(long, default_value_t = 0)]
+    /// Add this many NPCs wandering the navmesh, round-robin over every
+    /// persona's lookalike (`AC2MP_IDxx_MainTemplate_NPC`); 0 for none
+    #[arg(long, default_value_t = acb_game::DEFAULT_CROWD)]
     crowd: usize,
     /// Debug paired animations: the first two characters share the first
     /// spawn's transform and play these two clips (assassin,victim)

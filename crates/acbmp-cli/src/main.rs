@@ -373,8 +373,9 @@ enum Cmd {
         /// No contracts during the first seconds
         #[arg(long, default_value_t = acb_net::mode::START_DELAY)]
         start_delay: f32,
-        /// Crowd NPCs every peer simulates (blending; the map needs a navmesh)
-        #[arg(long, default_value_t = 0)]
+        /// Crowd NPCs every peer simulates (every persona, round-robin; blending; the map
+        /// needs a navmesh; 0 for none)
+        #[arg(long, default_value_t = acb_game::DEFAULT_CROWD as u16)]
         crowd: u16,
         /// Seed of the crowd's wandering
         #[arg(long, default_value_t = 0)]

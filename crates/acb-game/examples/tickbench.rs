@@ -1,5 +1,5 @@
 //! Milliseconds per sim tick for one player by activity: `tickbench
-//! MAP.forge` (env ACBMP_SCHEMAS, ACBMP_EXE).
+//! MAP.forge [CROWD]` (env ACBMP_SCHEMAS, ACBMP_EXE; CROWD NPCs, default 0).
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
         anim: String::new(),
         wander: 0.0,
         play: true,
-        crowd: 0,
+        crowd: a.get(2).map_or(Ok(0), |c| c.parse())?,
         pair: Vec::new(),
         at: None,
         builtins: builtins.as_ref(),

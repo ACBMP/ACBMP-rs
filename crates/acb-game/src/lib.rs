@@ -311,6 +311,39 @@ pub fn load_character(archive: &Archive, name: &str) -> anyhow::Result<Character
     c.ok_or_else(|| anyhow::anyhow!("{name}: no such character"))
 }
 
+/// Crowd NPCs on a map unless asked otherwise (viewer `--crowd`, server
+/// `--crowd`). PLACEHOLDER (ours): retail's count is not traced (the crowd
+/// follows the players' skins, `SkinInCrowdInfo`, filled from the network);
+/// 60 costs 0.38 ms per sim tick on San Donato (`examples/tickbench.rs`).
+pub const DEFAULT_CROWD: usize = 60;
+
+/// The crowd's characters: every MP persona's NPC builder
+/// (`AC2MP_IDxx_MainTemplate_NPC`, 14 in DataPC: ID07..ID27), sorted by
+/// name so every peer builds the same crowd. The crowd is made of the
+/// personas' lookalikes (retail ties it to the players' skins:
+/// `GBrick_PlayerReady::SetSkinsAndCrowdReadyCallback` 013c2ed8; ours uses
+/// all of them). Builders that fail to load are skipped.
+pub fn crowd_characters(archive: &Archive) -> Vec<(String, Arc<Character>)> {
+    let mut names: Vec<String> = archive
+        .uids_of("EntityBuilder")
+        .into_iter()
+        .filter_map(|u| archive.loc(u).map(|l| l.name.clone()))
+        .filter(|n| n.starts_with("AC2MP_ID") && n.ends_with("_MainTemplate_NPC"))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter_map(|n| match load_character(archive, &n) {
+            Ok(c) => Some((n, Arc::new(c))),
+            Err(e) => {
+                eprintln!("crowd: {e}");
+                None
+            }
+        })
+        .collect()
+}
+
 fn by_name(archive: &Archive, ty: &str, name: &str) -> Option<u32> {
     archive.uids_of(ty).into_iter().find(|u| archive.loc(*u).is_some_and(|l| l.name.eq_ignore_ascii_case(name)))
 }
@@ -414,8 +447,11 @@ impl World {
         }
         if setup.crowd > 0 {
             let crowd = Crowd::load(archive, builtins)?;
+            // every persona's lookalike, round-robin (else the players' characters)
+            let pool = crowd_characters(archive);
+            let pool = if pool.is_empty() { characters.clone() } else { pool };
             for i in 0..setup.crowd {
-                let character = characters[(count + i) % characters.len()].1.clone();
+                let character = pool[i % pool.len()].1.clone();
                 let root_bone = character.skeleton.bones.first().map(|b| b.id);
                 let model = match root_bone {
                     Some(id) if crowd.walk.drives(id) => Mat4::IDENTITY,
@@ -425,7 +461,7 @@ impl World {
                 let entity = agent.entity();
                 w.bodies.push(Body::new(character, entity, entity, model, 0.0, Some(agent)));
             }
-            eprintln!("crowd: {} NPCs, {} lanes, {} navmesh triangles", setup.crowd, crowd.nav.flows(), crowd.nav.triangles());
+            eprintln!("crowd: {} NPCs of {} characters, {} lanes, {} navmesh triangles", setup.crowd, pool.len(), crowd.nav.flows(), crowd.nav.triangles());
             w.crowd = Some(crowd);
         }
         // the player starts on the first spawn, facing along it (+Y)

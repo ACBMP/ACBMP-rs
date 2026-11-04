@@ -27,7 +27,7 @@ for fps in 60 144; do
     echo "== $name $fps fps"
     WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/1000} ACBMP_TRACE=1 \
       timeout 120 ./target/release/acb-viewer "$M/DataPC_AC2MP_SanDonato.forge" \
-      --character AC2MP_ID07_MainTemplate_Player --count 2 --wander 0 --play --exe "$ACBMP_EXE" \
+      --character AC2MP_ID07_MainTemplate_Player --count 2 --wander 0 --crowd 0 --play --exe "$ACBMP_EXE" \
       --at="$at" --input "$input" --fps "$fps" --capture "$out/$name.png" --capture-after 5 2>&1 \
       | grep -E '^kill: (Kill body|start)|^player at' | tail -3
   done
