@@ -27,6 +27,7 @@ use acb_world::Archive;
 use glam::{Mat4, Quat, Vec2, Vec3};
 
 use crate::ground::{cell, Ground};
+use crate::human;
 use crate::Pose;
 
 /// A guidance edge as a climbing surface.
@@ -194,8 +195,8 @@ enum Then {
     Hold(Stance, Hold),
     /// Let go: fall with this velocity.
     Drop(Vec3),
-    /// Pushed off the wall (back eject): fall with this velocity.
-    Eject(Vec3),
+    /// Pushed off the wall (rebound): a targeted jump along this flat direction.
+    Eject(Vec2),
     /// Back on the ground (stand up where the last pose stands).
     Stand,
 }
@@ -346,9 +347,9 @@ pub enum Outcome {
     Climbing,
     /// Let go: fall from the current position with this velocity.
     Drop(Vec3),
-    /// Pushed off the wall: fall away from it with this velocity (the
-    /// wall just left is not grabbed again at once).
-    Eject(Vec3),
+    /// Pushed off the wall (rebound): a targeted jump along this flat
+    /// direction (the wall just left is not grabbed again at once).
+    Eject(Vec2),
     /// Standing again at this entity position and facing.
     Stand(Vec3, f32),
 }
@@ -483,7 +484,7 @@ impl Climb {
                         self.plan(ground, dir).or_else(|| {
                             // high profile at a shimmy dead end: jump the gap
                             (run && matches!(dir, Dir::Left | Dir::Right) && self.stance != Stance::Climb)
-                                .then(|| self.plan_jump(ground, Some(dir)))
+                                .then(|| self.side_jump(ground, dir))
                                 .flatten()
                         })
                     })
@@ -545,63 +546,89 @@ impl Climb {
         }
     }
 
-    /// A wall jump with the jump button and stick `dir` (none or down:
-    /// back eject; up: leap to a hold 0.9-2.6 m above; left/right: jump
-    /// to a hold 0.5-2.6 m along the wall, across a shimmy gap).
+    /// A wall jump with the jump button and stick `dir` (retail
+    /// `AssassinTaskLedge::UpdateLedge` 012a8298, [`human::ledge::wall_jump`]):
+    /// left/right first jumps to a hold 0.5-2.6 m along the wall, across a
+    /// shimmy gap (ours, standing in for retail's parallel jump); no stick
+    /// or up (into the wall) leaps to a hold 0.9-2.6 m above; otherwise,
+    /// and when no hold is in reach, the rebound pushes off the wall (stick
+    /// down or none: straight away; left/right: 89 deg from away).
     fn plan_jump(&self, ground: &Ground, dir: Option<Dir>) -> Option<(Seq, &'static str)> {
+        let n = self.hold.wall;
+        let stick = match dir {
+            None => Vec2::ZERO,
+            Some(Dir::Down) => n,
+            Some(Dir::Up) => -n,
+            Some(Dir::Left) => -right_of(n),
+            Some(Dir::Right) => right_of(n),
+        };
+        let wj = human::ledge::wall_jump(stick, n);
+        if let Some(side @ (Dir::Left | Dir::Right)) = dir {
+            if let Some(s) = self.side_jump(ground, side) {
+                return Some(s);
+            }
+        }
+        if wj.leap_first {
+            if let Some(s) = self.leap_up(ground) {
+                return Some(s);
+            }
+        }
+        let away = wj.rebound?;
+        // retail rebound: the preparation clip pushes off in place (0.2 s),
+        // then a targeted jump along `away` (player.rs, Outcome::Eject).
+        // Ours: none from a free hang.
+        if self.stance == Stance::HangFree {
+            return None;
+        }
+        let yaw = self.yaw;
+        Some((Seq::new(&["xx_h_hangwall_tr_rebound_footl"], self.pos, self.pos, yaw, yaw, Then::Eject(away)), "back eject"))
+    }
+
+    /// The leap to a hold 0.9-2.6 m above.
+    fn leap_up(&self, ground: &Ground) -> Option<(Seq, &'static str)> {
         let n = self.hold.wall;
         let hand = hands_of(self.pos, n, self.stance);
         let yaw = self.yaw;
-        match dir {
-            None | Some(Dir::Down) => {
-                // retail rebound: push off in place (0.2 s), then the
-                // untargeted rebound_tr_fall carries the root 0.80 m back
-                // in 0.467 s: [`EJECT_SPEED`] away from the wall, gravity
-                // does the rest
-                if self.stance == Stance::HangFree {
-                    return None;
-                }
-                let v = (n * EJECT_SPEED).extend(0.0);
-                Some((Seq::new(&["xx_h_hangwall_tr_rebound_footl"], self.pos, self.pos, yaw, yaw, Then::Eject(v)), "back eject"))
-            }
-            Some(Dir::Up) => {
-                let (hold, point) = ground.jump_hold(&self.hold, hand, n, Dir::Up, 0.9, 2.6)?;
-                let stance = ground.hang_stance(point, hold.wall);
-                let to = entity_for(point, hold.wall, stance);
-                // clip by rise: 120 / 180 / 240 cm (the root rises exactly that)
-                let rise = (point.z - hand.z) * 100.0;
-                let k = [120, 180, 240]
-                    .into_iter()
-                    .min_by(|a, b| (*a as f32 - rise).abs().total_cmp(&(*b as f32 - rise).abs()))
-                    .unwrap();
-                let clips: Vec<&'static str> = if self.stance == Stance::Climb {
-                    ["_start", "", "_tr_hangwall"]
-                        .iter()
-                        .map(|s| leak(format!("xx_h_climbing_climb1m_jump_straight_{k}cm_jump_targeted{s}")))
-                        .collect()
-                } else {
-                    ["_start", ""].iter().map(|s| leak(format!("xx_h_climbing_hangwall_jump_straight_{k}cm_jump_targeted{s}"))).collect()
-                };
-                Some((Seq::new(&clips, self.pos, to, yaw, yaw_into(hold.wall), Then::Hold(stance, hold)), "leap up"))
-            }
-            Some(side) => {
-                let (hold, point) = ground.jump_hold(&self.hold, hand, n, side, 0.5, 2.6)?;
-                let stance = ground.hang_stance(point, hold.wall);
-                let to = entity_for(point, hold.wall, stance);
-                // _2 carries the root 1.50 m sideways, _3 2.25 m
-                let lat = (point - hand).truncate().dot(right_of(n)).abs();
-                let k = if lat > 1.875 { 3 } else { 2 };
-                let from = match self.stance {
-                    Stance::Climb => "climb1m",
-                    Stance::HangWall => "hangwall",
-                    Stance::HangFree => "hangfree",
-                };
-                let sname = if side == Dir::Left { "left" } else { "right" };
-                let clips: Vec<&'static str> =
-                    ["a", "b", "c"].iter().map(|s| leak(format!("xx_h_climbing_{from}_tr_hangwall_{sname}_{k}_{s}"))).collect();
-                Some((Seq::new(&clips, self.pos, to, yaw, yaw_into(hold.wall), Then::Hold(stance, hold)), "side jump"))
-            }
-        }
+        let (hold, point) = ground.jump_hold(&self.hold, hand, n, Dir::Up, 0.9, 2.6)?;
+        let stance = ground.hang_stance(point, hold.wall);
+        let to = entity_for(point, hold.wall, stance);
+        // clip by rise: 120 / 180 / 240 cm (the root rises exactly that)
+        let rise = (point.z - hand.z) * 100.0;
+        let k = [120, 180, 240]
+            .into_iter()
+            .min_by(|a, b| (*a as f32 - rise).abs().total_cmp(&(*b as f32 - rise).abs()))
+            .unwrap();
+        let clips: Vec<&'static str> = if self.stance == Stance::Climb {
+            ["_start", "", "_tr_hangwall"]
+                .iter()
+                .map(|s| leak(format!("xx_h_climbing_climb1m_jump_straight_{k}cm_jump_targeted{s}")))
+                .collect()
+        } else {
+            ["_start", ""].iter().map(|s| leak(format!("xx_h_climbing_hangwall_jump_straight_{k}cm_jump_targeted{s}"))).collect()
+        };
+        Some((Seq::new(&clips, self.pos, to, yaw, yaw_into(hold.wall), Then::Hold(stance, hold)), "leap up"))
+    }
+
+    /// The jump to a hold 0.5-2.6 m along the wall to the `side`.
+    fn side_jump(&self, ground: &Ground, side: Dir) -> Option<(Seq, &'static str)> {
+        let n = self.hold.wall;
+        let hand = hands_of(self.pos, n, self.stance);
+        let yaw = self.yaw;
+        let (hold, point) = ground.jump_hold(&self.hold, hand, n, side, 0.5, 2.6)?;
+        let stance = ground.hang_stance(point, hold.wall);
+        let to = entity_for(point, hold.wall, stance);
+        // _2 carries the root 1.50 m sideways, _3 2.25 m
+        let lat = (point - hand).truncate().dot(right_of(n)).abs();
+        let k = if lat > 1.875 { 3 } else { 2 };
+        let from = match self.stance {
+            Stance::Climb => "climb1m",
+            Stance::HangWall => "hangwall",
+            Stance::HangFree => "hangfree",
+        };
+        let sname = if side == Dir::Left { "left" } else { "right" };
+        let clips: Vec<&'static str> =
+            ["a", "b", "c"].iter().map(|s| leak(format!("xx_h_climbing_{from}_tr_hangwall_{sname}_{k}_{s}"))).collect();
+        Some((Seq::new(&clips, self.pos, to, yaw, yaw_into(hold.wall), Then::Hold(stance, hold)), "side jump"))
     }
 
     /// The move for stick direction `dir` from the current hold, if any.

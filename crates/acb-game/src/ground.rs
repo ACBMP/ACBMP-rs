@@ -207,6 +207,11 @@ impl Ground {
         out
     }
 
+    /// Every collision triangle.
+    pub fn all_triangles(&self) -> &[[Vec3; 3]] {
+        &self.tris
+    }
+
     /// The no-standing (StepOff material) triangles.
     pub fn no_stand_triangles(&self) -> impl Iterator<Item = [Vec3; 3]> + '_ {
         self.tris.iter().zip(&self.no_stand).filter(|(_, n)| **n).map(|(t, _)| *t)

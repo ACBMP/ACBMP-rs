@@ -37,7 +37,8 @@ Work one mechanic at a time: find it in the binary, port it, test it, run the re
 - RE: the Mac build `~/Music/acbmp_sf.exe` has full symbols, and its addresses are the Ghidra addresses.
   Start the headless GhidraMCP on :8090 (HANDOFF.md "Paths"), then load `/acbmp_sf.exe`. The user can't run
   Ghidra; you manage it, and stop it when done.
-- Use `tools/ghid.py` for everything RE:
+- Use `tools/ghid.py` for everything RE (`python3 tools/ghid.py`; elsewhere in tools/ run Python with `-P`, since
+  `tools/dis.py` shadows the stdlib `dis` on Python 3.14):
   - `sym REGEX` finds a symbol;
   - `dec ADDR|SYMBOL` decompiles into the cache `~/.cache/acbmp-re/dec/<prog>/<addr>.c` and prints only the
     path;
@@ -63,12 +64,14 @@ Work one mechanic at a time: find it in the binary, port it, test it, run the re
 ## Regression (after every change, in this order)
 1. `cargo build --release`: the scripts run `./target/release` binaries and don't build.
 2. `cargo test --release` with the data env vars set.
-3. `tools/gates.sh`: 10 runs at 60 and 144 fps. The expected final positions are in the script header (for
+3. `tools/gates.sh`: 11 runs at 60 and 144 fps. The expected final positions are in the script header (for
    example parapet -10.09 -0.36 6.59, sidejump speed 1.57). A changed gate needs a reason in NOTES, plus an
    updated header.
 4. `tools/kills.sh`: 8 granted.
 5. `tools/duel.sh`: a 100, b 0, 0 desync.
-6. `tools/escort.sh`: [270, 130], 0 desync. It binds port 7951, so never run two at once.
+6. `tools/escort.sh`: 0 desync and 0 match desync on all clients, "match over". The team scores depend on
+   netsim timing and vary run to run ([270, 130], [270, 110] and [290, 30] seen). It binds port 7951, so never run
+   two at once.
    Sim cost matters: clients replay falling ticks, and a slow query breaks escort (see "Phase 3 leftovers",
    pilotis).
 
@@ -85,28 +88,24 @@ Ported:
 - retail FallOffEdge: a targeted jump to 1 + 2·anim speed m out (high profile) or 1 m (low profile), 3 m
   down, within a 60° cone, with a backward fall at 120° or more;
 - retail targeted-jump ballistics (`human::in_air::home`: `GetDropTime` + `GetTargettingAcceleration`).
+- retail hang rebound (back eject): leap first, stick cones, best target or the farthest foothold 8 m out
+  (`human::ledge`).
 Retail has two targeted-jump paths:
 - clip warp onto the target: ground jumps, approximated by our `jump::Flight`;
 - ballistic homing: only when InAirData +0x1fa is set, for ledge, ladder and leap-of-faith releases.
 
 ## Next targets (in suggested order)
-1. **Hang eject and release ballistics.** `HumanLedge::ReleaseToInAir` 00d86b02 and `ReleaseToTarget`
-   00d8cabb set +0x1fa, so they are true ballistic jumps. Port their targets and velocities onto
-   `human::in_air::home`. Ours is a fixed 1.71 m/s fall off the wall (NOTES "Freerun moves"); the gate
-   `eject` ends -14.86 43.99 2.25 today and will move, so justify the new value.
-2. **`Flight` warp fidelity.** `HumanInAir::UpdateMainMain` 01328022 ~l.640-1000: progress
-   (t + len1)/(len1 + len2) over takeoff + air clips (`Action::GetTotalDisplacementMatrix`). The per-tick
-   correction toward the re-read target is clamped to 1 m (10 m with +0x1fc). Our warp shape is ours.
-3. **Brain edge commands.** `AssassinTaskGround::UpdateGroundMovement` 0166fb1c: `UnbalanceOnEdge` and
-   `IsNarrowEdge` 00fd1e26 decide EdgeStop and NarrowObject. Ours still triggers edge stop by low profile.
-4. **NarrowObject FreeRun as a state**: beam running, beam entry clip, and jumps and walling from beams
-   (findings table, rows marked missing).
-5. **Smaller items**:
-   - pilotis' extra retail conditions: no freestep target, plus a gap ahead (Human vtable +0x2c0, 0.5);
-   - the TargetedLedgeGrab beam landing clips (`GetFrontFoot` 00cbb628);
-   - the ObstacleCollision bump clip;
-   - a slope state (our floors stop at 53°);
-   - ladder releases.
+1. ~~Hang eject~~: done in phase3-ledge-release (NOTES "Hang rebound"). The back eject is the retail
+   rebound, a targeted jump (not ballistic). `ReleaseToTarget` 00d8ca6e is not on the player path (see
+   NOTES "Phase 3 review"): a player release is a plain drop or a leap of faith.
+2. ~~`Flight` warp~~: done (NOTES "Flight warp"). The end error is linear in time over the clips. Moving footholds
+   (the per-tick re-read correction) are not modelled, since San Donato has none.
+3. ~~Brain edge commands~~: done (NOTES "Low-profile edge brake"). Players never get UnbalanceOnEdge, which is NPC-only;
+   low profile brakes hard (SetBreakHard) at drops over 2.5 m. Open: the LookDown pose, and the MoveStop clip on
+   the brake.
+4. ~~NarrowObject FreeRun~~ and 5. ~~smaller items~~: reviewed (NOTES "Phase 3 review"). Jumps off beams already
+   work; the release never targets for players; the pilotis gap gate, slopes (rare on San Donato) and ladders
+   are documented, not ported. Left: retail clips (beam entry/landing, bump, edge stop/look-down), visuals, parked.
 6. **Wave C**: tune against retail traces once the user's captures arrive (`tools/tracecmp.py`,
    `crates/acb-trace`).
 

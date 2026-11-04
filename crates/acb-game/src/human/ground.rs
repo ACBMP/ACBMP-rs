@@ -35,6 +35,24 @@ pub fn edge_stop(depth: Option<f32>) -> bool {
     depth.is_none_or(|d| d > EDGE_STOP_DEPTH)
 }
 
+/// A player in low profile pushing at a gap deeper than this brakes hard
+/// at the edge instead of walking off, metres. The player brain never
+/// sends UnbalanceOnEdge (only `GroundNavigationTask::CheckForFallOffEdge`
+/// 01538746, NPCs, does): `AssassinTaskGround::UpdateGroundMovement`
+/// 0166fb1c ~l.1040-1070 calls `IHumanGround::SetBreakHard(true)` (slot
+/// 0x1f) for a gap within 0.3 m (`GetBestGapInDirectionInList`), deeper
+/// than 2.5 m, within [`BREAK_HARD_CONE`] of the stick (stick > 0.35, high
+/// profile not held), and the move cycle stops (`TestMoveCycleToMoveStopMain`
+/// reads it).
+pub const BREAK_HARD_DEPTH: f32 = 2.5;
+/// See [`BREAK_HARD_DEPTH`] (0166fb1c: 1.2217305 rad, 70 deg).
+pub const BREAK_HARD_CONE: f32 = 1.221_730_5;
+
+/// Deep enough for the low-profile hard brake (`None`: no floor below).
+pub fn break_hard(depth: Option<f32>) -> bool {
+    depth.is_none_or(|d| d > BREAK_HARD_DEPTH)
+}
+
 /// Retail `HumanGround` EdgeStop: stopped at a drop, facing over it along
 /// `along`. From here the jump button pulls down onto the wall below even
 /// when standing still (`TestEdgeStopToLedge...LedgePullDown` 00fd226a);
@@ -190,6 +208,14 @@ mod tests {
         assert!(!edge_stop(Some(2.0)));
         assert!(edge_stop(Some(2.1)));
         assert!(edge_stop(None));
+    }
+
+    #[test]
+    fn low_profile_brakes_over_two_and_a_half_metres() {
+        assert!(!break_hard(Some(2.2)));
+        assert!(!break_hard(Some(2.5)));
+        assert!(break_hard(Some(2.6)));
+        assert!(break_hard(None));
     }
 
     #[test]

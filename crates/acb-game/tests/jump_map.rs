@@ -334,3 +334,30 @@ fn jump_button_steps_off_a_beam_end() {
     println!("after F: {:.2?}", p.pos);
     assert!(p.pos.z < 0.2 && !p.loco.airborne() && p.climb.is_none(), "did not step off: {:?}", p.pos);
 }
+
+/// A rebound (F on a wall) with nothing in jump reach behind: retail aims
+/// at the farthest foothold, 8 m straight out from the wall and 3 m down
+/// (`Human::GetFarthestFootHoldInDirection` 00d14144), then drops. From
+/// the 10 m hang on the west tower (wall facing -y) that lands 8.0-8.4 m
+/// out (gate `rebound`; gate `eject` covers a low hang, whose target is
+/// the floor at the wall's foot).
+#[test]
+fn rebound_targets() {
+    let Some(d) = data() else { return };
+    let jump = PlayerInput { jump: true, ..PlayerInput::default() };
+    let mut w = player_at(&d, [-46.81, 21.36, 10.6, 0.0]);
+    for _ in 0..(1.5 / DT) as usize {
+        w.step(&[PlayerInput::default()]);
+    }
+    assert!(w.players[0].climb.is_some(), "not hanging: {:?}", w.players[0].pos);
+    let start = w.players[0].pos;
+    w.step(&[jump]);
+    for _ in 0..(4.0 / DT) as usize {
+        w.step(&[PlayerInput::default()]);
+    }
+    let p = &w.players[0];
+    let out = start.y - p.pos.y;
+    println!("tower: from {start:.2?} landed {:.2?}, {out:.2} m out", p.pos);
+    assert!(!p.loco.airborne() && p.climb.is_none(), "not landed: {:?}", p.pos);
+    assert!((8.0..8.4).contains(&out), "landed {out:.2} m out");
+}

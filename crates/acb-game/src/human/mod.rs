@@ -13,6 +13,8 @@
 //! - [`ground`]: `HumanGround` edges (fall off vs step down, edge stop,
 //!   pull-down) and the obstacle collision (bumping into a wall).
 //! - [`haystack`]: the haystack contact entry (facing / push cones).
+//! - [`ledge`]: wall jumps from a hang or climb (leap first, rebound
+//!   direction, the farthest foothold).
 //! - [`jump`]: the Legs window and stick cone that let a freerun jump out
 //!   at an edge (there is no manual jump).
 
@@ -20,6 +22,7 @@ pub mod ground;
 pub mod haystack;
 pub mod in_air;
 pub mod jump;
+pub mod ledge;
 
 pub use ground::{Edge, EdgeStop, Obstacle};
 pub use in_air::{Air, AirCheck, Contact};

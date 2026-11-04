@@ -60,12 +60,10 @@ pub struct Player {
 }
 
 /// Low profile stops at a drop deeper than this instead of walking off
-/// (retail `xx_l_ledge_lookdown_*`, `xx_l_beam_edge_stop`); the jump
-/// button then lowers onto the wall below (`Climb::pulldown`) or steps
-/// off. Retail: `HumanGround::TestMoveToEdgeStopOnHumanGroundInterfaceCommand_
-/// UnbalanceOnEdge` enters EdgeStop only for a narrow edge whose gap is
-/// deeper than 2 m (and pull-down clearance); shallower drops are walked off.
-pub const LEDGE_STOP: f32 = human::ground::EDGE_STOP_DEPTH;
+/// (retail brain `SetBreakHard`, [`human::ground::BREAK_HARD_DEPTH`]); the
+/// jump button then lowers onto the wall below (`Climb::pulldown`) or steps
+/// off. Shallower drops are walked off (a 1 m hop out, retail FallOffEdge).
+pub const LEDGE_STOP: f32 = human::ground::BREAK_HARD_DEPTH;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
@@ -529,20 +527,39 @@ pub(crate) fn drive(
                 p.vel = Vec3::ZERO;
                 p.loco.resume(pose.clone());
             }
-            Outcome::Drop(v) | Outcome::Eject(v) => {
-                if matches!(outcome, Outcome::Eject(_)) {
-                    p.catch_block = EJECT_NO_CATCH;
-                    if crate::trace() {
-                        eprintln!("eject at {:.2?} v {:.2?}", p.pos.to_array(), v.to_array());
-                    }
-                }
+            Outcome::Drop(v) => {
                 p.climb = None;
                 p.loco.resume(pose.clone());
                 p.loco.start_fall();
                 p.vel = v;
                 p.fall_from = p.pos.z;
-                let delay = if matches!(outcome, Outcome::Eject(_)) { EJECT_NO_CATCH } else { 0.0 };
-                p.air = Air::start(p.pos.z, Some(delay));
+                p.air = Air::start(p.pos.z, Some(0.0));
+            }
+            Outcome::Eject(away) => {
+                // retail rebound (`HumanLedge::ProcessReboundTransition`
+                // 00d8d890 -> `Human::DoTargetedJumpOrFarthestJump`): a
+                // targeted jump to the best jump target along `away` (ours:
+                // the freerun gap search, a hang beating a floor more than
+                // 1.75 m lower), else to the farthest foothold 8 m out and
+                // 3 m down (`human::ledge::farthest`), flown like a fall
+                // off an edge
+                p.climb = None;
+                p.loco.resume(pose.clone());
+                p.catch_block = EJECT_NO_CATCH;
+                let floor = jump::target(ground, clips, p.pos, away, true);
+                let low = |t: &(Vec3, jump::Flight, bool)| t.0.z < p.pos.z - 1.75;
+                let to = if floor.as_ref().is_none_or(low) { jump::hang_target(ground, clips, p.pos, away).or(floor) } else { floor };
+                match to {
+                    Some((target, flight, _)) => {
+                        let why = if flight.grab.is_some() { "rebound to a hang" } else { "rebound" };
+                        jump::take_off(p, clips, sk, target, flight, why);
+                    }
+                    None => {
+                        let target = human::ledge::farthest(p.pos, away);
+                        jump::fall_off(p, clips, sk, away * crate::climb::EJECT_SPEED, target);
+                        p.air.delay = Some(EJECT_NO_CATCH);
+                    }
+                }
             }
         }
         bodies[me].show(p.entity(), pose);
@@ -878,11 +895,14 @@ pub(crate) fn drive(
                 across
             };
             let why = if across.as_ref().is_some_and(|t| t.1.grab.is_some()) { "hang" } else { why };
-            // low profile at a drop (a roof edge, a beam end): stop at the
-            // edge (a beam end at any drop); the jump button lowers onto the
-            // wall below or steps off
-            let deep = |g: &Ground| human::ground::edge_stop(g.floor_below(to + Vec3::Z * 0.1).map(|f| p.pos.z - f));
-            if ledge && !input.run && up.is_none() && len > 1e-4 && (beam.is_some() || deep(ground)) {
+            // low profile at a drop: the jump button lowers onto the wall
+            // below (drop over 2 m, retail CanPullDownOnEdge) or steps off;
+            // otherwise a drop over 2.5 m brakes hard at the edge (retail
+            // SetBreakHard, `human::ground::BREAK_HARD_DEPTH`), and so does a
+            // beam end at any drop (retail HumanNarrowObjectBeam EdgeStop)
+            let depth = ground.floor_below(to + Vec3::Z * 0.1).map(|f| p.pos.z - f);
+            let stop = if input.jump { human::ground::edge_stop(depth) } else { human::ground::break_hard(depth) };
+            if ledge && !input.run && up.is_none() && len > 1e-4 && (beam.is_some() || stop) {
                 let along = delta / len;
                 if input.jump {
                     // retail Move -> Ledge (LedgePullDown) straight from moving

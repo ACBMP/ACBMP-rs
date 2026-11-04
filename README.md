@@ -119,7 +119,7 @@ Controls (on foot):
 | Key | Action |
 |---|---|
 | W A S D | move, relative to the camera |
-| (nothing) | low profile: walk; stops at ledges deeper than 2 m and at beam ends |
+| (nothing) | low profile: walk; stops at ledges deeper than 2.5 m and at beam ends; walks off shallower drops with a small hop |
 | Shift | high profile: run; runs into wall runs and climbs |
 | Space | Legs: sprint (high profile). Freerun jumps (up onto a ledge, across a gap, to a hang across a gap) need Space held or pressed in the last 0.5 s and the move direction within 80° of facing (retail); there is no jump button: Space alone does nothing, but Shift + Space + a direction toward a ledge jumps even from standing (retail ForwardFromIdle). Running off an edge with nothing in reach to land on jumps out into the open toward the retail target: 1 m out in low profile, up to 3 m out in high profile (more the faster you go), reaching that 3 m below the edge, then straight down. Starting off in any direction from standing turns and moves at once (0.2 s turn in high profile, 0.4 s walking) |
 | F | jump: at a ledge stop (walking into it or standing there), lower onto the wall below; with no wall to lower onto (a beam end, a railing, a ledge without a hold) step off and drop |
@@ -132,9 +132,13 @@ Controls (on foot):
 | Esc | quit |
 
 On a wall: W/S/A/D climb up/down/left/right (fixed directions, not camera
-relative); F + S or F alone jumps back off the wall, F + A/D jumps sideways
-across a gap, F + W leaps to a hold above; Shift + A/D at the end of an edge
-also side-jumps. W at the top edge pulls up over it onto the floor behind (also onto narrow tops: wall tops, posts, centred) when there is room to stand there. A fall grabs a hold up to 1.2 m ahead only in its first
+relative); F + W, or F alone, leaps to a hold 0.9-2.6 m above; F + A/D jumps
+sideways across a gap to a hold; Shift + A/D at the end of an edge also
+side-jumps. With no hold for those, and with F + S, you push off the wall
+(retail rebound): a jump out to the best landing behind you (a floor up to
+3 m lower, or a hang across), or with none in reach out 8 m and 3 m down, then
+straight down (F + A/D push off almost along the wall, 89 deg from straight
+out). W at the top edge pulls up over it onto the floor behind (also onto narrow tops: wall tops, posts, centred) when there is room to stand there. A fall grabs a hold up to 1.2 m ahead only in its first
 2 m (retail); after that you go down. Drops under 0.53 m are stepped down,
 deeper ones fallen off, unless something blocks the space just past the
 edge (a railing, a wall, a low overhang: you stay on the edge). A short

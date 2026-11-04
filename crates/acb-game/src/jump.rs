@@ -218,10 +218,12 @@ const SINK: f32 = 0.05;
 impl Flight {
     /// The flight from `start` to `target`, facing along the jump, on the
     /// blend of `kinds` (`(kind, weight)`) off `foot`: the blended clip
-    /// path rotated onto the jump, its end error spread over the flight
-    /// (horizontally linear; vertically early when the target is higher,
-    /// late when lower). Retail lets a jump that ends lower than its clips
-    /// drop under gravity: the extra drop adds its fall time.
+    /// path rotated onto the jump, its end error (target - clip end)
+    /// spread linearly in time over the takeoff + air clips, which the
+    /// flight lasts (retail `Human::ComputeTargetedJumpData` 00d04b86 stores
+    /// the error at InAirData +0xe0; `HumanInAir::UpdateMainMain` 01328022
+    /// adds progress * error to the clips' root, progress = t / (len1 +
+    /// len2)).
     ///
     /// `edge` is the horizontal distance along the jump to the near face
     /// of a top the jump goes up onto. The feet must be over the top's
@@ -249,9 +251,6 @@ impl Flight {
             dur += len * w;
         }
         let err = d - rot * local[SAMPLES];
-        if err.z < 0.0 {
-            dur += (2.0 * -err.z / GRAVITY).sqrt();
-        }
         let horiz = |u: f32| {
             let x = u * SAMPLES as f32;
             let i = (x.floor() as usize).min(SAMPLES - 1);
@@ -259,9 +258,7 @@ impl Flight {
             (rot * q).truncate() + err.truncate() * u
         };
         let clip_z = |i: usize| {
-            let u = i as f32 / SAMPLES as f32;
-            let s = if err.z > 0.0 { 1.0 - (1.0 - u) * (1.0 - u) } else { u * u };
-            (rot * local[i]).z + err.z * s
+            (rot * local[i]).z + err.z * (i as f32 / SAMPLES as f32)
         };
         // onto a top: a ballistic arc over it, horizontal held back
         let up = edge.filter(|_| d.z > STEP);
