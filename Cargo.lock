@@ -35,6 +35,7 @@ dependencies = [
  "acb-anim",
  "acb-world",
  "anvil-fastload",
+ "anvil-schema",
  "anyhow",
  "glam",
 ]

@@ -138,7 +138,7 @@ fn entries_on_san_donato() {
     assert!((point.z - 6.02).abs() < 0.1 && hold.top, "{point:?}");
     // running parallel to the wall is no wall run
     assert!(g.wall_ahead(feet, fwd, glam::Vec2::Y * 4.0).is_none());
-    assert!(g.climb_entry(Vec3::new(-11.19, 47.82, 6.61), glam::Vec2::Y).is_some());
+    assert!(g.climb_entry(Vec3::new(-11.19, 48.4, 6.61), glam::Vec2::Y).is_some());
 }
 
 /// Retail StepOff material (`CollisionMaterial::AIType` 2): on San Donato

@@ -27,13 +27,13 @@ fn env() -> Option<(PathBuf, PathBuf, PathBuf)> {
 }
 
 /// Slot 0 stands still facing +X and holds kill from 2.5 to 2.75 s; slot 1
-/// starts 10 m ahead facing it, runs at it from 1 s and turns back at 2.27 s.
+/// starts 10 m ahead facing it, runs at it from 1.45 s and turns back at 2.27 s.
 fn script(slot: usize, tick: u32) -> PlayerInput {
     let t = tick as f32 / 60.0;
     let mut i = PlayerInput { cam_yaw: if slot == 0 { 0.0 } else { std::f32::consts::PI }, ..Default::default() };
     if slot == 0 {
         i.kill = (2.5..2.75).contains(&t);
-    } else if (1.0..2.27).contains(&t) {
+    } else if (1.45..2.27).contains(&t) {
         i.forward = true;
         i.run = true;
     } else if (2.27..4.0).contains(&t) {

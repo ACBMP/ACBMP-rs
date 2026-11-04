@@ -73,21 +73,22 @@ fn ray_tri(o: Vec3, d: Vec3, [a, b, c]: &[Vec3; 3]) -> Option<f32> {
     Some(e2.dot(q) / det)
 }
 
+/// Guidance sub type of a pole (schema `GuidanceObjectSubTypePole`): thin
+/// bars, 26 edges on San Donato.
+const SUB_TYPE_POLE: u32 = 4;
+
 impl Ground {
     pub fn load(archive: &Archive) -> anyhow::Result<Ground> {
         let mut g = Ground { tris: Vec::new(), no_stand: Vec::new(), floor: HashMap::new(), wall: HashMap::new(), ledges: Vec::new(), ledge_grid: HashMap::new(), holds: Vec::new(), hold_grid: HashMap::new(), pilotis_memo: Default::default() };
         for e in archive.guidance_edges() {
             let wall = e.normals.iter().map(|n| Vec3::from(*n)).find(|n| n.z.abs() < 0.5 && n.truncate().length() > 0.5);
-            if let Some(w) = wall {
+            // the underside of a surface is no hold either (retail EdgeFilter
+            // GroundCeiling)
+            let bar = e.sub_type == SUB_TYPE_POLE;
+            let under = e.normals.iter().any(|n| n[2] < -0.5);
+            if let Some(w) = wall.filter(|_| !under || bar) {
                 let (a, b) = (Vec3::from(e.a), Vec3::from(e.b));
-                let id = g.holds.len() as u32;
-                g.holds.push(Hold { a, b, wall: w.truncate().normalize(), top: e.normals.iter().any(|n| n[2] > 0.7) });
-                let (lo, hi) = (cell(a.truncate().min(b.truncate())), cell(a.truncate().max(b.truncate())));
-                for x in lo.0..=hi.0 {
-                    for y in lo.1..=hi.1 {
-                        g.hold_grid.entry((x, y)).or_default().push(id);
-                    }
-                }
+                g.holds.push(Hold { a, b, wall: w.truncate().normalize(), top: e.normals.iter().any(|n| n[2] > 0.7), bar });
             }
             // keep edges with a walkable face on top
             if !e.normals.iter().any(|n| n[2] > 0.7) {
@@ -118,6 +119,18 @@ impl Ground {
                 let no_stand = mat != 0
                     && *step_off.entry(mat).or_insert_with(|| archive.material_ai_type(mat) == Some(AI_TYPE_STEP_OFF));
                 g.add(t.map(|i| m.transform_point3(Vec3::from(shape.vertices[i as usize]))), no_stand);
+            }
+        }
+        // needs the collision: only real holds go in (a long edge counts if
+        // it is one anywhere along its length)
+        let holds = std::mem::take(&mut g.holds);
+        g.holds = holds.into_iter().filter(|h| h.bar || [0.5, 0.25, 0.75].iter().any(|&t| g.hold_fault(h.at(t), h.wall).is_none())).collect();
+        for (id, h) in g.holds.iter().enumerate() {
+            let (lo, hi) = (cell(h.a.truncate().min(h.b.truncate())), cell(h.a.truncate().max(h.b.truncate())));
+            for x in lo.0..=hi.0 {
+                for y in lo.1..=hi.1 {
+                    g.hold_grid.entry((x, y)).or_default().push(id as u32);
+                }
             }
         }
         Ok(g)

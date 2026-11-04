@@ -365,9 +365,43 @@ pub fn hang_target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2) -> Opti
     if !reachable(d.truncate().dot(fwd), d.z) {
         return None;
     }
+    // a top no higher than a running jump reaches: on the feet, running on
+    // (the user's playtest: a roof across a gap is no place for a hang, and
+    // the targeted-jump polygon alone stops short of what a hang reaches)
+    if !hold.bar && hold.top && q.z - pos.z <= DETECTION[1].1 {
+        if let Some(spot) = feet_on_top(ground, clips, pos, &hold, q) {
+            return Some(spot);
+        }
+    }
     let mut flight = Flight::new(clips, &weights(clips, d), 0, pos, feet, None);
     flight.grab = Some((hold, q));
     Some((feet, flight, false))
+}
+
+/// The flight from feet at `pos` onto the floor behind the top edge `hold`
+/// (hands would be at `q`), if there is room to stand and the way is clear.
+pub fn feet_on_top(ground: &Ground, clips: &Clips, pos: Vec3, hold: &crate::climb::Hold, q: Vec3) -> Option<(Vec3, Flight, bool)> {
+    let spot = ground.pullup_spot(hold, q)?;
+    let d = spot - pos;
+    let dir = d.truncate().normalize_or_zero();
+    let flight = Flight::new(clips, &weights(clips, d), 0, pos, spot, Some((q - pos).truncate().dot(dir).max(0.0)));
+    flight.clear(ground).then_some((spot, flight, false))
+}
+
+/// A jump to swing on a pole for feet at `pos` running along `fwd`: a
+/// pole ahead in reach of [`DETECTION`], the flight ending with the hands on
+/// it (retail `xx_h_air_*_to_swing`; those clips reach 6.5 m ahead on the
+/// level, ours flies the plain jump clips).
+pub fn bar_target(ground: &Ground, clips: &Clips, pos: Vec3, fwd: Vec2) -> Option<(Vec3, Flight, bool)> {
+    let (hold, q) = ground.bar_hold(pos, fwd, DETECTION[0].0, SEARCH)?;
+    let feet = crate::climb::entity_for(q, hold.wall, crate::climb::Stance::HangFree);
+    let d = feet - pos;
+    if !reachable(d.truncate().dot(fwd), d.z) {
+        return None;
+    }
+    let mut flight = Flight::new(clips, &weights(clips, d), 0, pos, feet, Some((q - pos).truncate().dot(fwd).max(0.0)));
+    flight.grab = Some((hold, q));
+    flight.clear(ground).then_some((feet, flight, false))
 }
 
 /// A freerun jump target for feet at `pos` running along `fwd` (unit):
@@ -522,6 +556,30 @@ pub(crate) fn fall_off(p: &mut Player, clips: &Clips, sk: &Skeleton, vel: Vec2, 
             target.to_array(),
             vel.length()
         );
+    }
+}
+
+/// Rise of a leap into the open, m/s: an arc of 0.46 m (ours: retail's clips
+/// warp onto the target, `xx_h_run_front_550cm` tops out about there).
+pub const LEAP_RISE: f32 = 3.0;
+
+/// A freerun leap off an edge with nothing to land on: out towards `target`
+/// (retail `Human::DoTargetedJumpOrFarthestJump` 00d06d30 falling back on
+/// `GetFarthestFootHoldInDirection` 00d14144, 8 m out and 3 m down), on a
+/// ballistic arc so that the fall's checks run on the way. Ours: past the
+/// target's height it keeps going rather than dropping straight down.
+pub(crate) fn leap(p: &mut Player, clips: &Clips, sk: &Skeleton, target: Vec3) {
+    let d = target - p.pos;
+    let main = main_kind(&weights(clips, d));
+    p.loco.start_leap(clips, sk, main);
+    let t = (LEAP_RISE + (LEAP_RISE * LEAP_RISE + 2.0 * GRAVITY * (-d.z).max(0.0)).sqrt()) / GRAVITY;
+    p.yaw = (-d.x).atan2(d.y);
+    p.vel = (d.truncate() / t).extend(LEAP_RISE);
+    p.fall_from = p.pos.z;
+    p.air = crate::human::Air::start(p.pos.z, Some(0.0));
+    p.edge = None;
+    if crate::trace() {
+        eprintln!("jump: leap from {:.2?} towards {:.2?} at {:.2} m/s", p.pos.to_array(), target.to_array(), p.vel.truncate().length());
     }
 }
 
