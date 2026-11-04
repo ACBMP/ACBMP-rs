@@ -1571,6 +1571,41 @@ Retail's back eject is the rebound, a ground-style targeted jump. It is not one 
   - So retail's slope class (45-70 deg, a slide) barely shows on this map. Not ported.
 - Ladders: none handled (no ladder entities read). Retail `HumanLadder::ExecuteReleaseToTarget` is ballistic.
 
+## Manhunt (catsmice) (2026-11-03, phase4-manhunt)
+Full findings: `~/.cache/acbmp-re/findings/mode-manhunt.md`.
+- Data: DataPC 0x9f959f8c ManHunt GamemodeParameters, engine "catsmice". Kill reach and threat meter are the same
+  as Escort and Wanted2. Spawn distances differ: CatchupSpawnDistanceFromOthers 10 m, FromNoContracts 0,
+  CatchupSpawnDistanceMax 60 m (catch-up spawns are not used by our team spawn rule). Rules text loc 0x4db3f: 2 teams,
+  6-8 players, 2 rounds of 5 minutes, roles switch, hunters kill targets, the prey hide (more points near
+  teammates) and humiliate (stun) pursuers.
+- Contracts: `GameInfo::SetupTeamLoop_CatsMice` 0117f9d8 gives every hunter a killer loop on every member of the
+  target team (round 1 team 0 hunts, round 2 team 1). `GBrick_SelectBestTargetCatsMice` (Start 012828ce, Update
+  01263db0, SwapTargetsForLoop 01263c5c) re-adds a kill's loop after TimeWithoutTarget 3 s, through
+  `AddKillerLoop` 0117eec8's pending target. The teammate switches (SwitchToTeammate, SwitchMyTeammate,
+  ChangeTarget*OnNPCKill) default off.
+  - Ours: `rules::TeamGame::Manhunt` and `manhunt_relation`: hunter -> enemy player = Target, prey -> hunter =
+    Pursuer (stun only), teammates Other.
+  - The 3 s pending loop is moot while the respawn delay (5 s, placeholder) is longer; not modelled.
+- Hide bonus `GBrick_BlendedScore` (ReadFromXML 012d1822 defaults):
+  - StartInterval 1 s, TimeInterval 5 s, CooldownInterval 7 s, Radius 20 m.
+  - BlendedBonus 10 / 20 / 30 / 50 by the number of hidden prey together (`UpdateHiddenTargets` 0130f0d2).
+  - "Hidden" (`ComputePBHIForPlayer` 011864af, +0x8d) = blended in a crowd group, a hiding spot, or Disguise.
+  - Ours: `manhunt::Hide` (state machine from `Update` 0130f28e, `AwardBonus` 012fd80a, `StopBonus` 012ffad6).
+    `Match::hide_tick` runs while playing, for a living prey, `Presence.hidden || blended`, not in a kill or stun.
+    The timer counts whole sim ticks and rides in `GameState.hide` (state, ticks) so a rollback restores it.
+- Ours, the plumbing: Manhunt reuses Escort's machinery (`Mode::Escort(Teams)` with `Teams.game`, rounds, team
+  scores, team spawn groups, net team state); `World::manhunt` makes no VIPs. Wire: the Start escort byte is 2
+  (proto v12). Server `--mode manhunt`; HUD role "prey" and the nearest enemy's distance. Result line
+  `manhunt result ...`.
+- [R], ours, our reading: the brick list did not ship. Kills score `KILL_POINTS` with the acrobatic and haystack
+  bonuses, stuns `STUN_POINTS` (ScoreChase humiliation); escape scoring is not wired (no single-target chase).
+  Kill bonuses: the Assassinate set (`bonus::Tracker`; loc 0x4db3f "execute quality kills"), without Incognito
+  (ours: team modes have no threat meter); `tools/manhunt.sh` round 1: 4 kills, teams [800, 0].
+  Round length 300 s matches the text. Kill bonuses beyond those (retail ScoreKill types) are not ported.
+- Tests: `manhunt::tests` (bonus timing, mates), `mode::tests::manhunt_hunters_kill_prey_hide_and_stun`;
+  `tools/manhunt.sh`: 2 rounds, roles swap, 0 desync on 4 clients, round 1 scores 4 kills (teams [400, 0]); its
+  `vip` bot follows the navmesh (`Nav::path`, `World::manhunt` loads the crowd) to the nearest prey.
+
 ## Crowd of every persona, 60 by default (2026-11-04, phase4-crowd)
 - Characters: the crowd now uses `crowd_characters`, every `AC2MP_IDxx_MainTemplate_NPC` builder in DataPC (14:
   ID07, 08, 10, 14, 15, 17, 18, 20, 22-27), sorted by name and assigned round-robin, instead of the players'

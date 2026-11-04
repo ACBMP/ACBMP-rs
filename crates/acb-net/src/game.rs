@@ -77,8 +77,13 @@ pub fn load_match(archive: &Archive, slots: &[Slot], builtins: Option<&BuiltinTr
         match escort {
             Some(e) => {
                 anyhow::ensure!(e.team.len() == slots.len(), "escort: {} teams for {} slots", e.team.len(), slots.len());
-                let teams = acb_game::rules::Teams { team: e.team.clone(), attacking_team: e.attacking, vips: Vec::new(), escorted: Vec::new() };
-                world.escort(archive, builtins, teams, cfg, spawns)?;
+                let game = if e.manhunt { acb_game::rules::TeamGame::Manhunt } else { acb_game::rules::TeamGame::Escort };
+                let teams = acb_game::rules::Teams { game, team: e.team.clone(), attacking_team: e.attacking, vips: Vec::new(), escorted: Vec::new() };
+                if e.manhunt {
+                    world.manhunt(archive, builtins, teams, cfg, spawns);
+                } else {
+                    world.escort(archive, builtins, teams, cfg, spawns)?;
+                }
                 if let Some(m) = &mut world.mode {
                     let n = m.rounds.as_ref().map_or(2, |r| r.team_score.len());
                     m.rounds = Some(acb_game::rounds::Rounds::new(n, e.intro, cfg.time_limit, e.recap));
@@ -243,6 +248,14 @@ pub fn game_state(m: &Match) -> GameState {
                 memory: t.memory.iter().map(|k| (k.killer as u8, k.victim as u8, u(k.left))).collect(),
             }
         }),
+        hide: m
+            .hide
+            .iter()
+            .map(|h| {
+                let (state, t) = h.to_parts();
+                (state, t.min(u16::MAX as u32) as u16)
+            })
+            .collect(),
     }
 }
 
@@ -283,6 +296,9 @@ pub fn apply_game_state(m: &mut Match, g: &GameState) -> Vec<usize> {
             t.last_killer[p] = id(last);
         }
         t.memory = b.memory.iter().map(|&(k, v, left)| acb_game::bonus::Memory { killer: k as usize, victim: v as usize, left: left as u32 }).collect();
+    }
+    for (h, &(state, t)) in m.hide.iter_mut().zip(&g.hide) {
+        *h = acb_game::manhunt::Hide::from_parts(state, t as u32);
     }
     g.escort.as_ref().map(|e| apply_escort(m, e)).unwrap_or_default()
 }

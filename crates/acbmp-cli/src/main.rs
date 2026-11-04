@@ -345,7 +345,8 @@ enum Cmd {
         duration: Option<f32>,
         /// duel (Wanted contracts, scores, respawns; any player count), escort (teamvip: two
         /// teams, VIPs, 2 rounds with an attacker swap; --time-limit is each round's play),
-        /// assassinate (free-for-all, a contract is acquired by looking at a player for 3 s;
+        /// manhunt (catsmice: Escort's teams and rounds, the attacking team hunts the other
+        /// team's players, the prey stun hunters and score by hiding), assassinate (free-for-all, a contract is acquired by looking at a player for 3 s;
         /// 600 s) or free (no match rules)
         #[arg(long, default_value = "duel")]
         mode: String,
@@ -387,16 +388,16 @@ fn main() -> anyhow::Result<()> {
     match Cli::parse().cmd {
         Cmd::Serve { map, schemas, exe, port, players, snapshot_every, netsim, at, log, duration, mode, intro, recap, teams, attacking, time_limit, score_limit, respawn, start_delay, crowd, crowd_seed } => {
             let rules = match mode.as_str() {
-                "duel" | "escort" => Some(acb_net::mode::MatchConfig { time_limit: time_limit.unwrap_or(300.0), score_limit, respawn_delay: respawn, start_delay }),
+                "duel" | "escort" | "manhunt" => Some(acb_net::mode::MatchConfig { time_limit: time_limit.unwrap_or(300.0), score_limit, respawn_delay: respawn, start_delay }),
                 "assassinate" => Some(acb_net::mode::MatchConfig { time_limit: time_limit.unwrap_or(acb_net::mode::ASSASSINATE_TIME), score_limit, respawn_delay: respawn, start_delay }),
                 "free" => None,
-                m => anyhow::bail!("--mode {m}: duel, escort, assassinate or free"),
+                m => anyhow::bail!("--mode {m}: duel, escort, manhunt, assassinate or free"),
             };
-            let escort = if mode == "escort" {
+            let escort = if mode == "escort" || mode == "manhunt" {
                 let team: Vec<u8> = teams.split(',').filter(|t| !t.trim().is_empty()).map(|t| t.trim().parse()).collect::<Result<_, _>>()?;
                 anyhow::ensure!(team.is_empty() || team.len() == players, "--teams: {} teams for {players} players", team.len());
                 anyhow::ensure!(team.iter().chain([&attacking]).all(|&t| t < 4), "--teams / --attacking: teams 0..3 (4 team spawn groups)");
-                Some(acb_net::proto::EscortRules { team, attacking, intro, recap })
+                Some(acb_net::proto::EscortRules { team, attacking, intro, recap, manhunt: mode == "manhunt" })
             } else {
                 None
             };

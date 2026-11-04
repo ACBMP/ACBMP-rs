@@ -15,6 +15,7 @@ pub mod human;
 pub mod jump;
 pub mod kill;
 pub mod locomotion;
+pub mod manhunt;
 pub mod mode;
 pub mod action;
 pub mod bonus;
@@ -595,6 +596,32 @@ impl World {
         self.mode = Some(mode::Match { vips: Some(vip::Vips::new(bodies)), ..mode::Match::escort(teams, config, spawns) });
         self.place_teams(&team);
         Ok(())
+    }
+
+    /// Starts a Manhunt (catsmice) match: Escort's teams, rounds and team
+    /// spawn groups, with no VIPs ([`rules::TeamGame::Manhunt`]: the
+    /// attacking team hunts the other team's players).
+    /// Loads the crowd (its navmesh steers the test bots) when the map has one.
+    pub fn manhunt(&mut self, archive: &Archive, builtins: Option<&BuiltinTracks>, mut teams: rules::Teams, config: mode::MatchConfig, spawns: Vec<(Vec3, f32)>) {
+        if self.crowd.is_none() {
+            self.crowd = Crowd::load(archive, builtins).ok();
+        }
+        teams.game = rules::TeamGame::Manhunt;
+        teams.vips.clear();
+        teams.escorted.clear();
+        self.team_spawns = archive
+            .player_spawns()
+            .into_iter()
+            .filter(|s| s.kind == 2)
+            .map(|s| {
+                let m = Mat4::from_cols_array(&s.matrix);
+                let f = m.y_axis.truncate();
+                (s.team, m.w_axis.truncate(), (-f.x).atan2(f.y))
+            })
+            .collect();
+        let team = teams.team.clone();
+        self.mode = Some(mode::Match::escort(teams, config, spawns));
+        self.place_teams(&team);
     }
 
     /// Escort: puts every player on its team's spawn group (the k-th

@@ -16,7 +16,9 @@ pub const MAGIC: [u8; 2] = *b"AB";
 /// acquire events.
 /// 10: Assassinate kill bonuses: bonus state in `GameState`, Bonus and
 /// BloodBath events.
-pub const VERSION: u8 = 11;
+/// 12: Manhunt: the Escort rules byte is 2 (team rules as Escort, no VIPs),
+/// hide bonus timers in `GameState`.
+pub const VERSION: u8 = 12;
 /// Largest datagram we send or accept.
 pub const MAX_PACKET: usize = 1400;
 /// Inputs one client packet carries at most (redundancy window).
@@ -477,8 +479,11 @@ pub struct GameState {
     pub escort: Option<EscortState>,
     /// Assassinate only: every player's acquisition (empty otherwise).
     pub acquire: Vec<AcquireState>,
-    /// Assassinate only: kill bonus state.
+    /// Assassinate and Manhunt: kill bonus state.
     pub bonus: Option<BonusState>,
+    /// Manhunt only: every player's hide bonus timer (state 0..=3, ticks;
+    /// `acb_game::manhunt::Hide`); empty otherwise.
+    pub hide: Vec<(u8, u16)>,
 }
 
 /// Assassinate kill bonus state (`acb_game::bonus::Tracker`; 2 + 6 per
@@ -604,6 +609,9 @@ pub struct EscortRules {
     pub attacking: u8,
     pub intro: f32,
     pub recap: f32,
+    /// Manhunt (catsmice) instead of Escort: same teams and rounds, the
+    /// attacking team hunts the other team's players, no VIPs.
+    pub manhunt: bool,
 }
 
 impl GameState {
@@ -660,6 +668,11 @@ impl GameState {
             }
             None => w.u8(0),
         }
+        w.u8(self.hide.len() as u8);
+        for &(state, t) in &self.hide {
+            w.u8(state);
+            w.u16(t);
+        }
     }
 
     fn read(r: &mut Reader, players: u8) -> Option<GameState> {
@@ -686,7 +699,9 @@ impl GameState {
                 Some(BonusState { first_blood: f == 2, players, memory })
             }
         };
-        Some(GameState { ticks_left, over, players, escort, acquire, bonus })
+        let n = r.u8()?;
+        let hide = (0..n).map(|_| Some((r.u8()?, r.u16()?))).collect::<Option<_>>()?;
+        Some(GameState { ticks_left, over, players, escort, acquire, bonus, hide })
     }
 }
 
@@ -885,7 +900,7 @@ impl Msg {
                 w.u32(crowd.seed);
                 match escort {
                     Some(e) => {
-                        w.u8(1);
+                        w.u8(if e.manhunt { 2 } else { 1 });
                         w.u8(e.team.len() as u8);
                         e.team.iter().for_each(|t| w.u8(*t));
                         w.u8(e.attacking);
@@ -968,10 +983,11 @@ impl Msg {
                 }
                 let rules = if r.u8()? != 0 { Some(read_config(&mut r)?) } else { None };
                 let crowd = CrowdConfig { count: r.u16()?, seed: r.u32()? };
-                let escort = if r.u8()? != 0 {
+                let kind = r.u8()?;
+                let escort = if kind != 0 {
                     let n = r.u8()?;
                     let team = (0..n).map(|_| r.u8()).collect::<Option<_>>()?;
-                    Some(EscortRules { team, attacking: r.u8()?, intro: r.f32()?, recap: r.f32()? })
+                    Some(EscortRules { team, attacking: r.u8()?, intro: r.f32()?, recap: r.f32()?, manhunt: kind == 2 })
                 } else {
                     None
                 };
@@ -1247,6 +1263,7 @@ mod tests {
                     AcquireState { focus: NONE, look: 0, memory: vec![(0, 119), (2, 1)], lock: NONE, buttons: 0, released: (0, 299) },
                 ],
                 bonus: Some(BonusState { first_blood: true, players: vec![(180, 1, 3, NONE), (0, NONE, 0, 0)], memory: vec![(1, 0, 599)] }),
+                hide: vec![(0, 0), (2, 299)],
             }),
         }
     }
@@ -1279,7 +1296,7 @@ mod tests {
                 slots: vec![],
                 rules: Some(MatchConfig { time_limit: 120.0, score_limit: 500, respawn_delay: 5.0, start_delay: 3.0 }),
                 crowd: CrowdConfig { count: 40, seed: 0xdead_beef },
-                escort: Some(EscortRules { team: vec![0, 1, 0, 1], attacking: 0, intro: 2.0, recap: 3.0 }),
+                escort: Some(EscortRules { team: vec![0, 1, 0, 1], attacking: 0, intro: 2.0, recap: 3.0, manhunt: true }),
                 assassinate: false,
             },
             Msg::Snapshot(s),

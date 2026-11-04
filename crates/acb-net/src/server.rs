@@ -322,7 +322,8 @@ fn match_result(world: &World, peers: &[Peer]) -> String {
         let verdict = if leaders.len() == 1 { format!("team {} wins", leaders[0]) } else { "draw".into() };
         let per_round: Vec<String> = r.round_score.iter().map(|s| format!("{s:?}")).collect();
         let secs = m.ticks as f32 / acb_game::TICK_HZ as f32;
-        return format!("escort result after {secs:.1} s: teams {:?} (rounds {}), players {} ({verdict})", r.team_score, per_round.join(" "), scores.join(", "));
+        let game = if teams.game == acb_game::rules::TeamGame::Manhunt { "manhunt" } else { "escort" };
+        return format!("{game} result after {secs:.1} s: teams {:?} (rounds {}), players {} ({verdict})", r.team_score, per_round.join(" "), scores.join(", "));
     }
     let scores: Vec<String> = peers.iter().enumerate().map(|(i, p)| format!("{} {}", p.name, m.score[i])).collect();
     let best = m.score.iter().copied().max().unwrap_or(0);
