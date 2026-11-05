@@ -17,7 +17,8 @@
 //! in proportion to the clips' own root progress (horizontal, vertical and
 //! yaw separately), so any hold spacing works: climb moves between holds,
 //! shimmies along an edge, inner and outer corner turns, climb <-> hang,
-//! passover onto the top, steps down to the ground and drops.
+//! pull-up onto the top, steps down to the ground and drops. Guidance poles
+//! (retail `GuidanceObjectSubTypePole`) are swung on, see [`Phase::Swing`].
 
 use std::collections::HashMap;
 
@@ -39,6 +40,10 @@ pub struct Hold {
     pub wall: Vec2,
     /// The edge has walkable ground on top.
     pub top: bool,
+    /// A guidance pole (sub type 4): grabbing it swings
+    /// (`HumanLedge::TestMovementToSwingOnInterfaceCommand_StartSwing`
+    /// 00da2a0e wants both hands on this sub type).
+    pub bar: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -106,8 +111,26 @@ const CLIPS: &[&str] = &[
     "xx_h_hangfree_corner_left_090_out",
     "xx_h_hangfree_corner_right_090_in",
     "xx_h_hangfree_corner_right_090_out",
-    "xx_h_hangwall_tr_passover_handr",
-    "xx_h_passover_handr_030cm",
+    // pull-up over a top edge (retail `HumanLedge` Pullup)
+    "xx_h_hangwall_tr_hangknee_footl_a",
+    "xx_h_hangwall_tr_hangknee_footl_b",
+    "xx_h_hangfree_tr_hangwaist_a",
+    "xx_h_hangfree_tr_hangwaist_b",
+    "xx_h_hangwaist_tr_hangknee_footl",
+    "xx_h_hangknee_footl_tr_freestep_entry_footl",
+    // swinging on a pole
+    "xx_h_swing_cycle_front_down",
+    "xx_h_swing_cycle_back_up",
+    "xx_h_swing_cycle_back_down",
+    "xx_h_swing_cycle_front_up",
+    "xx_h_swing_stop_front_a",
+    "xx_h_swing_stop_front_b",
+    "xx_h_swing_stop_front_c",
+    "xx_h_swing_stop_front_d",
+    "xx_h_swing_stop_back_a",
+    "xx_h_swing_stop_back_b",
+    "xx_h_swing_stop_back_c",
+    "xx_h_swing_stop_back_d",
     "xx_h_hangwall_tr_fall_a",
     "xx_h_hangfree_tr_fall_a",
     "xx_h_hangwall_d_climb_1m",
@@ -214,6 +237,8 @@ struct Seq {
     yaw0: f32,
     yaw1: f32,
     then: Then,
+    /// Playback rate (a standing mount plays its clip in [`MOUNT_TIME`]).
+    rate: f32,
 }
 
 #[derive(Clone)]
@@ -222,7 +247,23 @@ enum Phase {
     /// Grabbed a hold while falling: glide onto it.
     Catch(f32),
     Seq(Seq),
+    /// Swinging on a pole: stage of [`SWING_CYCLE`], time in its clip, whole
+    /// cycles done (retail `HumanLedge` Swing).
+    Swing(usize, f32, u32),
 }
+
+/// The swing, a full cycle: the clips carry no root motion, the body turns
+/// about the pole under an entity held at the hang.
+const SWING_CYCLE: [&str; 4] = ["xx_h_swing_cycle_front_down", "xx_h_swing_cycle_back_up", "xx_h_swing_cycle_back_down", "xx_h_swing_cycle_front_up"];
+/// The forward peak: the end of this stage is where a swing lets go.
+const SWING_FRONT: usize = 3;
+/// The backward peak.
+const SWING_BACK: usize = 1;
+/// Cycles with no input before the swing dies down into a hang (ours).
+const SWING_CYCLES: u32 = 2;
+/// Room a swing needs either side of the pole, metres (ours; retail
+/// `CheckClearanceBoxGlobal` in the swing tests, 00da2a0e / 00da28d4).
+const SWING_ROOM: f32 = 1.0;
 
 #[derive(Clone)]
 pub struct Climb {
@@ -237,16 +278,23 @@ pub struct Climb {
     fade: Option<(Pose, f32)>,
     /// What the last move was, for the trace.
     pub last: &'static str,
-    /// Time the next hold wait ignores the stick for (a mount settling
-    /// into the wall before the first move, as retail).
-    settle: f32,
 }
 
 const FADE: f32 = 0.15;
 
-/// How long the hold wait after a standing mount lets the pose settle
-/// before a held stick starts the first move.
-const MOUNT_SETTLE: f32 = 0.3;
+/// Letting go with the drop button pushes off the wall this fast, m/s, so
+/// the fall clears the ledge it hung from (ours).
+const RELEASE_PUSH: f32 = 0.5;
+
+/// How long a standing mount takes, seconds. Ours (the user's playtest): the
+/// retail clip takes 0.87 s, which reads as charging up, so it plays at speed;
+/// the first move can start at once after it.
+const MOUNT_TIME: f32 = 0.2;
+/// Closer to the wall than this a wall run skips the run-up clip (0.27 s of
+/// stepping in place otherwise), metres (ours).
+const WALL_RUN_NEAR: f32 = 0.7;
+/// Length of `xx_h_wait_hipm_footl_tr_climbing_1m`, seconds.
+const MOUNT_CLIP: f32 = 0.867;
 
 /// Facing into a wall with outward normal `n`.
 pub fn yaw_into(n: Vec2) -> f32 {
@@ -352,21 +400,26 @@ pub enum Outcome {
     Eject(Vec2),
     /// Standing again at this entity position and facing.
     Stand(Vec3, f32),
+    /// The drop button: let go at once and fall past every hold on the way
+    /// down, with this velocity.
+    Release(Vec3),
+    /// Let go of a swing at its forward peak, flying along this direction.
+    SwingJump(Vec2),
 }
 
 impl Climb {
     fn new(hold: Hold, stance: Stance, pos: Vec3, yaw: f32, phase: Phase, fade: Option<Pose>) -> Climb {
-        Climb { hold, stance, pos, yaw, phase, from: pos, fade: fade.map(|p| (p, 0.0)), last: "enter", settle: 0.0 }
+        Climb { hold, stance, pos, yaw, phase, from: pos, fade: fade.map(|p| (p, 0.0)), last: "enter" }
     }
 
     /// Climbs straight onto the wall from standing at `pos` (retail
     /// vertical-stance entry): `hold` is the hand hold.
     pub fn mount(hold: Hold, point: Vec3, pos: Vec3, yaw: f32, from: Pose) -> Climb {
         let to = entity_for(point, hold.wall, Stance::Climb);
-        let seq = Seq::new(&["xx_h_wait_hipm_footl_tr_climbing_1m"], pos, to, yaw, yaw_into(hold.wall), Then::Hold(Stance::Climb, hold));
+        let mut seq = Seq::new(&["xx_h_wait_hipm_footl_tr_climbing_1m"], pos, to, yaw, yaw_into(hold.wall), Then::Hold(Stance::Climb, hold));
+        seq.rate = MOUNT_CLIP / MOUNT_TIME;
         let mut c = Climb::new(hold, Stance::Climb, pos, yaw, Phase::Seq(seq), Some(from));
         c.last = "mount";
-        c.settle = MOUNT_SETTLE;
         c
     }
 
@@ -376,6 +429,7 @@ impl Climb {
     pub fn wall_run(target: Option<(Hold, Vec3)>, wall: Vec3, n: Vec2, pos: Vec3, yaw: f32, from: Pose) -> Climb {
         let run = ["xx_h_impultionstraight_footl_to_wallingfront_step1_footr", "xx_h_wallingfront_entry_footl_a", "xx_h_wallingfront_step1_footr"];
         let yaw1 = yaw_into(n);
+        let run: &[&'static str] = if (wall - pos).truncate().length() < WALL_RUN_NEAR { &run[1..] } else { &run };
         let (seq, hold) = match target {
             Some((hold, point)) => {
                 let to = entity_for(point, hold.wall, Stance::HangWall);
@@ -386,14 +440,14 @@ impl Climb {
                 } else {
                     "xx_h_wallingfront_step1_footr_tr_hangwall_251cm_000cm_a"
                 };
-                let clips = [run[0], run[1], run[2], grab];
+                let clips: Vec<&'static str> = run.iter().copied().chain([grab]).collect();
                 (Seq::new(&clips, pos, to, yaw, yaw_into(hold.wall), Then::Hold(Stance::HangWall, hold)), hold)
             }
             None => {
                 // up 1.5 m against the wall, then push off it
                 let to = (wall + (n * 0.5).extend(0.0)).with_z(pos.z + 1.5);
-                let hold = Hold { a: wall, b: wall, wall: n, top: false };
-                (Seq::new(&run, pos, to, yaw, yaw1, Then::Drop((n * 1.5).extend(0.0))), hold)
+                let hold = Hold { a: wall, b: wall, wall: n, top: false, bar: false };
+                (Seq::new(run, pos, to, yaw, yaw1, Then::Drop((n * 1.5).extend(0.0))), hold)
             }
         };
         let mut c = Climb::new(hold, Stance::HangWall, pos, yaw, Phase::Seq(seq), Some(from));
@@ -417,6 +471,8 @@ impl Climb {
 
     pub fn catch(hold: Hold, stance: Stance, pos: Vec3, from: Pose) -> Climb {
         let yaw = yaw_into(hold.wall);
+        // nothing to put the feet on under a pole
+        let stance = if hold.bar { Stance::HangFree } else { stance };
         let mut c = Climb::new(hold, stance, pos, yaw, Phase::Catch(0.0), Some(from));
         c.last = "catch";
         c
@@ -427,17 +483,29 @@ impl Climb {
         let phase = match &self.phase {
             Phase::Wait(_) => "wait".to_string(),
             Phase::Catch(_) => "catch".to_string(),
+            Phase::Swing(stage, ..) => format!("swing [{}]", SWING_CYCLE[*stage]),
             Phase::Seq(s) => format!("{} [{}]", self.last, s.clips[s.stage]),
         };
         format!("CLIMB {:?} {phase}", self.stance)
     }
 
+    /// Swinging on a pole.
+    pub fn swinging(&self) -> bool {
+        matches!(self.phase, Phase::Swing(..))
+    }
+
     /// Advances one tick; `want` is the stick direction on the wall.
-    /// `jump`: the jump button (wall jumps: back eject, side jump, leap
-    /// up); `run`: high profile (a held side stick jumps a shimmy gap).
+    /// `jump`: the jump button with a stick wall jumps (back eject, side jump,
+    /// leap up); `release`: pressed this tick with no stick it lets go, at
+    /// once, in any phase; `run`: high profile (a held side stick jumps a
+    /// shimmy gap).
     #[allow(clippy::too_many_arguments)]
-    pub fn update(&mut self, clips: &ClimbClips, sk: &Skeleton, ground: &Ground, want: Option<Dir>, jump: bool, run: bool, dt: f32) -> (Pose, Outcome) {
-        let (pose, outcome) = self.step(clips, sk, ground, want, jump, run, dt);
+    pub fn update(&mut self, clips: &ClimbClips, sk: &Skeleton, ground: &Ground, want: Option<Dir>, jump: bool, release: bool, run: bool, dt: f32) -> (Pose, Outcome) {
+        let (pose, outcome) = self.step(clips, sk, ground, want, jump && want.is_some(), run, dt);
+        let outcome = match outcome {
+            Outcome::Climbing if release && want.is_none() => Outcome::Release((self.hold.wall * RELEASE_PUSH).extend(0.0)),
+            o => o,
+        };
         let pose = match &mut self.fade {
             Some((from, t)) => {
                 *t += dt;
@@ -466,7 +534,9 @@ impl Climb {
                 self.pos = self.from.lerp(target, k * k * (3.0 - 2.0 * k));
                 if *t >= GLIDE {
                     self.pos = target;
-                    self.phase = Phase::Wait(0.0);
+                    // onto a pole with momentum: the swing starts at its
+                    // forward peak, so that a held stick flies on through
+                    self.phase = if self.hold.bar && ground.swing_room(self.pos, n) { Phase::Swing(SWING_FRONT, 0.0, 0) } else { Phase::Wait(0.0) };
                 }
                 (clips.get(self.stance.wait()).sample(sk, 0.0), Outcome::Climbing)
             }
@@ -474,10 +544,13 @@ impl Climb {
                 *t += dt;
                 let wait = clips.get(self.stance.wait());
                 let pose = wait.sample(sk, *t % wait.length.max(1e-3));
-                let settled = *t >= self.settle;
-                let planned = if !settled {
-                    None
-                } else if jump {
+                // the stick up on a pole sets it swinging again
+                if self.hold.bar && want == Some(Dir::Up) && ground.swing_room(self.pos, n) {
+                    self.last = "swing";
+                    self.phase = Phase::Swing(0, 0.0, 0);
+                    return (pose, Outcome::Climbing);
+                }
+                let planned = if jump {
                     self.plan_jump(ground, want)
                 } else {
                     want.and_then(|dir| {
@@ -492,14 +565,45 @@ impl Climb {
                 {
                     if let Some((seq, name)) = planned {
                         self.last = name;
-                        self.settle = 0.0;
                         self.phase = Phase::Seq(seq);
                     }
                 }
                 (pose, Outcome::Climbing)
             }
+            Phase::Swing(stage, t, cycles) => {
+                *t += dt;
+                let c = clips.get(SWING_CYCLE[*stage]);
+                let pose = c.sample(sk, t.min(c.length));
+                if *t < c.length {
+                    return (pose, Outcome::Climbing);
+                }
+                let at = *stage;
+                *t -= c.length;
+                *stage = (*stage + 1) % SWING_CYCLE.len();
+                if *stage == 0 {
+                    *cycles += 1;
+                }
+                // at a peak: fly on with the stick held forward (retail
+                // `HasEnoughRoomToJumpFromSwing` 00da28d4), stop with it
+                // back, die down when left alone
+                if at == SWING_FRONT && want == Some(Dir::Up) {
+                    return (pose, Outcome::SwingJump(-n));
+                }
+                let tired = *cycles >= SWING_CYCLES;
+                if (at == SWING_FRONT || at == SWING_BACK) && (want == Some(Dir::Down) || tired) {
+                    let stop: [&'static str; 4] = if at == SWING_FRONT {
+                        ["xx_h_swing_stop_front_a", "xx_h_swing_stop_front_b", "xx_h_swing_stop_front_c", "xx_h_swing_stop_front_d"]
+                    } else {
+                        ["xx_h_swing_stop_back_a", "xx_h_swing_stop_back_b", "xx_h_swing_stop_back_c", "xx_h_swing_stop_back_d"]
+                    };
+                    self.last = "swing stop";
+                    let then = Then::Hold(Stance::HangFree, self.hold);
+                    self.phase = Phase::Seq(Seq::new(&stop, self.pos, self.pos, self.yaw, self.yaw, then));
+                }
+                (pose, Outcome::Climbing)
+            }
             Phase::Seq(s) => {
-                s.t += dt;
+                s.t += dt * s.rate;
                 let list: Vec<&Clip> = s.names.iter().map(|c| clips.get(c)).collect();
                 let c = list[s.stage];
                 let (fh, fz, fy) = seq_progress(&list, s.stage, s.t);
@@ -704,10 +808,16 @@ impl Climb {
                 }
             }
             (hang, Dir::Up) => {
-                // over the top onto the ground behind the edge
-                if let Some(spot) = ground.passover_spot(&self.hold, hand) {
-                    let clips = ["xx_h_hangwall_tr_passover_handr", "xx_h_passover_handr_030cm"];
-                    return Some((seq(&clips, spot, yaw, Then::Stand), "passover"));
+                // pull up over the top onto the ground behind the edge
+                // (retail Pullup: to the waist, the knee, then on the feet;
+                // the passover clips are retail's vault, not this)
+                if let Some(spot) = ground.pullup_spot(&self.hold, hand) {
+                    let clips: &[&'static str] = if hang == Stance::HangWall {
+                        &["xx_h_hangwall_tr_hangknee_footl_a", "xx_h_hangwall_tr_hangknee_footl_b", "xx_h_hangknee_footl_tr_freestep_entry_footl"]
+                    } else {
+                        &["xx_h_hangfree_tr_hangwaist_a", "xx_h_hangfree_tr_hangwaist_b", "xx_h_hangwaist_tr_hangknee_footl", "xx_h_hangknee_footl_tr_freestep_entry_footl"]
+                    };
+                    return Some((seq(clips, spot, yaw, Then::Stand), "pull-up"));
                 }
                 if hang == Stance::HangWall {
                     let (hold, point) = ground.next_hold(hand, n, Dir::Up)?;
@@ -788,6 +898,7 @@ impl Seq {
             yaw0,
             yaw1,
             then,
+            rate: 1.0,
         }
     }
 }
@@ -832,6 +943,16 @@ pub fn walling_tolerance(speed: f32) -> f32 {
     1.0 - f
 }
 
+/// How far off square a wall can be for a wall run or a mount: the largest
+/// angle between the stick and straight into the wall. Ours (the user's
+/// playtest): retail's wall-run cone is much tighter, 20-29 deg at a run and
+/// measured against the move rather than the stick ([`walling_tolerance`]).
+/// Entries then go squarely into the wall found.
+pub const CLIMB_CONE: f32 = std::f32::consts::FRAC_PI_3;
+/// Heights the walls are looked for at, metres above the feet: the retail
+/// walling ray, and low enough for a wall shorter than that.
+const CLIMB_RAY_HEIGHTS: [f32; 2] = [WALLING_RAY_HEIGHT, 0.7];
+
 /// Hold height above the feet a wall run reaches (the 251 cm and 430 cm
 /// grabs; lower edges are climbed or jumped onto).
 pub const WALL_RUN_REACH: (f32, f32) = (1.6, 4.4);
@@ -851,6 +972,86 @@ impl Ground {
     /// tests).
     pub fn holds_around(&self, p: Vec3, r: f32) -> Vec<Hold> {
         self.holds_near(p, r).filter(|h| (h.nearest(p) - p).truncate().length() < r).copied().collect()
+    }
+
+    /// The outward normal of a wall the stick `push` (flat, unit) is going
+    /// into, looking along the stick and the facing `fwd`, within
+    /// [`CLIMB_CONE`] of square.
+    pub fn climb_wall(&self, pos: Vec3, fwd: Vec2, push: Vec2) -> Option<Vec2> {
+        let cone = CLIMB_CONE.cos();
+        CLIMB_RAY_HEIGHTS.iter().find_map(|&h| {
+            let origin = pos + Vec3::Z * h;
+            [push, fwd]
+                .iter()
+                .filter_map(|d| self.sweep_wall(origin, *d * WALLING_RAY_DEPTH, 0.0))
+                .map(|x| x.1)
+                .find(|n| push.dot(-*n) >= cone)
+        })
+    }
+
+    /// Room to swing on a pole above an entity at `pos` (`n` flat, along the
+    /// swing): nothing within [`SWING_ROOM`] either way at the body's height.
+    pub fn swing_room(&self, pos: Vec3, n: Vec2) -> bool {
+        [n, -n].iter().all(|d| [0.5, 1.5].iter().all(|&h| self.sweep_wall(pos + Vec3::Z * h, *d * SWING_ROOM, 0.0).is_none()))
+    }
+
+    /// Why a guidance edge is no hold (`None`: it is one), testing the point
+    /// `q` on it with `n` the wall's outward normal (ours, standing in for
+    /// retail's `ValidateAnchorPoints`, which works from data we don't read).
+    /// Guidance marks every edge where a wall meets another face, which is
+    /// more than holds: `concave`: the wall's foot, wall rising above the edge
+    /// and the floor carrying on outward, so there is nothing to hang from
+    /// and the hands would sit in the corner; `buried`: another surface stands over 0.35 m proud of the
+    /// edge, so a body there is inside it; `no collision`: nothing solid at
+    /// the edge at all.
+    pub fn hold_fault(&self, q: Vec3, n: Vec2) -> Option<&'static str> {
+        let out = |d: f32, down: f32| q + (n * d).extend(-down);
+        let floor_out = self.floor_below(out(0.25, -0.1)).is_some_and(|f| (f - q.z).abs() < 0.25);
+        if floor_out && self.ray(out(0.3, -0.1), (-n * 0.5).extend(0.0)).is_some() {
+            return Some("concave");
+        }
+        if self.ray(out(0.9, 0.1), (-n * 0.55).extend(0.0)).is_some() {
+            return Some("buried");
+        }
+        if self.ray(out(0.3, 0.05), (-n * 0.6).extend(0.0)).is_none() && self.ray(out(-0.05, -0.3), Vec3::Z * -0.6).is_none() {
+            return Some("no collision");
+        }
+        None
+    }
+
+    /// A pole to swing on for a jump from feet at `pos` running along `fwd`,
+    /// `min..=max` m ahead and within 0.7 m of the line, with its grab point
+    /// at least 0.25 m in from the ends.
+    pub fn bar_hold(&self, pos: Vec3, fwd: Vec2, min: f32, max: f32) -> Option<(Hold, Vec3)> {
+        let mid = pos + (fwd * (min + max) * 0.5).extend(0.0);
+        self.holds_near(mid, (max - min) * 0.5 + 0.7)
+            .filter(|h| h.bar && h.wall.dot(fwd) < -0.5)
+            .filter_map(|h| {
+                let m = (0.25 / h.length().max(1e-3)).min(0.5);
+                let q = h.at(h.param(mid).clamp(m, 1.0 - m));
+                let d = (q - pos).truncate();
+                let ahead = d.dot(fwd);
+                ((min..=max).contains(&ahead) && d.perp_dot(fwd).abs() < 0.7).then_some((ahead, *h, q))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| (x.1, x.2))
+    }
+
+    /// The top edge a leap arriving at feet `pos`, facing `fwd`, runs up
+    /// against: an edge with floor behind it, up to `reach` m ahead, from just
+    /// under the feet to 2.2 m above them (the hand band's top).
+    pub fn top_hold(&self, pos: Vec3, fwd: Vec2, reach: f32) -> Option<(Hold, Vec3)> {
+        self.holds_near(pos, reach + 0.3)
+            .filter(|h| h.top && !h.bar && h.wall.dot(fwd) < -0.5)
+            .filter_map(|h| {
+                let q = h.nearest(pos);
+                let d = (q - pos).truncate();
+                let dz = q.z - pos.z;
+                let ahead = d.dot(fwd);
+                (ahead > -0.1 && ahead <= reach && d.perp_dot(fwd).abs() < 0.7 && (-0.3..=2.2).contains(&dz)).then_some((d.length(), *h, q))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|x| (x.1, x.2))
     }
 
     /// Retail wall-run test from feet at `pos` facing `fwd` moving at
@@ -942,7 +1143,17 @@ impl Ground {
                 return Some((hh, hq));
             }
         }
-        None
+        // the floor at the wall's foot does for a foot hold (ours: guidance
+        // marks that corner too, but as an edge it's no hold, see
+        // `hold_fault`): hands 1.2 m over the feet on the wall in front
+        let (f, n) = self.sweep_wall(pos + Vec3::Z * 0.3, fwd * 1.2, 0.0)?;
+        let up = pos + (fwd * 1.2 * f).extend(1.2);
+        self.holds_near(up, 1.0)
+            .filter(|h| h.wall.dot(n) > 0.8)
+            .map(|h| (h.nearest(up), *h))
+            .filter(|(q, _)| q.distance(up) < 0.3)
+            .min_by(|a, b| a.0.distance(up).total_cmp(&b.0.distance(up)))
+            .map(|(q, h)| (h, q))
     }
 
     /// Hanging from `point` on a wall facing `n`: against the wall when
@@ -1082,7 +1293,7 @@ impl Ground {
     /// centred on a narrow top, with the body's room over it. The edge
     /// need not be flagged a top: any floor behind it at that height will
     /// do (guidance edges on walls whose top face is not walkable data).
-    pub fn passover_spot(&self, hold: &Hold, hand: Vec3) -> Option<Vec3> {
+    pub fn pullup_spot(&self, hold: &Hold, hand: Vec3) -> Option<Vec3> {
         let n = hold.wall;
         let edge = hold.nearest(hand);
         [0.7, 0.5, 0.9, 0.35, 0.25, 0.15, 1.2].into_iter().find_map(|d| {
@@ -1224,7 +1435,7 @@ mod tests {
     // a wall along x facing -y (we face +y), its top edge 4 m up from x 0
     // to 5, and a wall facing +x from (5, 0) to (5, 5) (outer corner at x 5)
     fn south_wall() -> Hold {
-        Hold { a: Vec3::new(0.0, 0.0, 4.0), b: Vec3::new(5.0, 0.0, 4.0), wall: -Vec2::Y, top: true }
+        Hold { a: Vec3::new(0.0, 0.0, 4.0), b: Vec3::new(5.0, 0.0, 4.0), wall: -Vec2::Y, top: true, bar: false }
     }
 
     #[test]
@@ -1251,7 +1462,7 @@ mod tests {
     #[test]
     fn shimmy_turns_outer_and_inner_corners() {
         let h = south_wall();
-        let east = Hold { a: Vec3::new(5.0, 0.0, 4.0), b: Vec3::new(5.0, 5.0, 4.0), wall: Vec2::X, top: true };
+        let east = Hold { a: Vec3::new(5.0, 0.0, 4.0), b: Vec3::new(5.0, 5.0, 4.0), wall: Vec2::X, top: true, bar: false };
         match shimmy_on(&h, Vec3::new(4.75, 0.0, 4.0), 1.0, &[h, east]) {
             Some(Shimmy::Corner(c, p, outer)) => {
                 assert!(outer);
@@ -1263,7 +1474,7 @@ mod tests {
             other => panic!("{other:?}"),
         }
         // a wall coming towards us at x 5 (facing -x): inner corner
-        let inner = Hold { a: Vec3::new(5.0, 0.0, 4.0), b: Vec3::new(5.0, -5.0, 4.0), wall: -Vec2::X, top: true };
+        let inner = Hold { a: Vec3::new(5.0, 0.0, 4.0), b: Vec3::new(5.0, -5.0, 4.0), wall: -Vec2::X, top: true, bar: false };
         match shimmy_on(&h, Vec3::new(4.75, 0.0, 4.0), 1.0, &[h, inner]) {
             Some(Shimmy::Corner(c, _, outer)) => {
                 assert!(!outer);
@@ -1277,7 +1488,7 @@ mod tests {
     #[test]
     fn shimmy_continues_onto_a_collinear_edge() {
         let h = south_wall();
-        let next = Hold { a: Vec3::new(5.1, 0.0, 4.0), b: Vec3::new(8.0, 0.0, 4.0), wall: -Vec2::Y, top: true };
+        let next = Hold { a: Vec3::new(5.1, 0.0, 4.0), b: Vec3::new(8.0, 0.0, 4.0), wall: -Vec2::Y, top: true, bar: false };
         match shimmy_on(&h, Vec3::new(4.75, 0.0, 4.0), 1.0, &[h, next]) {
             Some(Shimmy::Along(c, p)) => {
                 assert!(same(&c, &next));
@@ -1293,7 +1504,7 @@ mod tests {
         // 10 cm out of the wall, bent 20 degrees, starting 0.3 m on
         let d = Vec2::from_angle(20f32.to_radians()).rotate(Vec2::X);
         let a = Vec3::new(5.3, -0.1, 4.05);
-        let next = Hold { a, b: a + (d * 3.0).extend(0.0), wall: Vec2::new(d.y, -d.x), top: true };
+        let next = Hold { a, b: a + (d * 3.0).extend(0.0), wall: Vec2::new(d.y, -d.x), top: true, bar: false };
         match shimmy_on(&h, Vec3::new(4.75, 0.0, 4.0), 1.0, &[h, next]) {
             Some(Shimmy::Along(c, _)) => assert!(same(&c, &next)),
             other => panic!("{other:?}"),

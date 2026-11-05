@@ -10,5 +10,6 @@ publish.workspace = true
 acb-world.workspace = true
 acb-anim.workspace = true
 anvil-fastload.workspace = true
+anvil-schema.workspace = true
 anyhow.workspace = true
 glam.workspace = true

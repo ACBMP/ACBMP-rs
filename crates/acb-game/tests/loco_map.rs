@@ -116,7 +116,8 @@ fn steady(archive: &acb_world::Archive, builtins: Option<&BuiltinTracks>, input:
         builtins,
     };
     let mut w = World::load(archive, &setup).unwrap();
-    let n = (3.0 / DT) as usize;
+    // short enough not to reach the far side of the plaza at a sprint
+    let n = (2.0 / DT) as usize;
     let mut from = None;
     for i in 0..n {
         w.step(&[input]);

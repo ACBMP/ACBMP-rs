@@ -4,7 +4,9 @@
 //! hold 1.0-4.5 m over the floor in front of it, within 200 m of the
 //! origin, deduplicated on a 3 m grid; the player starts 1.6 m out facing
 //! it and runs at it for 10 s: Shift+W, or Shift+Space+W (freerun) with
-//! SWEEP_LEGS set. SWEEP_TIMING prints each wall's worst tick.
+//! SWEEP_LEGS set. SWEEP_TIMING prints each wall's worst tick. SWEEP_ANGLE=D
+//! comes at each wall D degrees off square (from the same side, 1.6 m out
+//! along that line).
 use std::sync::Arc;
 
 use acb_anim::BuiltinTracks;
@@ -59,9 +61,15 @@ fn main() -> anyhow::Result<()> {
     eprintln!("{} walls in all", starts.len());
     let starts: Vec<_> = starts.into_iter().skip(skip).take(max).collect();
     let mut tally: std::collections::BTreeMap<&str, usize> = Default::default();
+    let off: f32 = std::env::var("SWEEP_ANGLE").map_or(0.0, |d| d.parse::<f32>().unwrap().to_radians());
     for (at, fwd, dz) in &starts {
         let wall_t = std::time::Instant::now();
         w.restore(&base);
+        // the same spot on the wall, the start swung round it
+        let square = *fwd;
+        let fwd = &glam::Vec2::from_angle(off).rotate(square);
+        let at = &(*at + ((square - *fwd) * 1.6).extend(0.0));
+        let at = &at.with_z(w.ground.as_ref().unwrap().floor_below(*at + glam::Vec3::Z * 1.0).unwrap_or(at.z));
         let yaw = (-fwd.x).atan2(fwd.y);
         w.place_player(0, *at, yaw);
         let cam = fwd.y.atan2(fwd.x);

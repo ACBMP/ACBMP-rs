@@ -81,9 +81,9 @@ fn thin_railing_landing() {
     let mut took_off = None;
     for i in 0..(3.0 / DT) as usize {
         let flying = w.players[0].flight.is_some();
-        // Legs (sprint) tapped for one tick at 0.6 s: the jump needs it
+        // Legs (sprint) tapped for one tick at 0.3 s: the jump needs it
         // pressed within 0.5 s (retail), as tools/gates.sh `railing`
-        let legs = PlayerInput { sprint: i == (0.6 / DT) as usize, ..run };
+        let legs = PlayerInput { sprint: i == (0.3 / DT) as usize, ..run };
         w.step(&[if landed.is_none() { legs } else { PlayerInput::default() }]);
         let p = &w.players[0];
         if !flying && p.flight.is_some() {
@@ -188,7 +188,7 @@ fn beam_clips() {
         r.to_euler(glam::EulerRot::ZXY).0.to_degrees()
     };
     println!("beam walk {:.2} m/s ({:.3} s), jog {:.2} ({:.3} s), sprint {:.2} ({:.3} s)", speed(&b.walk), b.walk.length, speed(&b.run), b.run.length, speed(&b.sprint), b.sprint.length);
-    for (n, c) in [("start walk", &b.start[0][0]), ("start jog", &b.start[0][1]), ("stop l", &b.stop[0]), ("settle l", &b.stop_settle[0]), ("land", &b.land), ("turn l", &b.turn[0]), ("turn settle l", &b.turn_settle[0])] {
+    for (n, c) in [("land", &b.land)] {
         let m = c.root_motion(c.length).w_axis;
         println!("{n}: {:.3} s, root {:+.2} {:+.2} {:+.2}, yaw {:+.0}", c.length, m.x, m.y, m.z, yaw(c));
     }
@@ -216,7 +216,12 @@ fn hang_targets() {
         let pos = start.extend(z);
         let Some((feet, flight, _)) = jump::hang_target(&g, &clips, pos, -h.wall) else { continue };
         found += 1;
-        let (hold, q) = flight.grab.expect("a hang target carries its hold");
+        // a top within a jump's rise is landed on instead
+        let Some((hold, q)) = flight.grab else {
+            let floor = g.floor_below(feet + glam::Vec3::Z * 0.3).expect("a floor under the landing");
+            assert!((floor - feet.z).abs() < 0.15 && g.headroom(feet).is_none(), "landing at {feet:?}");
+            continue;
+        };
         assert!(hold.wall.dot(-h.wall) < -0.5, "faces the jumper");
         let up = q.z - feet.z;
         assert!((1.3..=2.2).contains(&up), "hands {up:.2} m over the feet");
@@ -272,19 +277,20 @@ fn turning_starts_move_at_once() {
 }
 
 /// Off the 6.3 m roof east of the first spawn (edge at x = -13.1, 3.9 m
-/// down to the next roof, no jump target in reach), retail FallOffEdge
-/// (00fd2406): a targeted jump to 1 + 2 * anim speed metres out in high
-/// profile (sprint 3 m, run 2.6 m; low profile 1 m, but low profile stops
-/// at a drop this deep), 3 m down; past that height
-/// straight down. No rise (ours: the ballistic part starts at the edge).
+/// down to the next roof, no jump target in reach): freerunning (Legs held)
+/// a leap for the farthest foothold, 8 m out and 3 m down, on an arc that
+/// goes on past that height (`jump::leap`); just running, retail FallOffEdge
+/// (00fd2406): a targeted jump to 1 + 2 * anim speed metres out (run 2.6 m;
+/// low profile 1 m, but low profile stops at a drop this deep), 3 m down,
+/// past that height straight down, with no rise (ours: the ballistic part
+/// starts at the edge).
 #[test]
 fn fall_off_an_edge_by_profile() {
     let Some(d) = data() else { return };
     let west = std::f32::consts::PI;
     let sprint = PlayerInput { forward: true, run: true, sprint: true, cam_yaw: west, ..PlayerInput::default() };
     let run = PlayerInput { forward: true, run: true, cam_yaw: west, ..PlayerInput::default() };
-    // high profile: 1 + 2 * anim speed, run (0.8) to sprint (1.0)
-    for (input, want, name) in [(sprint, 2.6..3.05, "sprint"), (run, 2.5..2.7, "run")] {
+    for (input, want, rise, name) in [(sprint, 8.0..9.5, 0.3..0.6, "sprint"), (run, 2.5..2.7, -0.01..0.01, "run")] {
         let mut w = player_at(&d, [-8.0, 43.5, 6.5, 90.0]);
         let mut left_at = None;
         let mut peak = f32::MIN;
@@ -305,7 +311,7 @@ fn fall_off_an_edge_by_profile() {
         let p = &w.players[0];
         println!("{name}: left at {from:.2?}, peak +{:.2} m, landed {:.2?}", peak - from.z, p.pos);
         assert!(!p.loco.airborne(), "{name}: still in the air at {:?}", p.pos);
-        assert!(peak - from.z < 0.01, "{name}: rose {:.2} m", peak - from.z);
+        assert!(rise.contains(&(peak - from.z)), "{name}: rose {:.2} m", peak - from.z);
         let out = from.x - p.pos.x;
         assert!(want.contains(&out), "{name}: landed {out:.2} m out, want {want:?}");
     }
@@ -335,7 +341,7 @@ fn jump_button_steps_off_a_beam_end() {
     assert!(p.pos.z < 0.2 && !p.loco.airborne() && p.climb.is_none(), "did not step off: {:?}", p.pos);
 }
 
-/// A rebound (F on a wall) with nothing in jump reach behind: retail aims
+/// A rebound (S+F on a wall) with nothing in jump reach behind: retail aims
 /// at the farthest foothold, 8 m straight out from the wall and 3 m down
 /// (`Human::GetFarthestFootHoldInDirection` 00d14144), then drops. From
 /// the 10 m hang on the west tower (wall facing -y) that lands 8.0-8.4 m
@@ -344,7 +350,7 @@ fn jump_button_steps_off_a_beam_end() {
 #[test]
 fn rebound_targets() {
     let Some(d) = data() else { return };
-    let jump = PlayerInput { jump: true, ..PlayerInput::default() };
+    let jump = PlayerInput { jump: true, back: true, ..PlayerInput::default() };
     let mut w = player_at(&d, [-46.81, 21.36, 10.6, 0.0]);
     for _ in 0..(1.5 / DT) as usize {
         w.step(&[PlayerInput::default()]);
@@ -360,4 +366,135 @@ fn rebound_targets() {
     println!("tower: from {start:.2?} landed {:.2?}, {out:.2} m out", p.pos);
     assert!(!p.loco.airborne() && p.climb.is_none(), "not landed: {:?}", p.pos);
     assert!((8.0..8.4).contains(&out), "landed {out:.2} m out");
+}
+
+/// A run and jump at a guidance pole (San Donato's roof 14.81 -1.06, the pole
+/// over the alley at 6.28 m) goes into the swing, and the stick held forward
+/// flies on through it across the alley.
+#[test]
+fn swinging_on_a_pole() {
+    let Some(d) = data() else { return };
+    let north = std::f32::consts::FRAC_PI_2;
+    let run = PlayerInput { forward: true, run: true, sprint: true, cam_yaw: north, ..PlayerInput::default() };
+    // let go of everything in the air: it stays swinging, then dies down
+    let mut w = player_at(&d, [14.81, -1.06, 3.59, 0.0]);
+    let mut swung = false;
+    for i in 0..(5.0 / DT) as usize {
+        w.step(&[if i < (0.4 / DT) as usize { run } else { PlayerInput::default() }]);
+        swung |= w.players[0].trace_state().0 == "swing";
+    }
+    let p = &w.players[0];
+    assert!(swung, "never swung, ended at {:?}", p.pos);
+    assert_eq!(p.trace_state().0, "climb", "not hanging after the swing: {:?}", p.pos);
+    assert!((p.pos.y - 2.98).abs() < 0.1, "hanging at {:?}", p.pos);
+    // the stick held: straight through, on past the pole
+    let mut w = player_at(&d, [14.81, -1.06, 3.59, 0.0]);
+    let mut swung = false;
+    for _ in 0..(1.2 / DT) as usize {
+        w.step(&[run]);
+        swung |= w.players[0].trace_state().0 == "swing";
+    }
+    let p = &w.players[0];
+    assert!(swung && p.climb.is_none() && p.pos.y > 3.5, "did not fly on: {:?}", p.pos);
+}
+
+/// The maps's poles are there, and edges that are no holds are not: the foot
+/// of a wall (a fountain's, on San Donato) marks an edge, nobody hangs from it.
+#[test]
+fn only_real_edges_are_holds() {
+    let Some(d) = data() else { return };
+    let g = Ground::load(&d.archive).unwrap();
+    let holds = g.holds_around(glam::Vec3::ZERO, 400.0);
+    assert!(holds.iter().filter(|h| h.bar).count() >= 24);
+    // edges at a wall's foot that the guidance marks, with the wall's normal
+    for (at, n) in [([17.89, 12.34, 0.02], [0.98, 0.18]), ([17.37, 13.05, 0.02], [0.33, 0.95]), ([16.68, 12.92, 0.02], [-0.71, 0.70])] {
+        let at = glam::Vec3::from(at);
+        let n = glam::Vec2::from(n);
+        let near: Vec<_> = g.holds_around(at, 0.3).into_iter().filter(|h| h.wall.dot(n) > 0.9).collect();
+        assert!(near.is_empty(), "hold at the foot of a wall: {near:?}");
+    }
+    for h in holds.iter().filter(|h| !h.bar) {
+        assert!([0.5, 0.25, 0.75].iter().any(|&t| g.hold_fault(h.at(t), h.wall).is_none()), "hold {h:?}");
+    }
+}
+
+/// From the first tick a stick is held the character moves at its gait's
+/// speed, facing the stick, and stops the tick it is released.
+#[test]
+fn gait_changes_are_instant() {
+    let Some(d) = data() else { return };
+    let mut w = player_at(&d, [-18.0, 44.6, 2.22, 90.0]);
+    for _ in 0..30 {
+        w.step(&[PlayerInput::default()]);
+    }
+    let east = 0.0;
+    let run = PlayerInput { forward: true, run: true, cam_yaw: east, ..PlayerInput::default() };
+    let from = w.players[0].pos;
+    w.step(&[run]);
+    let p = &w.players[0];
+    assert_eq!(p.loco.speed, 2.0);
+    assert!((p.yaw + std::f32::consts::FRAC_PI_2).abs() < 1e-3, "facing {}", p.yaw);
+    assert!((p.pos - from).truncate().length() > 0.05, "moved {:?}", p.pos - from);
+    for _ in 0..10 {
+        w.step(&[run]);
+    }
+    w.step(&[PlayerInput::default()]);
+    assert_eq!(w.players[0].loco.speed, 0.0);
+    let at = w.players[0].pos;
+    w.step(&[PlayerInput::default()]);
+    assert_eq!(w.players[0].pos, at, "still moving after the release");
+}
+
+/// Standing against a wall, Shift+W climbs on the next tick, with no time to
+/// charge up, and a wall well off square climbs just the same.
+#[test]
+fn climbing_starts_at_once() {
+    let Some(d) = data() else { return };
+    let g = Ground::load(&d.archive).unwrap();
+    // the same point on the wall from further and further round
+    let spot = glam::Vec2::new(-13.12, 44.2);
+    for (deg, ok) in [(0.0f32, true), (-30.0, true), (-55.0, true), (-75.0, false)] {
+        let push = glam::Vec2::from_angle(deg.to_radians()).rotate(glam::Vec2::X);
+        let feet = (spot - push * 1.0).extend(2.22);
+        assert_eq!(g.climb_wall(feet, push, push).is_some(), ok, "{deg} deg off square");
+    }
+    let mut w = player_at(&d, [-14.3, 44.2, 2.22, -90.0]);
+    for _ in 0..30 {
+        w.step(&[PlayerInput::default()]);
+    }
+    w.step(&[PlayerInput { forward: true, run: true, cam_yaw: 0.0, ..PlayerInput::default() }]);
+    assert!(w.players[0].climb.is_some(), "still on foot at {:?}", w.players[0].pos);
+}
+
+/// The drop button lets go of a hang, at once and past every hold on the way
+/// down; on foot it works from a stand at an edge whichever way it faces.
+#[test]
+fn the_drop_button_drops() {
+    let Some(d) = data() else { return };
+    let drop = PlayerInput { jump: true, ..PlayerInput::default() };
+    // wall run to the hang on the roof wall east of the first spawn
+    let mut w = player_at(&d, [-14.3, 44.2, 2.22, -90.0]);
+    for _ in 0..(0.4 / DT) as usize {
+        w.step(&[PlayerInput { forward: true, run: true, cam_yaw: 0.0, ..PlayerInput::default() }]);
+    }
+    for _ in 0..(1.0 / DT) as usize {
+        w.step(&[PlayerInput::default()]);
+    }
+    assert!(w.players[0].climb.is_some(), "not hanging: {:?}", w.players[0].pos);
+    w.step(&[drop]);
+    assert!(w.players[0].climb.is_none(), "still on the wall");
+    for _ in 0..(2.0 / DT) as usize {
+        w.step(&[PlayerInput::default()]);
+    }
+    let p = &w.players[0];
+    assert!(p.climb.is_none() && !p.loco.airborne() && p.pos.z < 2.5, "ended at {:?}", p.pos);
+    // on the roof edge, not having walked into it, facing along it
+    let mut w = player_at(&d, [-12.95, 43.99, 6.5, 0.0]);
+    for _ in 0..(0.5 / DT) as usize {
+        w.step(&[PlayerInput::default()]);
+    }
+    assert!(w.players[0].climb.is_none() && !w.players[0].loco.airborne());
+    w.step(&[drop]);
+    let p = &w.players[0];
+    assert!(p.climb.is_some() || p.loco.airborne(), "nothing happened at {:?}", p.pos);
 }

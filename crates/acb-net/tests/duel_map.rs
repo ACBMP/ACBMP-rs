@@ -37,7 +37,7 @@ fn env() -> Option<(PathBuf, PathBuf, PathBuf)> {
 /// A (slot 0) stands facing +X, presses kill at 0.5 s (no contracts yet)
 /// and at 3.5 s (B dodging); from 6 s it runs at B, walks the last metres
 /// and kills it at ~8.6 s. B (slot 1) starts 10 m ahead facing A, runs at
-/// it from 2 s and turns back at 3.4 s (A cannot have its input by 3.5 s at 150 ms
+/// it from 2.45 s (at speed at once) and turns back at 3.4 s (A cannot have its input by 3.5 s at 150 ms
 /// delay, so A always predicts the kill), resting from 5 s.
 /// Purely a function of the sim tick (never of what arrived over the
 /// network yet), so every run plays out the same.
@@ -51,7 +51,7 @@ fn script(slot: usize, tick: u32) -> PlayerInput {
             i.forward = true;
             i.run = t < 7.6;
         }
-    } else if (2.0..3.4).contains(&t) {
+    } else if (2.45..3.4).contains(&t) {
         i.forward = true;
         i.run = true;
     } else if (3.4..5.0).contains(&t) {

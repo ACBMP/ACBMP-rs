@@ -141,8 +141,8 @@ Controls (on foot):
 | W A S D | move, relative to the camera |
 | (nothing) | low profile: walk; stops at ledges deeper than 2.5 m and at beam ends; walks off shallower drops with a small hop |
 | Shift | high profile: run; runs into wall runs and climbs |
-| Space | Legs: sprint (high profile). Freerun jumps (up onto a ledge, across a gap, to a hang across a gap) need Space held or pressed in the last 0.5 s and the move direction within 80° of facing (retail); there is no jump button: Space alone does nothing, but Shift + Space + a direction toward a ledge jumps even from standing (retail ForwardFromIdle). Running off an edge with nothing in reach to land on jumps out into the open toward the retail target: 1 m out in low profile, up to 3 m out in high profile (more the faster you go), reaching that 3 m below the edge, then straight down. Starting off in any direction from standing turns and moves at once (0.2 s turn in high profile, 0.4 s walking) |
-| F | jump: at a ledge stop (walking into it or standing there), lower onto the wall below; with no wall to lower onto (a beam end, a railing, a ledge without a hold) step off and drop |
+| Space | Legs: sprint (high profile). Freerun jumps (up onto a ledge, across a gap, onto a pole, to a hang across a gap) need Space held or pressed in the last 0.5 s and the move direction within 80° of facing (retail); there is no jump button: Space alone does nothing, but Shift + Space + a direction toward a ledge jumps even from standing (retail ForwardFromIdle). A roof across a gap, no more than 1.3 m above you, is landed on, on your feet and running on, rather than hung from. Freerunning off an edge with nothing in reach leaps: an arc out towards a point 8 m ahead and 3 m down, and on from there. Running off an edge without Space hops 2.6 m out (3 m below the edge, then straight down), walking off a shallow drop 1 m |
+| F | drop: on foot near an edge (any stance, moving or not, the way you're moving or, standing, any way round), lower onto the wall below, or with no wall to lower onto step off and fall. A fall from it grabs nothing on the way down |
 | E | kill (your target online; any NPC in free play); walks in from ~4 m |
 | Q | stun (your pursuer online) |
 | R | Assassinate: lock / unlock the highlighted player |
@@ -151,15 +151,30 @@ Controls (on foot):
 | mouse wheel | camera distance |
 | Esc | quit |
 
+Moving is instant: walk, run, sprint and stand take effect the tick you ask for
+them, and from standing you face the stick at once. Climbing starts at once too:
+push into a wall within 60° of square, from any speed, even standing against it
+(with Shift a wall run grabs the edge above you, otherwise you climb straight on).
+
 On a wall: W/S/A/D climb up/down/left/right (fixed directions, not camera
-relative); F + W, or F alone, leaps to a hold 0.9-2.6 m above; F + A/D jumps
+relative); F alone lets go at once, in the middle of any move, and falls without
+grabbing anything; F + W leaps to a hold 0.9-2.6 m above; F + A/D jumps
 sideways across a gap to a hold; Shift + A/D at the end of an edge also
 side-jumps. With no hold for those, and with F + S, you push off the wall
 (retail rebound): a jump out to the best landing behind you (a floor up to
 3 m lower, or a hang across), or with none in reach out 8 m and 3 m down, then
 straight down (F + A/D push off almost along the wall, 89 deg from straight
-out). W at the top edge pulls up over it onto the floor behind (also onto narrow tops: wall tops, posts, centred) when there is room to stand there. A fall grabs a hold up to 1.2 m ahead only in its first
-2 m (retail); after that you go down. Drops under 0.53 m are stepped down,
+out). W at the top edge pulls up over it onto the floor behind (also onto narrow tops: wall tops, posts, centred) when there is room to stand there. S with nothing below
+lets go too (it can catch a lower hold, F can't).
+
+Poles (San Donato has 12, for instance over the alley: try
+`--at=14.81,-1.06,3.59,0` with Shift + Space + W): a freerun jump at one, or a fall
+onto one, grabs on and swings. W at the forward peak flies off the way you were going
+(to a floor in reach, else a leap); S at a peak stops it; left alone it dies down after
+a swing or two into a hang, from which W swings again and A/D shimmy; F lets go.
+
+A fall grabs a hold up to 1.2 m ahead only in its first
+2 m (retail); after that you go down. A leap that runs up against a top edge lands on its feet behind it. Drops under 0.53 m are stepped down,
 deeper ones fallen off, unless something blocks the space just past the
 edge (a railing, a wall, a low overhang: you stay on the edge). A short
 fall (its first 2 m) next to a railing or beam lands on it, in the beam

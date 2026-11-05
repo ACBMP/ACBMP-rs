@@ -1619,3 +1619,77 @@ Full findings: `~/.cache/acbmp-re/findings/mode-manhunt.md`.
 - The crowd nudges the player, e.g. the tickbench climb ends at 44.23 instead of 43.99. So gates.sh, kills.sh,
   duel.sh, escort.sh and assassinate(4).sh pin `--crowd 0` to keep their baselines. `acb-net/tests/crowd_map.rs`
   plays 10 s (was 7) because 14 characters load per peer.
+
+## Movement feedback (2026-11-04, phase3-movement-feedback)
+
+Nine reports from the user's playtest of master. Where this overrides a retail value it is on purpose: the user plays
+the real game, and these are their calls on how it feels. All of it is "Ours" unless marked retail. Open question for
+Wave C: traces could show how retail gets its instant feel with the ramp below (a guess: root motion and the ramp don't
+mean what the port took them to mean).
+
+Measured: `examples/parkour_sweep.rs` on San Donato against a build of master, `[stood ...]` labels (`W` stays held for
+10 s, so the end state says little now that the character keeps going):
+| | master (493 walls) | now (483) |
+|---|---|---|
+| stood on top | 308 | 345 |
+| never stood | 157 | 98 |
+| never climbed | 72 | 21 |
+`SWEEP_ANGLE=D` (new) comes at each wall D degrees off square; never climbed 67 / 85 / 56 / 97 of 455 at 0 / 30 / 45 / 60
+before the mount fix below (not re-measured after it). Eight walls that used to stand no longer do and ten have left
+the sweep with their holds: not looked at one by one.
+
+1. **Leap off a building.** A freerun (Legs) off an edge with no target used FallOffEdge, 3 m out at most. Now
+   `jump::leap`: `human::ledge::farthest` (retail `GetFarthestFootHoldInDirection` 00d14144, 8 m out, 3 m down), a
+   ballistic arc rising at 3 m/s (0.46 m; ours), which keeps going past the target's height. The caller from a ground
+   edge is our reading: only the rebound's use of it was read in the binary. No Legs: FallOffEdge as before.
+2. **Feet, not a hang, across a gap.** `jump::hang_target`: a hold with floor on top no higher than the polygon's 1.3 m
+   flies to the spot behind it (`feet_on_top`) instead of hanging. In the air `Ground::top_hold`: moving 2.5 m/s or more
+   and running up against a top edge, feet below it by up to 2.2 m, it hops on top (`FEET_ON_TOP_SPEED`), before the wall
+   reception can turn the character round. A soft landing with the stick held goes straight into the cycle.
+3. **No wind-up.** `Locomotion::play_cycle` takes the gait's speed the tick it's asked for, and standing it faces the
+   stick at once. Retail's `ramp_anim_speed` (still there, tested, not driving anything), start, stop and on-the-spot turn
+   clips are gone: they were the wind-up (0.8 s to a run, 0.73 s start clip, 0.4 s turn). The cross-fade smooths the pose
+   only. Kept: the run turn (a clip of its own, not reported); hard and damage landings. `Locomotion::blocked` now stops
+   and arms a one-tick `stalled`: a stopped cycle has no root motion to test, so `player.rs` tries the stick's way
+   (`STALL_PROBE`) to tell a move that's still refused from one that's free again.
+4. **Pull-up.** Top-outs played `hangwall_tr_passover` (retail's vault, `HumanLedge` HandPassOver). Now retail's Pullup
+   clips: `hangwall_tr_hangknee_a/b` or `hangfree_tr_hangwaist_a/b` + `hangwaist_tr_hangknee`, then
+   `hangknee_tr_freestep_entry`. Retail still vaults some thin tops (`CheckForPassover` 00d984cc, not read); we don't.
+5. **Swing.** Guidance sub type 4 is `GuidanceObjectSubTypePole` (schema enum; 26 edges on San Donato, thin bars in pairs
+   0.1 m apart, one per side). Retail's start test wants both hands on sub type 4 (+0xc30, +0xc34 == 4 in 00da2a0e; that
+   those fields are the sub type is our reading). They used to be plain holds. Now `Hold::bar`; `jump::bar_target` beats
+   any other freerun target, a catch on one swings (`Phase::Swing`, the four `xx_h_swing_cycle_*` clips, entity fixed at
+   the free hang). W at the forward peak: `Outcome::SwingJump`, the floor in reach or a leap. S or two cycles: the
+   `swing_stop` clips into the hang. Starts at the forward peak so a held stick flies straight through. Ours: the exit
+   timing, `SWING_ROOM`, and the plain jump clips (retail has `xx_h_air_*_to_swing` and `swing_cycle_*_to_air`, whose root
+   motion doesn't fit our entity yet). `examples/poles.rs` lists poles and spots to run at them from.
+6. **Holds that aren't.** Guidance marks every edge where a wall meets another face. Of 3655 wall holds, audited with
+   `examples/guidance_kinds.rs` on the first version of the tests: 399 at a wall's foot (concave), 901 with no collision
+   at them, 123 with a surface over 0.35 m proud (buried: a body there is inside it), 36 undersides. `Ground::load` now
+   drops them (`Ground::hold_fault`, not bars; a long edge stays if good at a quarter, the middle or three quarters).
+   Concave wants floor outward and wall above the edge: floor alone also matched roof edges with a lip. The straight-on
+   mount was using concave edges as foot holds, so `climb_entry` now takes the floor at the wall's foot for one, which is
+   where most of the never climbed drop came from. Retail's real test is `ValidateAnchorPoints`, not read; the user should
+   say if perches remain. `examples/wallprobe.rs X Y Z YAW` prints what the entry sees at a spot.
+7. **Drop button.** F did three different things, none of them reliably letting go. On a wall a fresh press with no stick
+   now releases at once in any phase (`Outcome::Release`; F + stick stays the wall jumps, and F alone no longer leaps
+   or rebounds). A held F doesn't count (`Player::drop_held`), or lowering onto a wall would let go on its next tick. The
+   fall grabs nothing (`RELEASE_NO_CATCH`, cleared on the ground). On foot no edge stop is needed any more, nor low
+   profile: `drop_off` tries the stick's way, or standing all four ways. Separately `Outcome::Drop` (S) never set
+   `catch_block` and re-caught the hold it had just left; it now has the eject's 0.47 s (gate `climb` no longer catches
+   the awning beam below as a result: retail's grasp would, see Wave C).
+8. **Instant climbing.** `speed >= 1.5` for a wall run fought `blocked()` (the ramp could never win once against the
+   wall): gone. A mount plays in `MOUNT_TIME` 0.2 s (retail clip 0.87 s, at rate) and its 0.3 s settle is gone. A wall
+   run from under 0.7 m skips the 0.27 s run-up clip. Instant speed took away the delay that used to let a mount win over
+   a wall run, so the order is now: wall run with a target, mount, empty wall run.
+9. **Wider angles.** My first suspicion was wrong: the 20-29 deg wall-run cone is what retail does (`angle < 1 - curve`,
+   012204d2, in radians). Ours is now `CLIMB_CONE` 60 deg, stick against the wall (`Ground::climb_wall`, looking along the
+   stick and the facing, at 1.3 m and 0.7 m), and every entry then runs squarely into the wall found.
+
+Tests: `jump_map.rs` swinging_on_a_pole, only_real_edges_are_holds, gait_changes_are_instant, climbing_starts_at_once,
+the_drop_button_drops; updated fall_off_an_edge_by_profile, rebound_targets, hang_targets, thin_railing_landing. Timed
+scripts moved for the lost ramp: gates inputs and header (`rebound` uses S+F), `duel_map` and `match_map` start B's run
+0.45 s later for the same distance at the dodge, `steady_speeds` runs 2 s. 60 and 144 fps gates agree; kills 8; duel 100/0;
+escort no desyncs. NOTES "Climbing"'s `-11.31,46.8,6.5,0` walk-in mount gate was already stale on master (a ledge stop).
+Not done: the swing's own air and exit clips; retail's thin-top vault; whether retail lets a wall run start at these
+angles at all. Checked on two frames only (pull-up, pole); how it plays is for the user to judge.
