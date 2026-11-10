@@ -17,6 +17,7 @@ pub mod kill;
 pub mod locomotion;
 pub mod manhunt;
 pub mod mode;
+pub mod abilities;
 pub mod action;
 pub mod bonus;
 pub mod player;

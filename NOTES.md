@@ -1693,3 +1693,52 @@ scripts moved for the lost ramp: gates inputs and header (`rebound` uses S+F), `
 escort no desyncs. NOTES "Climbing"'s `-11.31,46.8,6.5,0` walk-in mount gate was already stale on master (a ledge stop).
 Not done: the swing's own air and exit clips; retail's thin-top vault; whether retail lets a wall run start at these
 angles at all. Checked on two frames only (pull-up, pole); how it plays is for the user to judge.
+
+## Abilities, perks, streaks (2026-11-04)
+
+`crates/acb-game/src/abilities.rs`: logic only, no input, HUD or wire form yet. Empty loadouts by default, so a match
+without `Match::set_loadout` plays as before.
+
+Data ships: `AbilityManagerMulti` (DataPC.forge 0x639b4f79) lists 75 objects: 48 actives (12 families x base + 3 upgrades),
+8 perks, 4 kill streaks, 4 loss streaks, 6 slots, 5 sets. `acbmp dump DataPC.forge 0x<uid> --depth 2`; floats print as raw
+bits. ACTIVES was checked field by field against the dump. "Perk" has no symbol: it's the UI word for `PassiveAbility`.
+
+Rules from code:
+- Slot: effect, cooldown, ready (`SlotAbility` Update 00f95a3c, CanActivate 00f390d4). Effect length per class: Smoke, Morph,
+  Gun inherit 0 (0118c25e); Poison's is its Delay.
+- Cooldown (015edf26): a running cooldown streak's `factor` replaces the Overall Cooldowns perk, it doesn't stack.
+- `GamePlayEndContract` reasons (enum table 02eff420, read from the binary): 0 killed target, 1 killed NPC, 2 target was
+  killed, 3 player was killed, 4 escaped, 5 humiliated, 6 humiliated and escaped, 7 suicide, 8 player was killed with or
+  without a contract. `HandleEndContractEvent` 00f94b86: 2/4/5/6 add a loss; 7/8 also end the kill streak; 0/1/3 nothing.
+  So being escaped or stunned doesn't end a kill streak, and killing an NPC is not a loss.
+- `UpdateKillCounts` 00f94d36: kills++, silent++ if the kill earned Silent or Incognito (015b1c04), losses = 0.
+- Kill streaks are periodic (010db168): arm at `count % n == n - 1`, disarm at `count % n == 0`. Every nth kill pays, not just
+  the first. A silent streak's bonus is paid on silent kills only (00f51b10). Loss streaks run at every loss from n on
+  (0163c210).
+- Score: `(base + extra) * multiplier` (01180946).
+
+Retail oddities kept: SILENT HUNT does nothing (`SpeedFactor`, `Activated` have no reader). Base DISGUISE ships 1 s cooldown
+and 1 s duration; RAPID RELOAD DISGUISE 10 s against 60 s (every other Rapid Reload saves 10 s). Looks like data, not a port
+error; worth a look at a capture.
+
+Acts in `Match`: streak scoring and losses in every mode, Escapist, Overall Cooldowns, cooldown streaks, Score x2,
+`ResetAbilityCD` at round start, target and range checks, Poison (kills after its delay, Score on top), Mute (refuses
+abilities), `Match::speed_factor` (Sprint Boost, Knives, Chase Expert).
+
+Not done:
+- `Match::activate` has no caller: no key, no choice of loadout, no HUD slots, no wire form. `MatchEvent::{KillStreak,
+  LossStreak, Ability}` map to no net event, and `State` isn't in the snapshot, so a client would mispredict any non-empty
+  loadout. Wire this before enabling loadouts online.
+- `speed_factor` isn't applied to movement; Mute doesn't yet stop attacks; a poisoned body plays no death clip (the match
+  kills it, the body stands until the respawn).
+- Timers only, no effect: Disguise, Smoke, Gun, Firecrackers, Morph, Vision, Charge, Decoy. Disguise's `GrantsHidden` is in
+  `State::effect_hides`, unused.
+- Perks with a value but no hook: Resistance (`ms_DecreaseTime` 3 s, reader not found: xrefs stop at the GOT slot 02b98398),
+  AutoBash (we have no bash), Blender, Wall Runner, Extra Precision (no compass precision).
+
+Our readings (R): dying ends a running effect (`RequestAbilityStop` 00f95426, its death caller not read); `activate` refuses
+during a kill or stun (`IsPlayerEntityCanStartAbility` 00f8db75 not read); Chase Expert holds for the whole chase; VIP kills
+don't count for streaks (retail: score reasons 0 and 4 do, reason 4 not identified, so Escort hunters may be short-changed).
+
+Tests: abilities::tests (10), mode::tests (kill_streak_pays_in_the_match_and_death_ends_it, score_x2_after_five_deaths...,
+a_stun_is_a_loss..., a_fatal_fall..., killing_anothers_target..., escapist_shortens_the_escape, poison, mute, knives, chase).
