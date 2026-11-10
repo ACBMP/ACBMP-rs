@@ -1729,7 +1729,7 @@ Not done:
 - `Match::activate` has no caller: no key, no choice of loadout, no HUD slots, no wire form. `MatchEvent::{KillStreak,
   LossStreak, Ability}` map to no net event, and `State` isn't in the snapshot, so a client would mispredict any non-empty
   loadout. Wire this before enabling loadouts online.
-- `speed_factor` isn't applied to movement; Mute doesn't yet stop attacks; a poisoned body plays no death clip (the match
+- Speed effects now reach movement through `Match::time_scale` (see "Physics review"); Mute doesn't yet stop attacks; a poisoned body plays no death clip (the match
   kills it, the body stands until the respawn).
 - Timers only, no effect: Disguise, Smoke, Gun, Firecrackers, Morph, Vision, Charge, Decoy. Disguise's `GrantsHidden` is in
   `State::effect_hides`, unused.
@@ -1742,3 +1742,41 @@ don't count for streaks (retail: score reasons 0 and 4 do, reason 4 not identifi
 
 Tests: abilities::tests (10), mode::tests (kill_streak_pays_in_the_match_and_death_ends_it, score_x2_after_five_deaths...,
 a_stun_is_a_loss..., a_fatal_fall..., killing_anothers_target..., escapist_shortens_the_escape, poison, mute, knives, chase).
+
+## Physics review: running, climbing, ejecting, jumping (2026-11-10)
+
+A pass over every movement constant against the binary and DataPC.forge, multiplayer only. Ghidra's decompiler
+answered nothing this session, so this was read from the disassembly (`llvm-objdump --macho -d`, cached at
+`~/.cache/acbmp-re/dis.txt`). `acbmp census` now prints type names when `ACBMP_SCHEMAS` is set. `examples/jumpclips.rs`
+now prints each clip's end velocity.
+
+DataPC.forge: the movement tuning lives in code, as found before. These objects have values that matter for movement:
+- `GameSetting` 0x816: `JumpDetectionShape` (mesh `AC1_ Hang_free_Zone3D`), `NPCMaxSpeedOnBeam` 3.5 (NPCs only),
+  velocity thresholds 1/2/3/6 for physics-object hits.
+- `GameParameters.GlobalParameters` 0xbc9: `Boost_*`. Nothing in our code read these before (see below).
+- `HealthSettings`: fall damage, already ported.
+- `GamePlaySettings`: AI and detection only.
+
+| Area | Retail | Ours before | Now |
+|---|---|---|---|
+| Chase boost | `AssassinTask::UpdateAspiration` 00b55022, called from `UpdateGroundMovement` 01670407. In high profile with the stick past 0.35 (and no knife slow), a target closer than `fDistMaxAspi` 10 m on the flat (`Length2` = xy length) and more than 0.707 m ahead along the facing sets `ActionComponent::SetTimeScale(GetAspirationCoeff(d))`. The coefficient (00af44f6) runs linearly from `Boost_ValueAtMinDist` 1.1 at `Boost_MinDist` 0 m to `Boost_ValueAtMaxDist` 1.05 at `Boost_MaxDist` 10 m, clamped to [1.05, 1.1]. | none | `Match::time_scale`, `mode::aspiration_coeff`. `Player::time_scale` scales the ground cycle's dt, so pose and root motion both speed up. |
+| Chase Expert | Its `SpeedFactor` 1.15 replaces `Boost_ValueAtMinDist` (`ms_BoostFactor`, written on activation at 00dc4044). It is not a flat factor. | ×1.15 for the whole chase, not applied to movement | 1.15 → 1.05 over 10 m, through the boost |
+| Sprint Boost | `BhvAssassin::GetSpeedUpCoeff` replaces the chase boost, high profile only | in `speed_factor`, not applied | applied the same way |
+| Knives | No boost while `ThrowingKnifeTimerIsElapsed` is false | not applied | their factor scales the cycle |
+| Wall Runner | Its only readers are accomplishment events (`IsAbilityActivatedForEntity<AbilityWallRunner>`, `NetPlayer` +0x9c5d). No walling code reads it. | no effect | unchanged (agrees) |
+| Hang drop (S) | `ReleaseToInAir` plays `xx_h_hangwall_tr_fall_a`: 0.30 m out, 1.0 m down in 0.333 s, ending at (0, -4.98) m/s with no outward speed. `xx_h_hangfree_tr_fall_a` has no root motion. | after the clip, the fall restarted at vz 0 with 1.0 m/s outward | continues at -4.98 m/s from a wall hang and from rest from a free hang. Gate `climb` ends 0.61 m nearer the wall (40.28). |
+| Drop button (F) | same drop clip | 0.5 m/s push, no clip | kept: the user asked for an instant release (playtest #7). A free hang now drops straight down, as the retail clip does. |
+| Rebound with no target | `DoTargetedJump` onto the farthest foothold (8 m out, 3 m down) with the clip-warp model | ballistic homing from 1.71 m/s | unchanged (stand-in): it reaches the same point. A clip warp onto a point with no floor has no landing path yet. |
+| Gravity | 9.81 (`GetDropTime`) | 9.81 everywhere | agrees |
+| Gaits, climb cone, mount time, leap | retail ramp, 20-29 deg cone, 0.87 s mount, no ground leap | "Ours" by the user's playtest | unchanged (feel over retail) |
+
+Not verified (decompiler down): the grasp's hand window (1.3-2.2 m) and side reach (0.7 m), which are ours. The 1.2 m probe
+and the 2 m fall limit are retail. The globals behind the boost's high-profile floor (`0x2de5c08`) and its enable flag
+(`0x2de5c05`) are zero in the file, so both are treated as off. `GameInfo +0xd4` (the default time scale) is taken as 1.
+Retail resets the scale to default while a conflict or one of four Human states is active (`-0xa5`). The conflict test
+isn't ported, so ours keeps the boost.
+
+Tests: `mode::tests::chase_boost_closes_on_a_target_ahead` (replaces `chase_expert_holds_while_chasing`). Gates match
+their headers at 60 and 144 fps, with `climb` updated. Kills 8, duel 100/0, escort 0 desyncs. `acb-net` `match_map`
+(`match_over_lossy_localhost`) fails with or without this change: the lossy run sees a server rejection but no
+rollback. This was already failing before this work.

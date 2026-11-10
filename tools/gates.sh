@@ -2,7 +2,8 @@
 # Scripted San Donato regression runs (climb, thin railing, parapet, wall
 # jumps, ledge/beam-end stops, damage roll) at 60 and
 # 144 fps; prints each run's final player line. Expected (both rates):
-#   climb    -10.60 39.67 2.15   (S drops off the hang: 0.47 s without grabs, so
+#   climb    -10.60 40.28 2.15   (S drops off the hang: retail drop clip, then
+#                                 straight down at its 4.98 m/s; 0.47 s without grabs, so
 #                                 not the hold it let go of, and down to the ground)
 #   railing   38.60 -54.38 1.01
 #   parapet  -10.29 -0.08 6.59   (a jump up, the stick let go at 0.4 s on the top;

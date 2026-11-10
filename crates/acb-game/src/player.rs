@@ -60,6 +60,10 @@ pub struct Player {
     /// The drop button (`PlayerInput::jump`) last tick: a release on a wall
     /// wants a fresh press, not one still held from what led there.
     pub drop_held: bool,
+    /// Time scale of the ground move cycle this tick, set by the match
+    /// (`mode::Match::time_scale`: chase boost, Sprint Boost, knives); 1 in
+    /// free play.
+    pub time_scale: f32,
 }
 
 /// Low profile stops at a drop deeper than this instead of walking off
@@ -70,7 +74,7 @@ pub const LEDGE_STOP: f32 = human::ground::BREAK_HARD_DEPTH;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air { respawn: true, ..Air::start(pos.z, Some(0.0)) }, edge: None, obstacle: None, legs: human::Legs::default(), drop_held: false }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air { respawn: true, ..Air::start(pos.z, Some(0.0)) }, edge: None, obstacle: None, legs: human::Legs::default(), drop_held: false, time_scale: 1.0 }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -688,7 +692,10 @@ pub(crate) fn drive(
         _ => None,
     };
     p.loco.set_beam(clips, sk, beam.is_some());
-    let step = p.loco.update(clips, sk, dir.normalize_or_zero(), gait, &mut p.yaw, dt);
+    // retail plays the whole action faster (ActionComponent::SetTimeScale),
+    // so the cycle's root motion and its pose speed up together
+    let loco_dt = if p.flight.is_none() && !p.loco.airborne() { dt * p.time_scale } else { dt };
+    let step = p.loco.update(clips, sk, dir.normalize_or_zero(), gait, &mut p.yaw, loco_dt);
     let delta = step.delta;
     if let Some(ground) = ground {
         if let Some(f) = &mut p.flight {

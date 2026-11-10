@@ -7,7 +7,7 @@
 //! server and every client's prediction/replay step the same match; no
 //! clock, no RNG, ties by index.
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use crate::rules::{Acquire, AcquireEvent, Contracts, ContractEvent, Relation, Rules, Teams};
 
@@ -87,6 +87,31 @@ pub const THREAT_RATE_FAR: f32 = -0.25;
 /// `ThreatCloseDistance` / `ThreatFarDistance`: awareness distance ramp
 /// (`GameInfo::GetTargetAwearness` 0x011850aa), full up to close, 0 at far.
 pub const THREAT_CLOSE: f32 = 10.0;
+
+/// Chase boost range, flat metres (`fDistMaxAspi` 0x02dc2abc).
+pub const ASPIRATION_RANGE: f32 = 10.0;
+/// How far ahead along the facing a target must be for the chase boost, m:
+/// retail compares the unnormalised offset's dot with the facing to 0.707.
+pub const ASPIRATION_AHEAD: f32 = 0.707;
+/// `GlobalParameters` (DataPC.forge 0xbc9) `Boost_MinDist` / `Boost_MaxDist`
+/// and the boost at each: `Boost_ValueAtMinDist` / `Boost_ValueAtMaxDist`.
+pub const BOOST_DIST: (f32, f32) = (0.0, 10.0);
+pub const BOOST_VALUE: (f32, f32) = (1.1, 1.05);
+
+/// Chase boost at flat distance `d` from the target
+/// (`AssassinTask::GetAspirationCoeff` 00af44f6): linear from
+/// `Boost_ValueAtMinDist` to `Boost_ValueAtMaxDist`, clamped between them.
+/// Chase Expert replaces the near value with its `SpeedFactor`
+/// (`AbilityChaseBoost::ms_BoostFactor`, set on activation 00dc4044).
+pub fn aspiration_coeff(d: f32, chase_expert: bool) -> f32 {
+    let near = if chase_expert { crate::abilities::CHASE_SPEED_FACTOR } else { BOOST_VALUE.0 };
+    let (d0, d1) = BOOST_DIST;
+    if d0 == d1 {
+        return 1.0;
+    }
+    let slope = (BOOST_VALUE.1 - near) / (d1 - d0);
+    (BOOST_VALUE.1 + slope * (d - d1)).max(BOOST_VALUE.1).min(near)
+}
 pub const THREAT_FAR: f32 = 35.0;
 /// `ThreatDistanceDowning`: awareness loss at [`THREAT_FAR`] and beyond.
 pub const THREAT_DIST_DOWNING: f32 = 4.0;
@@ -741,12 +766,50 @@ impl Match {
         Ok(id)
     }
 
-    /// `p`'s speed factor from abilities and perks: the world multiplies its
-    /// movement by it. Chase Expert holds while `p` chases (ours; its
-    /// `Duration` ships as 0).
+    /// `p`'s speed factor from abilities (Sprint Boost, received knives).
+    /// Chase Expert acts through [`Match::time_scale`].
     pub fn speed_factor(&self, p: usize) -> f32 {
-        let chase = self.abilities[p].has_perk(crate::abilities::Perk::ChaseBoost) && self.chases[p].is_some();
-        self.abilities[p].speed_factor() * if chase { crate::abilities::CHASE_SPEED_FACTOR } else { 1.0 }
+        self.abilities[p].speed_factor()
+    }
+
+    /// Time scale of `p`'s ground movement this tick (retail
+    /// `AssassinTask::UpdateAspiration` 00b55022, `ActionComponent::
+    /// SetTimeScale`: the move cycle and its root motion play this much
+    /// faster). `high`: high profile, `moving`: the stick is pushed, `pos` and
+    /// `facing` are `p`'s, `bodies` every body's position.
+    ///
+    /// - Received knives: their slow only, no boost (the call is skipped
+    ///   until `ThrowingKnifeTimerIsElapsed`, 01670407).
+    /// - Low profile or no stick: 1.
+    /// - Sprint Boost running: its factor (`GetSpeedUpCoeff`) instead of the
+    ///   chase boost.
+    /// - Else the chase boost ("aspiration"): a target less than
+    ///   [`ASPIRATION_RANGE`] away on the flat and more than
+    ///   [`ASPIRATION_AHEAD`] ahead along the facing gives
+    ///   [`aspiration_coeff`] of its distance. Retail takes the first such
+    ///   target of its list; ours the nearest (the same with one contract).
+    pub fn time_scale(&self, p: usize, high: bool, moving: bool, pos: Vec3, facing: Vec2, bodies: &[Vec3]) -> f32 {
+        let a = &self.abilities[p];
+        if let Some((_, f)) = a.slowed {
+            return f;
+        }
+        if !high || !moving {
+            return 1.0;
+        }
+        let boost = a.speed_factor();
+        if boost != 1.0 {
+            return boost;
+        }
+        let chase_expert = a.has_perk(crate::abilities::Perk::ChaseBoost);
+        bodies
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| matches!(self.relation(p, j), Relation::Target | Relation::Mutual))
+            .filter(|&(_, t)| (*t - pos).truncate().dot(facing) > ASPIRATION_AHEAD)
+            .map(|(_, t)| (*t - pos).truncate().length())
+            .filter(|&d| d < ASPIRATION_RANGE)
+            .fold(None, |m: Option<f32>, d| Some(m.map_or(d, |m| m.min(d))))
+            .map_or(1.0, |d| aspiration_coeff(d, chase_expert))
     }
 
     /// One tick of the poisons: an elapsed one kills, a dead victim's is gone.
@@ -1225,12 +1288,26 @@ mod tests {
     }
 
     #[test]
-    fn chase_expert_holds_while_chasing() {
+    fn chase_boost_closes_on_a_target_ahead() {
         use crate::abilities::{Loadout, Perk};
-        let (mut d, _) = duel_with([Loadout { perks: [Some(Perk::ChaseBoost), None], ..Loadout::default() }, Loadout::default()]);
-        assert_eq!(d.speed_factor(0), 1.0);
-        d.chases[0] = Some(Chase { target: 1, coef: 0.0, phase: ChasePhase::InSight });
-        assert_eq!(d.speed_factor(0), 1.15);
+        assert!((aspiration_coeff(0.0, false) - 1.1).abs() < 1e-6);
+        assert!((aspiration_coeff(5.0, false) - 1.075).abs() < 1e-6);
+        assert!((aspiration_coeff(12.0, false) - 1.05).abs() < 1e-6);
+        assert!((aspiration_coeff(0.0, true) - 1.15).abs() < 1e-6);
+        assert!((aspiration_coeff(5.0, true) - 1.1).abs() < 1e-6);
+        let (d, _) = duel_with([Loadout { perks: [Some(Perk::ChaseBoost), None], ..Loadout::default() }, Loadout::default()]);
+        let east = Vec2::X;
+        let at = |x: f32| [Vec3::ZERO, Vec3::new(x, 0.0, 0.0)];
+        assert!(matches!(d.relation(0, 1), Relation::Target | Relation::Mutual));
+        // 5 m ahead, high profile, moving: Chase Expert's 1.15 - 0.01 * 5
+        assert!((d.time_scale(0, true, true, Vec3::ZERO, east, &at(5.0)) - 1.1).abs() < 1e-6);
+        // behind, out of range, low profile, standing: none
+        assert_eq!(d.time_scale(0, true, true, Vec3::ZERO, -east, &at(5.0)), 1.0);
+        assert_eq!(d.time_scale(0, true, true, Vec3::ZERO, east, &at(10.5)), 1.0);
+        assert_eq!(d.time_scale(0, false, true, Vec3::ZERO, east, &at(5.0)), 1.0);
+        assert_eq!(d.time_scale(0, true, false, Vec3::ZERO, east, &at(5.0)), 1.0);
+        // the plain boost without the perk
+        assert!((d.time_scale(1, true, true, Vec3::new(5.0, 0.0, 0.0), -east, &at(5.0)) - 1.075).abs() < 1e-6);
     }
 
     #[test]
