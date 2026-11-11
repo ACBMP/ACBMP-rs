@@ -1771,8 +1771,8 @@ DataPC.forge: the movement tuning lives in code, as found before. These objects 
 | Gaits, climb cone, mount time, leap | retail ramp, 20-29 deg cone, 0.87 s mount, no ground leap | "Ours" by the user's playtest | unchanged (feel over retail) |
 
 Not verified (decompiler down): the grasp's hand window (1.3-2.2 m) and side reach (0.7 m), which are ours. The 1.2 m probe
-and the 2 m fall limit are retail. The globals behind the boost's high-profile floor (`0x2de5c08`) and its enable flag
-(`0x2de5c05`) are zero in the file, so both are treated as off. `GameInfo +0xd4` (the default time scale) is taken as 1.
+and the 2 m fall limit are retail. The two globals behind the boost's floor are `AbilitySpeed::MovementSpeedFactor` (`0x2de5c08`) and
+`AbilitySpeed::Activated` (`0x2de5c05`), per AC RE Memory. `AbilitySpeed` isn't in `AbilityManagerMulti`, so both are off in MP. `GameInfo +0xd4` (the default time scale) is taken as 1.
 Retail resets the scale to default while a conflict or one of four Human states is active (`-0xa5`). The conflict test
 isn't ported, so ours keeps the boost.
 
