@@ -20,6 +20,9 @@
 #   roll     33.74 20.40 0.02    (9.5 m fall, W held: damage roll, 30 %)
 #   pilotis  -41.71 10.61 6.90   (0.6 m drop 0.3 m beside a post: retail
 #                                 CheckForPilotis, onto its centre)
+#   wallrun  -9.45 -2.03 4.39    (Wall Runner: no edge in the low scan, a top
+#                                 5.39 m up -> the 2 m step, hangs from it)
+#   wallrun0 -9.50 -2.03 1.99    (same run without the perk: the lower edge)
 set -u
 : "${ACBMP_SCHEMAS:=$HOME/Music/anvilforge-py/src/anvilforge/schemas}" "${ACBMP_EXE:=$HOME/Music/ACB/ACBMP.exe}"
 export ACBMP_SCHEMAS ACBMP_EXE
@@ -37,14 +40,16 @@ runs=(
   "beamend|34.5,-54.38,0.1,-90|0=w,shift 0.3=w,shift,space 0.32=w,shift 0.8= 2=d 5=|6"
   "roll|31,20.4,9.5,-90|0=w 1.5=|3"
   "pilotis|-41.81,10.30,7.5,-90|0=|2"
+  "wallrun|-8.90,-2.03,0.02,90|0=w,shift 1=|4|--wall-runner"
+  "wallrun0|-8.90,-2.03,0.02,90|0=w,shift 1=|4"
 )
 for fps in 60 144; do
   for r in "${runs[@]}"; do
-    IFS='|' read -r name at input after <<<"$r"
+    IFS='|' read -r name at input after flags <<<"$r"
     line=$(WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-wayland-1} XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/1000} \
       timeout 120 ./target/release/acb-viewer "$M/DataPC_AC2MP_SanDonato.forge" \
       --character AC2MP_ID07_MainTemplate_Player --count 1 --crowd 0 --play --exe "$ACBMP_EXE" \
-      --at="$at" --input "$input" --fps "$fps" --capture "$out/$name.png" --capture-after "$after" 2>&1 \
+      --at="$at" --input "$input" --fps "$fps" --capture "$out/$name.png" --capture-after "$after" ${flags:-} 2>&1 \
       | grep '^player at' | tail -1)
     printf '%-8s %3s fps  %s\n' "$name" "$fps" "$line"
   done

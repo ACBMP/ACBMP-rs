@@ -1734,7 +1734,7 @@ Not done:
 - Timers only, no effect: Disguise, Smoke, Gun, Firecrackers, Morph, Vision, Charge, Decoy. Disguise's `GrantsHidden` is in
   `State::effect_hides`, unused.
 - Perks with a value but no hook: Resistance (`ms_DecreaseTime` 3 s, reader not found: xrefs stop at the GOT slot 02b98398),
-  AutoBash (we have no bash), Blender, Wall Runner, Extra Precision (no compass precision).
+  AutoBash (we have no bash), Blender, Extra Precision (no compass precision). Wall Runner: see "Wall Runner" (2026-11-11).
 
 Our readings (R): dying ends a running effect (`RequestAbilityStop` 00f95426, its death caller not read); `activate` refuses
 during a kill or stun (`IsPlayerEntityCanStartAbility` 00f8db75 not read); Chase Expert holds for the whole chase; VIP kills
@@ -1763,7 +1763,7 @@ DataPC.forge: the movement tuning lives in code, as found before. These objects 
 | Chase Expert | Its `SpeedFactor` 1.15 replaces `Boost_ValueAtMinDist` (`ms_BoostFactor`, written on activation at 00dc4044). It is not a flat factor. | ×1.15 for the whole chase, not applied to movement | 1.15 → 1.05 over 10 m, through the boost |
 | Sprint Boost | `BhvAssassin::GetSpeedUpCoeff` replaces the chase boost, high profile only | in `speed_factor`, not applied | applied the same way |
 | Knives | No boost while `ThrowingKnifeTimerIsElapsed` is false | not applied | their factor scales the cycle |
-| Wall Runner | Its only readers are accomplishment events (`IsAbilityActivatedForEntity<AbilityWallRunner>`, `NetPlayer` +0x9c5d). No walling code reads it. | no effect | unchanged (agrees) |
+| Wall Runner | Wrong at first: the function and net-flag readers only feed accomplishments, but the real path goes through the static `AbilityWallRunner::Activated`. See "Wall Runner" below. | no effect | ported (2026-11-11) |
 | Hang drop (S) | `ReleaseToInAir` plays `xx_h_hangwall_tr_fall_a`: 0.30 m out, 1.0 m down in 0.333 s, ending at (0, -4.98) m/s with no outward speed. `xx_h_hangfree_tr_fall_a` has no root motion. | after the clip, the fall restarted at vz 0 with 1.0 m/s outward | continues at -4.98 m/s from a wall hang and from rest from a free hang. Gate `climb` ends 0.61 m nearer the wall (40.28). |
 | Drop button (F) | same drop clip | 0.5 m/s push, no clip | kept: the user asked for an instant release (playtest #7). A free hang now drops straight down, as the retail clip does. |
 | Rebound with no target | `DoTargetedJump` onto the farthest foothold (8 m out, 3 m down) with the clip-warp model | ballistic homing from 1.71 m/s | unchanged (stand-in): it reaches the same point. A clip warp onto a point with no floor has no landing path yet. |
@@ -1780,3 +1780,39 @@ Tests: `mode::tests::chase_boost_closes_on_a_target_ahead` (replaces `chase_expe
 their headers at 60 and 144 fps, with `climb` updated. Kills 8, duel 100/0, escort 0 desyncs. `acb-net` `match_map`
 (`match_over_lossy_localhost`) fails with or without this change: the lossy run sees a server rejection but no
 rollback. This was already failing before this work.
+
+## Wall Runner (2026-11-11)
+
+Source: the AC RE Memory knowledge base (`~/Music/AC-RE-Memory`, notes `acb/abilities/acbmp_wallrunner_investigation.md` and
+`acb2_ability_statics_break_fsm_wall.md`). Consult it before re-deriving ability or movement RE: my static search on
+2026-11-10 looked only at the ability's functions and `NetPlayer` flag, and wrongly concluded the perk does nothing.
+
+Retail chain:
+1. `AbilityWallRunner::Activated` (static 0x02e39165) is read by `BhvAssassin::IsSuperWallingActivated`.
+2. That value is the last argument of `DoEnterWallingVertical` (`UpdateGroundMovement` and the beam/free-step tasks) and
+   is stored at `HumanWallingData+0x21`.
+3. It is read once, in `HumanWalling::UpdateHumanWallingMain` 0122f968.
+
+At the end of the entry (the entry clip has risen 1.0 m):
+- The low scan runs first (edges 0.25-1.1 m over the feet, so 1.25-2.1 m over the start). A hold there is grabbed, with or
+  without the perk.
+- Perk on, with nothing in the low scan: an extra scan 1.5 m back, 3.5 m up, 2.1 m tall. A top edge 0.25-5 m up (4.5-6.0 m
+  over the start) plays the perk-only action 0x89587CC9: `IDxx_h_wallingfront_step1_300_footr`, 0.4 s, 2.0 m up. The plain
+  step 0x45, `xx_h_wallingfront_step1_footr`, takes 0.133 s for 0.5 m.
+- The ledge tests then run from 2.0 m higher (feet +3.0). Tests 1 and 3 stop at the 2.95 m scan box; the perk lifts test
+  2 to 3.1 m. Ledges are taken at 3.5-6.0 m over the start, against 4.45 m at most without the perk (ours: 4.4).
+- The low scan blocks the perk, but a lower edge in the plain test range does not. Where a high top exists, the perk
+  climbs past the lower edges. The AC RE notes also cover losing the eject: no `WallingEnd` on the long climb.
+
+Ours:
+- `Ground::wall_run_hold(.., wall_runner)` returns the hold and whether the run is long (`WALL_RUNNER_LOW`, `_SCAN`,
+  `_REACH`).
+- `Climb::wall_run(.., long, ..)` plays the 2 m step clip, and the grab clip is chosen 1.5 m higher.
+- `Player::wall_runner` is set each tick from the match loadout. In free play it keeps the player's own flag:
+  `acb-viewer --wall-runner`.
+- Our reading: test types 2/3/4 (ledge kinds) are not told apart, and any hold counts in the reach. The "pull-up type"
+  of the perk's scan is our `Hold::top`. The perk's run does not lose the eject in ours (we have no `WallingEnd` state).
+- Gates `wallrun` (perk: hangs at entity -9.45 -2.03 4.39 from the 5.39 m top) and `wallrun0` (no perk: -9.50 -2.03 1.99,
+  the lower edge), identical at 60 and 144 fps. Test `jump_map.rs` `wall_runner_reaches_higher`. On San Donato, 67 tops
+  stand 4.7-5.8 m over the floor 1 m out. Other gates, kills 8 and duel 100/0 are unchanged. Loadouts are empty by
+  default and online has no loadout choice yet, so a match only gets the perk through `Match::set_loadout`.

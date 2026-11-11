@@ -134,7 +134,7 @@ fn entries_on_san_donato() {
     let (feet, fwd) = (Vec3::new(-14.47, 44.18, 2.22), glam::Vec2::X);
     let (hit, n) = g.wall_ahead(feet, fwd, fwd * 4.0).expect("wall ahead");
     assert!(n.dot(-fwd) > 0.9, "wall normal {n:?}");
-    let (hold, point) = g.wall_run_hold(hit, n, feet.z).expect("wall-run hold");
+    let (hold, point, _) = g.wall_run_hold(hit, n, feet.z, false).expect("wall-run hold");
     assert!((point.z - 6.02).abs() < 0.1 && hold.top, "{point:?}");
     // running parallel to the wall is no wall run
     assert!(g.wall_ahead(feet, fwd, glam::Vec2::Y * 4.0).is_none());

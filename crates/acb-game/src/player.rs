@@ -64,6 +64,9 @@ pub struct Player {
     /// (`mode::Match::time_scale`: chase boost, Sprint Boost, knives); 1 in
     /// free play.
     pub time_scale: f32,
+    /// The Wall Runner perk is equipped (set by the match each tick): wall
+    /// runs reach higher (`Ground::wall_run_hold`).
+    pub wall_runner: bool,
 }
 
 /// Low profile stops at a drop deeper than this instead of walking off
@@ -74,7 +77,7 @@ pub const LEDGE_STOP: f32 = human::ground::BREAK_HARD_DEPTH;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air { respawn: true, ..Air::start(pos.z, Some(0.0)) }, edge: None, obstacle: None, legs: human::Legs::default(), drop_held: false, time_scale: 1.0 }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air { respawn: true, ..Air::start(pos.z, Some(0.0)) }, edge: None, obstacle: None, legs: human::Legs::default(), drop_held: false, time_scale: 1.0, wall_runner: false }
     }
 
     pub fn entity(&self) -> Mat4 {
@@ -935,8 +938,11 @@ pub(crate) fn drive(
                     // turn would otherwise never come: nothing delays the run
                     // now that a stop isn't followed by a speed ramp.
                     let ahead = input.run.then(|| ground.wall_ahead(p.pos, square, square * 5.0)).flatten();
-                    let target = ahead.and_then(|(hit, n)| ground.wall_run_hold(hit, n, p.pos.z));
-                    let run = |target| ahead.map(|(hit, n)| Climb::wall_run(target, hit, n, p.pos, p.yaw, p.loco.last_pose().clone()));
+                    let target = ahead.and_then(|(hit, n)| ground.wall_run_hold(hit, n, p.pos.z, p.wall_runner));
+                    let run = |target: Option<(crate::climb::Hold, Vec3, bool)>| {
+                        let long = target.is_some_and(|t| t.2);
+                        ahead.map(|(hit, n)| Climb::wall_run(target.map(|t| (t.0, t.1)), long, hit, n, p.pos, p.yaw, p.loco.last_pose().clone()))
+                    };
                     let mount = || ground.climb_entry(p.pos, square).map(|(hold, point)| Climb::mount(hold, point, p.pos, p.yaw, p.loco.last_pose().clone()));
                     target.and_then(|t| run(Some(t))).or_else(mount).or_else(|| run(None))
                 });

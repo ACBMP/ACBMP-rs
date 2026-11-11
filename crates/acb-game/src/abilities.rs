@@ -167,7 +167,8 @@ pub fn active(name: &str) -> Option<ActiveId> {
 pub enum Perk {
     /// [`BASH_COUNT`]. Nothing to act on yet: we have no bash.
     AutoBash,
-    /// "Run slightly higher up a wall when starting a climb".
+    /// "Run slightly higher up a wall when starting a climb": the long
+    /// wall-run step ([`crate::ground::Ground::wall_run_hold`]).
     WallRunner,
     /// [`STUN_CUT`].
     Resistance,

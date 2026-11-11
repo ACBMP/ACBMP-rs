@@ -103,6 +103,10 @@ struct Args {
     /// Simulated network on this client, e.g. loss=5%,delay=50ms,jitter=10ms
     #[arg(long, default_value = "")]
     netsim: String,
+    /// Free play: the --play character has the Wall Runner perk (wall runs
+    /// reach top edges up to about 6 m)
+    #[arg(long)]
+    wall_runner: bool,
 }
 
 fn parse_keys(list: &str) -> anyhow::Result<HashSet<KeyCode>> {
@@ -520,7 +524,11 @@ impl App {
             at: self.args.at.clone(),
             builtins: builtins.as_ref(),
         };
-        World::load(archive, &setup)
+        let mut world = World::load(archive, &setup)?;
+        if let Some(p) = world.players.first_mut() {
+            p.wall_runner = self.args.wall_runner;
+        }
+        Ok(world)
     }
 
     fn builtins(&self) -> Option<BuiltinTracks> {

@@ -498,3 +498,58 @@ fn the_drop_button_drops() {
     let p = &w.players[0];
     assert!(p.climb.is_some() || p.loco.airborne(), "nothing happened at {:?}", p.pos);
 }
+
+/// Wall Runner (retail `HumanWalling::UpdateHumanWallingMain`, AC RE Memory
+/// `acbmp_wallrunner_investigation`): a top edge 4.5-6 m over the feet, out of a
+/// plain wall run's reach, is grabbed with the perk through the long step.
+#[test]
+fn wall_runner_reaches_higher() {
+    use acb_game::climb::{yaw_into, WALL_RUNNER_SCAN};
+    let Some(d) = data() else { return };
+    let w = player_at(&d, [0.0, 0.0, 0.0, 0.0]);
+    let g = w.ground.as_ref().unwrap();
+    // a wall with a top 4.5-6 m up and floor 1 m in front of it, where the
+    // perk takes the long step (nothing in the low scan; a plain run may
+    // still have a lower edge, which retail then skips too)
+    let spot = g
+        .holds_around(glam::Vec3::ZERO, 300.0)
+        .into_iter()
+        .filter(|h| h.top && (h.b - h.a).length() > 1.5)
+        .find_map(|h| {
+            let q = (h.a + h.b) * 0.5;
+            let out = (q.truncate() + h.wall * 1.0).extend(q.z);
+            let f = g.floor_below(out)?;
+            let feet = out.with_z(f);
+            let dz = q.z - f;
+            if !(WALLRUNNER_MARGIN + WALL_RUNNER_SCAN.0..WALL_RUNNER_SCAN.1 - WALLRUNNER_MARGIN).contains(&dz) {
+                return None;
+            }
+            let (hit, n) = g.wall_ahead(feet, -h.wall, -h.wall * 5.0)?;
+            let plain = g.wall_run_hold(hit, n, f, false).map(|t| t.1.z);
+            let long = g.wall_run_hold(hit, n, f, true).filter(|t| t.2)?;
+            ((long.1.z - q.z).abs() < 0.3 && plain.is_none_or(|z| z < q.z - 0.5)).then_some((feet, h.wall, q.z))
+        });
+    let (feet, n, top) = spot.expect("no wall only the perk reaches");
+    let yaw = yaw_into(n).to_degrees();
+    eprintln!("wall runner spot {:.2} {:.2} {:.2} yaw {yaw:.0}, top {top:.2}", feet.x, feet.y, feet.z);
+    let run = |perk: bool| {
+        let mut w = player_at(&d, [feet.x, feet.y, feet.z, yaw]);
+        w.players[0].wall_runner = perk;
+        let go = PlayerInput { forward: true, run: true, cam_yaw: (-n).y.atan2((-n).x), ..PlayerInput::default() };
+        for _ in 0..(1.0 / DT) as usize {
+            w.step(&[go]);
+        }
+        for _ in 0..(2.0 / DT) as usize {
+            w.step(&[PlayerInput::default()]);
+        }
+        let p = &w.players[0];
+        (p.climb.as_ref().map(|c| c.hold.a.z.max(c.hold.b.z)), p.pos)
+    };
+    let (with, at) = run(true);
+    assert!(with.is_some_and(|z| (z - top).abs() < 0.3), "perk: hold {with:?} at {at:?}, top {top} from {feet:?}");
+    let (without, at) = run(false);
+    assert!(without.is_none_or(|z| z < top - 0.3), "no perk: hold {without:?} at {at:?}");
+}
+
+/// Keeps the probe away from the scan's edges, metres.
+const WALLRUNNER_MARGIN: f32 = 0.2;
