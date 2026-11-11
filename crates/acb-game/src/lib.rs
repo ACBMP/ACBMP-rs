@@ -748,6 +748,10 @@ impl World {
                 }
                 _ => 1.0,
             };
+            // the perk from the loadout; free play keeps the player's own flag
+            if let Some(m) = &self.mode {
+                p.wall_runner = m.abilities[i].has_perk(abilities::Perk::WallRunner);
+            }
         }
         for (i, p) in self.players.iter_mut().enumerate() {
             let input = if in_control[i] { inputs.get(i).copied().unwrap_or_default() } else { PlayerInput { cam_yaw: inputs.get(i).map_or(0.0, |x| x.cam_yaw), ..Default::default() } };

@@ -140,7 +140,7 @@ Controls (on foot):
 |---|---|
 | W A S D | move, relative to the camera |
 | (nothing) | low profile: walk; stops at ledges deeper than 2.5 m and at beam ends; walks off shallower drops with a small hop |
-| Shift | high profile: run; runs into wall runs and climbs. Running at your target less than 10 m ahead plays your run up to 10 % faster (1.1x right on it, 1.05x at 10 m; retail chase boost) |
+| Shift | high profile: run; runs into wall runs and climbs (`--wall-runner`: the Wall Runner perk, wall runs reach top edges up to about 6 m instead of 4.4 m). Running at your target less than 10 m ahead plays your run up to 10 % faster (1.1x right on it, 1.05x at 10 m; retail chase boost) |
 | Space | Legs: sprint (high profile). Freerun jumps (up onto a ledge, across a gap, onto a pole, to a hang across a gap) need Space held or pressed in the last 0.5 s and the move direction within 80° of facing (retail); there is no jump button: Space alone does nothing, but Shift + Space + a direction toward a ledge jumps even from standing (retail ForwardFromIdle). A roof across a gap, no more than 1.3 m above you, is landed on, on your feet and running on, rather than hung from. Freerunning off an edge with nothing in reach leaps: an arc out towards a point 8 m ahead and 3 m down, and on from there. Running off an edge without Space hops 2.6 m out (3 m below the edge, then straight down), walking off a shallow drop 1 m |
 | F | drop: on foot near an edge (any stance, moving or not, the way you're moving or, standing, any way round), lower onto the wall below, or with no wall to lower onto step off and fall. A fall from it grabs nothing on the way down |
 | E | kill (your target online; any NPC in free play); walks in from ~4 m |

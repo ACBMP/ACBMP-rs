@@ -92,6 +92,7 @@ const CLIPS: &[&str] = &[
     "xx_h_impultionstraight_footl_to_wallingfront_step1_footr",
     "xx_h_wallingfront_entry_footl_a",
     "xx_h_wallingfront_step1_footr",
+    "IDxx_h_wallingfront_step1_300_footr",
     "xx_h_wallingfront_step1_footr_tr_hangwall_251cm_000cm_a",
     "xx_h_wallingfront_step1_footr_tr_hangwall_430cm_000cm_a",
     // hang
@@ -432,16 +433,22 @@ impl Climb {
     /// Runs up the wall at `wall` (a point on it, outward normal `n`) from
     /// feet at `pos` and grabs `hold` at `point`, or comes back down when
     /// there is none.
-    pub fn wall_run(target: Option<(Hold, Vec3)>, wall: Vec3, n: Vec2, pos: Vec3, yaw: f32, from: Pose) -> Climb {
-        let run = ["xx_h_impultionstraight_footl_to_wallingfront_step1_footr", "xx_h_wallingfront_entry_footl_a", "xx_h_wallingfront_step1_footr"];
+    /// `long`: the Wall Runner perk's long step ([`Ground::wall_run_hold`]).
+    pub fn wall_run(target: Option<(Hold, Vec3)>, long: bool, wall: Vec3, n: Vec2, pos: Vec3, yaw: f32, from: Pose) -> Climb {
+        // the step: 0.5 m (retail action 0x45), or with Wall Runner 2.0 m
+        // (perk-only action 0x89587CC9)
+        let step = if long { WALL_RUNNER_STEP_CLIP } else { "xx_h_wallingfront_step1_footr" };
+        let run = ["xx_h_impultionstraight_footl_to_wallingfront_step1_footr", "xx_h_wallingfront_entry_footl_a", step];
         let yaw1 = yaw_into(n);
         let run: &[&'static str] = if (wall - pos).truncate().length() < WALL_RUN_NEAR { &run[1..] } else { &run };
         let (seq, hold) = match target {
             Some((hold, point)) => {
                 let to = entity_for(point, hold.wall, Stance::HangWall);
                 // the 251 cm grab ends with the hands 2.51 m above the
-                // feet, the 430 cm one rises 1.8 m more
-                let grab = if point.z - pos.z > 2.9 {
+                // feet, the 430 cm one rises 1.8 m more (after a long step,
+                // both from 1.5 m higher)
+                let lift = if long { WALL_RUNNER_STEP_RISE - 0.5 } else { 0.0 };
+                let grab = if point.z - pos.z - lift > 2.9 {
                     "xx_h_wallingfront_step1_footr_tr_hangwall_430cm_000cm_a"
                 } else {
                     "xx_h_wallingfront_step1_footr_tr_hangwall_251cm_000cm_a"
@@ -457,7 +464,11 @@ impl Climb {
             }
         };
         let mut c = Climb::new(hold, Stance::HangWall, pos, yaw, Phase::Seq(seq), Some(from));
-        c.last = if target.is_some() { "wall run" } else { "wall run (nothing to grab)" };
+        c.last = match (target.is_some(), long) {
+            (true, true) => "wall run (wall runner)",
+            (true, false) => "wall run",
+            _ => "wall run (nothing to grab)",
+        };
         c
     }
 
@@ -968,6 +979,26 @@ const CLIMB_RAY_HEIGHTS: [f32; 2] = [WALLING_RAY_HEIGHT, 0.7];
 /// grabs; lower edges are climbed or jumped onto).
 pub const WALL_RUN_REACH: (f32, f32) = (1.6, 4.4);
 
+/// Wall Runner (retail `HumanWalling::UpdateHumanWallingMain` 0122f968, the
+/// perk flag `HumanWallingData+0x21` from `DoEnterWallingVertical`; AC RE
+/// Memory `acbmp_wallrunner_investigation`). Heights above the feet the run
+/// started from (the entry clip has risen 1.0 m when the scans run):
+/// - the low scan at the end of the entry (box 0.4 below to 1.1 above the
+///   feet, edges at least 0.25 up): a hold here is grabbed without the perk's
+///   step, [`WALL_RUNNER_LOW`];
+/// - with nothing there, the perk's scan (1.5 m back, 3.5 m up, 2.1 m tall,
+///   edges 0.25..5 above): a top edge in [`WALL_RUNNER_SCAN`] plays the long
+///   step;
+/// - after it the ledge tests run 2.0 m higher: [`WALL_RUNNER_REACH`] (tests
+///   1 and 3 stop at the scan box, 2.95 m over the feet; test 2 at 3.1 m).
+pub const WALL_RUNNER_LOW: (f32, f32) = (1.25, 2.1);
+pub const WALL_RUNNER_SCAN: (f32, f32) = (4.5, 6.0);
+pub const WALL_RUNNER_REACH: (f32, f32) = (3.5, 6.0);
+/// The perk's step, action 0x89587CC9 (block `AC2MP_Abilities`): 0.4 s,
+/// 2.0 m up, against the plain step's 0.133 s and 0.5 m.
+const WALL_RUNNER_STEP_CLIP: &str = "IDxx_h_wallingfront_step1_300_footr";
+const WALL_RUNNER_STEP_RISE: f32 = 2.0;
+
 /// Hold queries on the map's guidance edges.
 impl Ground {
     fn holds_near(&self, p: Vec3, r: f32) -> impl Iterator<Item = &Hold> + '_ {
@@ -1106,15 +1137,29 @@ impl Ground {
     /// half a metre sideways, [`WALL_RUN_REACH`] above the feet, from 0.4 m
     /// into the wall to 0.7 m out of it (an eave or beam over a recessed
     /// wall face), with room to hang ([`Self::hang_clear`]).
-    pub fn wall_run_hold(&self, hit: Vec3, n: Vec2, feet: f32) -> Option<(Hold, Vec3)> {
+    ///
+    /// `wall_runner`: the perk is equipped. With no hold in the low scan and a
+    /// top edge in [`WALL_RUNNER_SCAN`], the run takes the long step and grabs
+    /// the lowest hold in [`WALL_RUNNER_REACH`] instead; the `bool` says so.
+    pub fn wall_run_hold(&self, hit: Vec3, n: Vec2, feet: f32, wall_runner: bool) -> Option<(Hold, Vec3, bool)> {
+        let normal = || self.wall_run_hold_in(hit, n, feet, WALL_RUN_REACH, false);
+        if !wall_runner || self.wall_run_hold_in(hit, n, feet, WALL_RUNNER_LOW, false).is_some() || self.wall_run_hold_in(hit, n, feet, WALL_RUNNER_SCAN, true).is_none() {
+            return normal().map(|(h, q)| (h, q, false));
+        }
+        self.wall_run_hold_in(hit, n, feet, WALL_RUNNER_REACH, false).map(|(h, q)| (h, q, true)).or_else(|| normal().map(|(h, q)| (h, q, false)))
+    }
+
+    /// The lowest hold [`Self::wall_run_hold`] takes with its edge `reach`
+    /// above `feet` (`top`: edges with floor on top only).
+    fn wall_run_hold_in(&self, hit: Vec3, n: Vec2, feet: f32, reach: (f32, f32), top: bool) -> Option<(Hold, Vec3)> {
         let right = right_of(n);
         self.holds_near(hit, 1.0)
-            .filter(|h| h.wall.dot(n) > 0.7)
+            .filter(|h| h.wall.dot(n) > 0.7 && (h.top || !top))
             .filter_map(|h| {
                 let q = h.nearest(hit);
                 let d = (q - hit).truncate();
                 let dz = q.z - feet;
-                (d.dot(right).abs() < 0.5 && (-0.4..0.7).contains(&d.dot(n)) && (WALL_RUN_REACH.0..=WALL_RUN_REACH.1).contains(&dz)).then(|| ((!self.hang_clear(q, h.wall), dz), *h, q))
+                (d.dot(right).abs() < 0.5 && (-0.4..0.7).contains(&d.dot(n)) && (reach.0..=reach.1).contains(&dz)).then(|| ((!self.hang_clear(q, h.wall), dz), *h, q))
             })
             .min_by(|a, b| a.0 .0.cmp(&b.0 .0).then(a.0 .1.total_cmp(&b.0 .1)))
             .map(|x| (x.1, x.2))

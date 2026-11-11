@@ -21,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     println!("climb wall {wall:?}");
     if let Some(n) = wall {
         let sq = -n;
-        println!("wall ahead {:?}", g.wall_ahead(pos, sq, sq * 5.0).map(|(hit, n)| (hit, n, g.wall_run_hold(hit, n, pos.z).map(|x| x.1))));
+        println!("wall ahead {:?}", g.wall_ahead(pos, sq, sq * 5.0).map(|(hit, n)| (hit, n, g.wall_run_hold(hit, n, pos.z, false).map(|x| x.1))));
         println!("mount {:?}", g.climb_entry(pos, sq).map(|x| x.1));
     }
     for h in g.holds_around(pos, 3.0) {
