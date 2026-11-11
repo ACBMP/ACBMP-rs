@@ -369,6 +369,8 @@ pub fn match_events(m: &Match, tick: u32) -> Vec<Event> {
             MatchEvent::Acquire(AcquireEvent::Stopped { hunter, target }) => Some(ev(EventKind::AcquireStopped, hunter, target)),
             // one event per kill (events dedup by tick, kind, player)
             MatchEvent::Bonus { .. } => None,
+            // no wire form yet: loadouts aren't chosen in a net game
+            MatchEvent::KillStreak { .. } | MatchEvent::LossStreak { .. } | MatchEvent::Ability { .. } => None,
             MatchEvent::BloodBath { player, chain } => Some(ev(EventKind::BloodBath, player, chain as usize)),
             MatchEvent::Released { hunter, target } => Some(ev(EventKind::Released, hunter, target)),
         })

@@ -17,6 +17,7 @@ pub mod kill;
 pub mod locomotion;
 pub mod manhunt;
 pub mod mode;
+pub mod abilities;
 pub mod action;
 pub mod bonus;
 pub mod player;
@@ -735,6 +736,19 @@ impl World {
         // crowd NPCs killed this tick, by player
         let mut npc_kills = Vec::new();
         let stances: Vec<rules::Stance> = self.players.iter().map(|p| p.actor().stance).collect();
+        // ground move cycle time scale: chase boost, Sprint Boost, knives
+        let body_pos: Vec<Vec3> = self.bodies.iter().map(|b| b.entity.w_axis.truncate()).collect();
+        for (i, p) in self.players.iter_mut().enumerate() {
+            p.time_scale = match &self.mode {
+                Some(m) if in_control[i] => {
+                    let x = inputs.get(i).copied().unwrap_or_default();
+                    let moving = x.forward || x.back || x.left || x.right;
+                    let facing = glam::Vec2::new(-p.yaw.sin(), p.yaw.cos());
+                    m.time_scale(i, x.run || x.sprint, moving, p.pos, facing, &body_pos)
+                }
+                _ => 1.0,
+            };
+        }
         for (i, p) in self.players.iter_mut().enumerate() {
             let input = if in_control[i] { inputs.get(i).copied().unwrap_or_default() } else { PlayerInput { cam_yaw: inputs.get(i).map_or(0.0, |x| x.cam_yaw), ..Default::default() } };
             let relation = |j: usize| relations.as_ref().map_or(rules::Relation::Npc, |r| r[i][j]);

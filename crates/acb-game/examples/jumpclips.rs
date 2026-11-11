@@ -1,4 +1,4 @@
-//! Prints length and root displacement of the freerun jump clips:
+//! Prints length, root displacement, apex and end velocity (last 1/30 s) of the freerun jump clips:
 //! `jumpclips MAP.forge` (env ACBMP_SCHEMAS, ACBMP_EXE).
 use acb_anim::{pose::Clip, BuiltinTracks};
 fn main() -> anyhow::Result<()> {
@@ -19,7 +19,9 @@ fn main() -> anyhow::Result<()> {
         let d = c.root_motion(c.length).w_axis;
         // apex of the root track
         let apex = (0..=40).map(|i| c.root_motion(c.length * i as f32 / 40.0).w_axis.z).fold(f32::MIN, f32::max);
-        rows.push(format!("{n:70} len {:.3} disp {:6.2} {:6.2} {:6.2} apex {:5.2}", c.length, d.x, d.y, d.z, apex));
+        let h = (c.length / 4.0).min(1.0 / 30.0);
+        let v = (d - c.root_motion(c.length - h).w_axis) / h;
+        rows.push(format!("{n:70} len {:.3} disp {:6.2} {:6.2} {:6.2} apex {:5.2} vend {:6.2} {:6.2} {:6.2}", c.length, d.x, d.y, d.z, apex, v.x, v.y, v.z));
     }
     rows.sort();
     for r in rows { println!("{r}"); }

@@ -7,7 +7,7 @@
 //! server and every client's prediction/replay step the same match; no
 //! clock, no RNG, ties by index.
 
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 
 use crate::rules::{Acquire, AcquireEvent, Contracts, ContractEvent, Relation, Rules, Teams};
 
@@ -87,6 +87,31 @@ pub const THREAT_RATE_FAR: f32 = -0.25;
 /// `ThreatCloseDistance` / `ThreatFarDistance`: awareness distance ramp
 /// (`GameInfo::GetTargetAwearness` 0x011850aa), full up to close, 0 at far.
 pub const THREAT_CLOSE: f32 = 10.0;
+
+/// Chase boost range, flat metres (`fDistMaxAspi` 0x02dc2abc).
+pub const ASPIRATION_RANGE: f32 = 10.0;
+/// How far ahead along the facing a target must be for the chase boost, m:
+/// retail compares the unnormalised offset's dot with the facing to 0.707.
+pub const ASPIRATION_AHEAD: f32 = 0.707;
+/// `GlobalParameters` (DataPC.forge 0xbc9) `Boost_MinDist` / `Boost_MaxDist`
+/// and the boost at each: `Boost_ValueAtMinDist` / `Boost_ValueAtMaxDist`.
+pub const BOOST_DIST: (f32, f32) = (0.0, 10.0);
+pub const BOOST_VALUE: (f32, f32) = (1.1, 1.05);
+
+/// Chase boost at flat distance `d` from the target
+/// (`AssassinTask::GetAspirationCoeff` 00af44f6): linear from
+/// `Boost_ValueAtMinDist` to `Boost_ValueAtMaxDist`, clamped between them.
+/// Chase Expert replaces the near value with its `SpeedFactor`
+/// (`AbilityChaseBoost::ms_BoostFactor`, set on activation 00dc4044).
+pub fn aspiration_coeff(d: f32, chase_expert: bool) -> f32 {
+    let near = if chase_expert { crate::abilities::CHASE_SPEED_FACTOR } else { BOOST_VALUE.0 };
+    let (d0, d1) = BOOST_DIST;
+    if d0 == d1 {
+        return 1.0;
+    }
+    let slope = (BOOST_VALUE.1 - near) / (d1 - d0);
+    (BOOST_VALUE.1 + slope * (d - d1)).max(BOOST_VALUE.1).min(near)
+}
 pub const THREAT_FAR: f32 = 35.0;
 /// `ThreatDistanceDowning`: awareness loss at [`THREAT_FAR`] and beyond.
 pub const THREAT_DIST_DOWNING: f32 = 4.0;
@@ -278,6 +303,39 @@ pub enum MatchEvent {
     /// Assassinate: `hunter` released its contract on `target` (release
     /// button, retail CancelWithY).
     Released { hunter: usize, target: usize },
+    /// `player`'s kill earned its kill streak's `points` (they are in the
+    /// kill's [`MatchEvent::Score`]).
+    KillStreak { player: usize, points: u32 },
+    /// `player`'s loss streak started.
+    LossStreak { player: usize, streak: crate::abilities::LossStreak },
+    /// `player` used its active ability `ability` ([`crate::abilities::ACTIVES`]).
+    Ability { player: usize, ability: crate::abilities::ActiveId },
+}
+
+/// Why [`Match::activate`] refused ("Ability not available yet", "Your
+/// abilities have been disabled", "This ability can only be used on your
+/// target", "Get closer to your target to use poison").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Dead, between rounds or in a kill or stun (ours:
+    /// `IsPlayerEntityCanStartAbility` 0x00f8db75 was not read).
+    Unable,
+    /// In effect or cooling down, or nothing in the slot.
+    NotReady,
+    Muted,
+    /// Needs another `target`.
+    BadTarget,
+    OutOfRange,
+}
+
+/// A poison at work: `victim` dies in `ticks`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Poisoned {
+    pub killer: usize,
+    pub victim: usize,
+    pub ticks: u32,
+    /// `AbilityPoison.Score` on top of the kill.
+    pub points: u32,
 }
 
 /// Which rule set a [`Match`] runs.
@@ -331,6 +389,10 @@ pub struct Match {
     pub bonus: Option<crate::bonus::Tracker>,
     /// Manhunt: per player, its hide bonus timer (others: empty).
     pub hide: Vec<crate::manhunt::Hide>,
+    /// Per player: loadout, slots and streaks ([`crate::abilities`]).
+    pub abilities: Vec<crate::abilities::State>,
+    /// Poisons at work.
+    pub poisons: Vec<Poisoned>,
 }
 
 /// Seconds to whole ticks.
@@ -426,6 +488,8 @@ impl Match {
             acquire: Vec::new(),
             bonus: None,
             hide: Vec::new(),
+            abilities: vec![crate::abilities::State::default(); players],
+            poisons: Vec::new(),
         }
     }
 
@@ -571,13 +635,26 @@ impl Match {
                     self.events.push(MatchEvent::Contract(e));
                 }
                 self.reset_acquire(victim);
+                self.on_contract_loss(victim, false);
             }
             return;
         }
+        self.kill_player(killer, victim, bonus);
+    }
+
+    /// `killer` killed `victim`: `bonus` on top of the kill's points if it
+    /// scores, then the victim's death.
+    fn kill_player(&mut self, killer: usize, victim: usize, bonus: u32) {
+        let rel = self.relation(killer, victim);
         let scored = matches!(rel, Relation::Target | Relation::Mutual);
         if scored {
-            let extra = self.kill_bonuses(killer, victim);
-            self.award(killer, KILL_POINTS + bonus + extra, ScoreReason::Kill);
+            let (extra, silent) = self.kill_bonuses(killer, victim);
+            let score = self.abilities[killer].kill_score(KILL_POINTS + bonus + extra, silent);
+            self.award(killer, score.total, ScoreReason::Kill);
+            if score.streak > 0 {
+                self.events.push(MatchEvent::KillStreak { player: killer, points: score.streak });
+            }
+            self.abilities[killer].on_kill(silent);
         }
         if let Some(t) = &mut self.bonus {
             if let Some(chain) = t.on_kill(killer, victim, scored) {
@@ -586,25 +663,170 @@ impl Match {
         }
         for e in self.contracts.on_death(victim, Some(killer)) {
             self.events.push(MatchEvent::Contract(e));
+            // end-contract reason 2: another player killed this hunter's target
+            if let ContractEvent::Lost { hunter, .. } = e {
+                if hunter != killer && hunter != victim {
+                    self.on_contract_loss(hunter, false);
+                }
+            }
         }
         self.died(victim);
+        self.on_contract_loss(victim, true);
         // +1: the clock part of this same tick already counts down once
         self.respawn[victim] = Some(ticks(self.config.respawn_delay).max(1) + 1);
     }
 
+    /// `p` lost a contract or died ([`crate::abilities::State::on_loss`]).
+    fn on_contract_loss(&mut self, p: usize, died: bool) {
+        if died {
+            self.abilities[p].stop_effects();
+        }
+        if self.abilities[p].on_loss(died) {
+            if let Some(streak) = self.abilities[p].loadout.loss_streak {
+                self.events.push(MatchEvent::LossStreak { player: p, streak });
+            }
+        }
+    }
+
     /// Assassinate and Manhunt: the [`crate::bonus`] points of `killer`'s
-    /// scoring kill of `victim` (one [`MatchEvent::Bonus`] each). Others: 0.
+    /// scoring kill of `victim` (one [`MatchEvent::Bonus`] each), and whether
+    /// it counts as silent for the streaks (Silent or Incognito, retail
+    /// `PlayScoreFeedbacks` 0x015b1c04). Others: 0, not silent.
     /// Manhunt has no threat meter of ours (team modes hold no contracts),
     /// so no Incognito there (ours); the others apply as in Assassinate.
-    fn kill_bonuses(&mut self, killer: usize, victim: usize) -> u32 {
-        let Some(t) = &self.bonus else { return 0 };
+    fn kill_bonuses(&mut self, killer: usize, victim: usize) -> (u32, bool) {
+        let Some(t) = &self.bonus else { return (0, false) };
         let mut s = t.situation(killer, victim);
         s.chasing = self.chases.get(killer).is_some_and(|c| c.is_some());
         let team_mode = matches!(self.mode, Mode::Escort(_));
         s.incognito = !team_mode && (self.threat_of.get(killer) != Some(&Some(victim)) || self.threat[killer] <= 0.0);
         let list = crate::bonus::bonuses(&s);
         self.events.extend(list.iter().map(|&b| MatchEvent::Bonus { player: killer, bonus: b }));
-        list.iter().map(|b| b.points()).sum()
+        let silent = list.iter().any(|b| matches!(b, crate::bonus::Bonus::Silent | crate::bonus::Bonus::Incognito));
+        (list.iter().map(|b| b.points()).sum(), silent)
+    }
+
+    /// Player `p` gives its loadout for the match.
+    pub fn set_loadout(&mut self, p: usize, loadout: crate::abilities::Loadout) {
+        self.abilities[p] = crate::abilities::State::new(loadout);
+    }
+
+    /// `p` uses the active ability in `slot`; `target`: the persona it aims
+    /// at. The timers run for every ability; Speed, Knives, Mute and Poison
+    /// also act here, the rest are for the world to carry out on
+    /// [`MatchEvent::Ability`].
+    pub fn activate(&mut self, p: usize, slot: usize, target: Option<usize>, who: &[Presence]) -> Result<crate::abilities::ActiveId, Refused> {
+        use crate::abilities::{Params, ACTIVES};
+        if !self.alive(p) || !self.playing() || self.over || who[p].conflict {
+            return Err(Refused::Unable);
+        }
+        if self.abilities[p].muted > 0 {
+            return Err(Refused::Muted);
+        }
+        if !self.abilities[p].can_activate(slot) {
+            return Err(Refused::NotReady);
+        }
+        let Some(id) = self.abilities[p].loadout.actives[slot] else { return Err(Refused::NotReady) };
+        let spec = ACTIVES[id as usize];
+        // the aimed persona, when the ability needs one and `relations` allow it
+        let aimed = |m: &Match, relations: &[Relation]| match target {
+            Some(t) if t < who.len() && t != p && m.alive(t) && relations.contains(&m.relation(p, t)) => Ok(t),
+            _ => Err(Refused::BadTarget),
+        };
+        let duration = ticks(spec.duration);
+        match spec.params {
+            // "Throwing knives can only be used on targets and pursuers"
+            Params::Knives { factor } => {
+                let t = aimed(self, &[Relation::Target, Relation::Mutual, Relation::Pursuer])?;
+                self.abilities[t].slowed = Some((duration, factor));
+            }
+            // "Gunfire only affects targets"
+            Params::Gun { .. } => {
+                aimed(self, &[Relation::Target, Relation::Mutual])?;
+            }
+            Params::Mute { radius } => {
+                for o in (0..who.len()).filter(|&o| o != p) {
+                    if self.alive(o) && (who[o].pos - who[p].pos).truncate().length() <= radius {
+                        self.abilities[o].muted = duration;
+                    }
+                }
+            }
+            // "Poison can only be used on your target"
+            Params::Poison { range, points } => {
+                let t = aimed(self, &[Relation::Target, Relation::Mutual])?;
+                if (who[t].pos - who[p].pos).truncate().length() > range {
+                    return Err(Refused::OutOfRange);
+                }
+                self.poisons.push(Poisoned { killer: p, victim: t, ticks: duration, points });
+            }
+            _ => {}
+        }
+        self.abilities[p].activate(slot);
+        self.events.push(MatchEvent::Ability { player: p, ability: id });
+        Ok(id)
+    }
+
+    /// `p`'s speed factor from abilities (Sprint Boost, received knives).
+    /// Chase Expert acts through [`Match::time_scale`].
+    pub fn speed_factor(&self, p: usize) -> f32 {
+        self.abilities[p].speed_factor()
+    }
+
+    /// Time scale of `p`'s ground movement this tick (retail
+    /// `AssassinTask::UpdateAspiration` 00b55022, `ActionComponent::
+    /// SetTimeScale`: the move cycle and its root motion play this much
+    /// faster). `high`: high profile, `moving`: the stick is pushed, `pos` and
+    /// `facing` are `p`'s, `bodies` every body's position.
+    ///
+    /// - Received knives: their slow only, no boost (the call is skipped
+    ///   until `ThrowingKnifeTimerIsElapsed`, 01670407).
+    /// - Low profile or no stick: 1.
+    /// - Sprint Boost running: its factor (`GetSpeedUpCoeff`) instead of the
+    ///   chase boost.
+    /// - Else the chase boost ("aspiration"): a target less than
+    ///   [`ASPIRATION_RANGE`] away on the flat and more than
+    ///   [`ASPIRATION_AHEAD`] ahead along the facing gives
+    ///   [`aspiration_coeff`] of its distance. Retail takes the first such
+    ///   target of its list; ours the nearest (the same with one contract).
+    pub fn time_scale(&self, p: usize, high: bool, moving: bool, pos: Vec3, facing: Vec2, bodies: &[Vec3]) -> f32 {
+        let a = &self.abilities[p];
+        if let Some((_, f)) = a.slowed {
+            return f;
+        }
+        if !high || !moving {
+            return 1.0;
+        }
+        let boost = a.speed_factor();
+        if boost != 1.0 {
+            return boost;
+        }
+        let chase_expert = a.has_perk(crate::abilities::Perk::ChaseBoost);
+        bodies
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| matches!(self.relation(p, j), Relation::Target | Relation::Mutual))
+            .filter(|&(_, t)| (*t - pos).truncate().dot(facing) > ASPIRATION_AHEAD)
+            .map(|(_, t)| (*t - pos).truncate().length())
+            .filter(|&d| d < ASPIRATION_RANGE)
+            .fold(None, |m: Option<f32>, d| Some(m.map_or(d, |m| m.min(d))))
+            .map_or(1.0, |d| aspiration_coeff(d, chase_expert))
+    }
+
+    /// One tick of the poisons: an elapsed one kills, a dead victim's is gone.
+    fn poison_tick(&mut self) {
+        let mut due = Vec::new();
+        self.poisons.retain_mut(|x| {
+            x.ticks = x.ticks.saturating_sub(1);
+            if x.ticks == 0 {
+                due.push(*x);
+            }
+            x.ticks > 0
+        });
+        for x in due {
+            if self.alive(x.victim) {
+                self.kill_player(x.killer, x.victim, x.points);
+            }
+        }
     }
 
     /// Assassinate: player `p` killed a crowd NPC: its contract and its
@@ -637,6 +859,8 @@ impl Match {
                 self.events.push(MatchEvent::Contract(e));
             }
             self.died(p);
+            // end-contract reason 7, suicide: only the one who fell
+            self.on_contract_loss(p, true);
             self.respawn[p] = Some(ticks(self.config.respawn_delay).max(1) + 1);
         }
     }
@@ -689,7 +913,8 @@ impl Match {
                 Some(c) => {
                     let in_sight = dist <= SIGHT_RANGE && los(h, t);
                     c.phase = ChasePhase::new(in_sight, concealed);
-                    let time = TIME_TO_ESCAPE[c.phase as usize];
+                    let escapist = self.abilities[t].has_perk(crate::abilities::Perk::Escapist);
+                    let time = TIME_TO_ESCAPE[c.phase as usize] * if escapist { crate::abilities::ESCAPE_TIME_FACTOR } else { 1.0 };
                     c.coef = if time > 0.0 { c.coef + crate::DT / time } else { 0.0 };
                     if c.coef > 1.0 {
                         self.chases[h] = None;
@@ -699,6 +924,7 @@ impl Match {
                             self.events.push(MatchEvent::Contract(e));
                         }
                         self.reset_acquire(h);
+                        self.on_contract_loss(h, false);
                     }
                 }
             }
@@ -758,6 +984,10 @@ impl Match {
         }
         self.ticks += 1;
         self.chase(who, los);
+        for a in &mut self.abilities {
+            a.tick();
+        }
+        self.poison_tick();
         for p in 0..self.respawn.len() {
             if let Some(r) = &mut self.respawn[p] {
                 *r -= 1;
@@ -841,6 +1071,10 @@ impl Match {
                     if let Some(v) = &mut self.vips {
                         *v = crate::vip::Vips::new(v.bodies.clone());
                     }
+                    // `ResetAbilityCD` 1
+                    for a in &mut self.abilities {
+                        a.reset_cooldowns(true);
+                    }
                 }
                 RoundEvent::Phase { .. } | RoundEvent::Swap { .. } => teams.vips.clear(),
                 RoundEvent::Over { .. } => self.over = true,
@@ -863,6 +1097,217 @@ mod tests {
     fn run(m: &mut Match, n: u32, pos: &[Vec3]) -> Vec<(usize, usize)> {
         let who: Vec<Presence> = pos.iter().map(|&p| Presence::at(p)).collect();
         (0..n).flat_map(|_| m.tick(&who, &|_, _| true)).collect()
+    }
+
+    /// A duel past the start delay, the two players hunting each other.
+    fn duel_with(loadouts: [crate::abilities::Loadout; 2]) -> (Match, [Vec3; 2]) {
+        let mut d = m(2);
+        d.config.score_limit = 0;
+        d.config.time_limit = 600.0;
+        d.set_loadout(0, loadouts[0]);
+        d.set_loadout(1, loadouts[1]);
+        let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0)];
+        run(&mut d, 30, &pos);
+        assert_eq!(d.contracts.relation(0, 1), Relation::Mutual);
+        (d, pos)
+    }
+
+    /// Gives `killer` its contract on `victim` back and kills.
+    fn kill(d: &mut Match, killer: usize, victim: usize, pos: &[Vec3]) {
+        d.contracts.hunters[killer].target = Some(victim);
+        d.on_action(killer, victim, crate::kill::WALK);
+        run(d, 62, pos);
+        assert!(d.alive(victim));
+    }
+
+    #[test]
+    fn kill_streak_pays_in_the_match_and_death_ends_it() {
+        use crate::abilities::{KillStreak, Loadout};
+        let (mut d, pos) = duel_with([Loadout { kill_streak: Some(KillStreak::Kills3), ..Loadout::default() }, Loadout::default()]);
+        for _ in 0..2 {
+            kill(&mut d, 0, 1, &pos);
+        }
+        assert_eq!(d.score[0], 200);
+        d.events.clear();
+        d.contracts.hunters[0].target = Some(1);
+        d.on_action(0, 1, crate::kill::WALK);
+        assert_eq!(d.score[0], 400, "the third kill pays 100 more");
+        assert!(d.events.contains(&MatchEvent::KillStreak { player: 0, points: 100 }));
+        run(&mut d, 62, &pos);
+        kill(&mut d, 0, 1, &pos);
+        kill(&mut d, 0, 1, &pos);
+        assert_eq!(d.abilities[0].kills, 5);
+        kill(&mut d, 1, 0, &pos);
+        assert_eq!(d.abilities[0].kills, 0, "dying ends the streak");
+        assert_eq!(d.abilities[0].losses, 1);
+    }
+
+    #[test]
+    fn score_x2_after_five_deaths_doubles_the_next_kill() {
+        use crate::abilities::{Loadout, LossStreak};
+        let (mut d, pos) = duel_with([Loadout { loss_streak: Some(LossStreak::ScoreX2), ..Loadout::default() }, Loadout::default()]);
+        for _ in 0..4 {
+            kill(&mut d, 1, 0, &pos);
+        }
+        d.events.clear();
+        d.contracts.hunters[1].target = Some(0);
+        d.on_action(1, 0, crate::kill::WALK);
+        assert!(d.events.contains(&MatchEvent::LossStreak { player: 0, streak: LossStreak::ScoreX2 }));
+        run(&mut d, 62, &pos);
+        kill(&mut d, 0, 1, &pos);
+        assert_eq!(d.score[0], 200);
+        kill(&mut d, 0, 1, &pos);
+        assert_eq!(d.score[0], 300, "only the next kill");
+    }
+
+    #[test]
+    fn a_stun_is_a_loss_that_keeps_the_kill_streak() {
+        use crate::abilities::{KillStreak, Loadout};
+        let (mut d, pos) = duel_with([Loadout::default(), Loadout { kill_streak: Some(KillStreak::Kills3), ..Loadout::default() }]);
+        kill(&mut d, 1, 0, &pos);
+        d.contracts.hunters[1].target = Some(0);
+        d.on_action(0, 1, crate::kill::STUN);
+        assert_eq!((d.abilities[1].kills, d.abilities[1].losses), (1, 1));
+    }
+
+    #[test]
+    fn a_fatal_fall_counts_for_the_faller_only() {
+        let mut d = m(3);
+        let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0), Vec3::new(0.0, 20.0, 0.0)];
+        run(&mut d, 30, &pos);
+        d.contracts.hunters[1].target = Some(0);
+        d.on_fall(0, FULL_HEALTH);
+        assert_eq!(d.abilities[0].losses, 1);
+        assert_eq!(d.abilities[1].losses, 0);
+    }
+
+    #[test]
+    fn killing_anothers_target_is_a_loss_for_that_hunter() {
+        let mut d = m(3);
+        let pos = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0), Vec3::new(0.0, 20.0, 0.0)];
+        run(&mut d, 30, &pos);
+        d.contracts.hunters[0].target = Some(2);
+        d.contracts.hunters[1].target = Some(2);
+        d.on_action(0, 2, crate::kill::WALK);
+        assert_eq!(d.abilities[1].losses, 1);
+        assert_eq!(d.abilities[0].losses, 0, "not for the killer");
+        assert_eq!(d.abilities[2].losses, 1, "the victim's death counts once");
+    }
+
+    #[test]
+    fn escapist_shortens_the_escape() {
+        use crate::abilities::{Loadout, Perk};
+        let time = |perk: Option<Perk>| {
+            let (mut d, pos) = duel_with([Loadout::default(), Loadout { perks: [perk, None], ..Loadout::default() }]);
+            d.chases[0] = Some(Chase { target: 1, coef: 0.0, phase: ChasePhase::OutOfSight });
+            let who: Vec<Presence> = pos.iter().map(|&p| Presence::at(p)).collect();
+            let mut n = 0;
+            while d.chases[0].is_some() {
+                d.tick(&who, &|_, _| false);
+                n += 1;
+            }
+            n as f32
+        };
+        let (plain, with) = (time(None), time(Some(Perk::Escapist)));
+        assert!((with / plain - 0.75).abs() < 0.01, "{with} / {plain}");
+    }
+
+    #[test]
+    fn empty_loadout_refuses_and_changes_nothing() {
+        let (mut d, pos) = duel_with(Default::default());
+        let who: Vec<Presence> = pos.iter().map(|&p| Presence::at(p)).collect();
+        assert_eq!(d.activate(0, 0, None, &who), Err(Refused::NotReady));
+        kill(&mut d, 0, 1, &pos);
+        assert_eq!(d.score[0], 100);
+        assert_eq!(d.speed_factor(0), 1.0);
+    }
+
+    fn loadout(actives: [&str; 2]) -> crate::abilities::Loadout {
+        let id = |n: &str| crate::abilities::active(n);
+        crate::abilities::Loadout { actives: [id(actives[0]), id(actives[1])], ..Default::default() }
+    }
+
+    #[test]
+    fn poison_kills_after_its_delay_and_pays_its_score() {
+        let (mut d, _) = duel_with([loadout(["POISON", ""]), Default::default()]);
+        let far = [Vec3::ZERO, Vec3::new(20.0, 0.0, 0.0)];
+        let near = [Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)];
+        let who = |p: &[Vec3; 2]| -> Vec<Presence> { p.iter().map(|&x| Presence::at(x)).collect() };
+        assert_eq!(d.activate(0, 0, Some(1), &who(&far)), Err(Refused::OutOfRange));
+        assert_eq!(d.activate(0, 0, None, &who(&near)), Err(Refused::BadTarget));
+        assert!(d.abilities[0].can_activate(0), "a refusal costs nothing");
+        assert!(d.activate(0, 0, Some(1), &who(&near)).is_ok());
+        assert_eq!(d.activate(0, 0, Some(1), &who(&near)), Err(Refused::NotReady));
+        run(&mut d, ticks(5.0) - 1, &near);
+        assert!(d.alive(1) && d.score[0] == 0, "not before the delay");
+        run(&mut d, 1, &near);
+        assert!(!d.alive(1));
+        assert_eq!(d.score[0], 300, "kill 100 + poison 200");
+        assert_eq!(d.abilities[0].kills, 1);
+        assert!(d.abilities[0].slots[0].cooldown.is_some());
+    }
+
+    #[test]
+    fn a_poisoned_victim_killed_first_does_not_die_twice() {
+        let (mut d, _) = duel_with([loadout(["POISON", ""]), Default::default()]);
+        let near = [Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)];
+        let who: Vec<Presence> = near.iter().map(|&x| Presence::at(x)).collect();
+        d.activate(0, 0, Some(1), &who).unwrap();
+        d.on_action(0, 1, crate::kill::WALK);
+        assert_eq!(d.score[0], 100);
+        run(&mut d, ticks(5.0), &near);
+        assert_eq!(d.score[0], 100);
+    }
+
+    #[test]
+    fn mute_disables_abilities_in_radius_for_its_duration() {
+        let (mut d, _) = duel_with([loadout(["MUTE", ""]), loadout(["SPRINT BOOST", ""])]);
+        let near = [Vec3::ZERO, Vec3::new(5.0, 0.0, 0.0)];
+        let who: Vec<Presence> = near.iter().map(|&x| Presence::at(x)).collect();
+        d.activate(0, 0, None, &who).unwrap();
+        assert_eq!(d.activate(1, 0, None, &who), Err(Refused::Muted));
+        run(&mut d, ticks(1.5), &near);
+        assert!(d.activate(1, 0, None, &who).is_ok());
+        assert_eq!(d.speed_factor(1), 1.2);
+        let far = [Vec3::ZERO, Vec3::new(7.0, 0.0, 0.0)];
+        let who: Vec<Presence> = far.iter().map(|&x| Presence::at(x)).collect();
+        let (mut d, _) = duel_with([loadout(["MUTE", ""]), loadout(["SPRINT BOOST", ""])]);
+        d.activate(0, 0, None, &who).unwrap();
+        assert!(d.activate(1, 0, None, &who).is_ok(), "out of the 6 m radius");
+    }
+
+    #[test]
+    fn knives_slow_the_opponent_and_need_one() {
+        let (mut d, pos) = duel_with([loadout(["SHARP KNIVES", ""]), Default::default()]);
+        let who: Vec<Presence> = pos.iter().map(|&x| Presence::at(x)).collect();
+        assert_eq!(d.activate(0, 0, Some(0), &who), Err(Refused::BadTarget));
+        d.activate(0, 0, Some(1), &who).unwrap();
+        assert_eq!(d.speed_factor(1), 0.8);
+        run(&mut d, ticks(3.5), &pos);
+        assert_eq!(d.speed_factor(1), 1.0);
+    }
+
+    #[test]
+    fn chase_boost_closes_on_a_target_ahead() {
+        use crate::abilities::{Loadout, Perk};
+        assert!((aspiration_coeff(0.0, false) - 1.1).abs() < 1e-6);
+        assert!((aspiration_coeff(5.0, false) - 1.075).abs() < 1e-6);
+        assert!((aspiration_coeff(12.0, false) - 1.05).abs() < 1e-6);
+        assert!((aspiration_coeff(0.0, true) - 1.15).abs() < 1e-6);
+        assert!((aspiration_coeff(5.0, true) - 1.1).abs() < 1e-6);
+        let (d, _) = duel_with([Loadout { perks: [Some(Perk::ChaseBoost), None], ..Loadout::default() }, Loadout::default()]);
+        let east = Vec2::X;
+        let at = |x: f32| [Vec3::ZERO, Vec3::new(x, 0.0, 0.0)];
+        assert!(matches!(d.relation(0, 1), Relation::Target | Relation::Mutual));
+        // 5 m ahead, high profile, moving: Chase Expert's 1.15 - 0.01 * 5
+        assert!((d.time_scale(0, true, true, Vec3::ZERO, east, &at(5.0)) - 1.1).abs() < 1e-6);
+        // behind, out of range, low profile, standing: none
+        assert_eq!(d.time_scale(0, true, true, Vec3::ZERO, -east, &at(5.0)), 1.0);
+        assert_eq!(d.time_scale(0, true, true, Vec3::ZERO, east, &at(10.5)), 1.0);
+        assert_eq!(d.time_scale(0, false, true, Vec3::ZERO, east, &at(5.0)), 1.0);
+        assert_eq!(d.time_scale(0, true, false, Vec3::ZERO, east, &at(5.0)), 1.0);
+        // the plain boost without the perk
+        assert!((d.time_scale(1, true, true, Vec3::new(5.0, 0.0, 0.0), -east, &at(5.0)) - 1.075).abs() < 1e-6);
     }
 
     #[test]

@@ -535,8 +535,11 @@ fn census(path: PathBuf, top: usize) -> anyhow::Result<()> {
     );
     let mut rows: Vec<_> = per_type.into_iter().collect();
     rows.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    // type names when a schema is at hand ($ACBMP_SCHEMAS), else hashes only
+    let schema = std::env::var_os("ACBMP_SCHEMAS").and_then(|d| load_schema(std::path::Path::new(&d)).ok());
     for (hash, (count, bytes)) in rows.into_iter().take(top) {
-        println!("{:10.1}MB {count:7} {hash:#010x}", bytes as f64 / 1e6);
+        let name = schema.as_ref().and_then(|s| s.name(hash)).unwrap_or("");
+        println!("{:10.1}MB {count:7} {hash:#010x} {name}", bytes as f64 / 1e6);
     }
     Ok(())
 }

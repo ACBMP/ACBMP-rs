@@ -283,8 +283,14 @@ pub struct Climb {
 const FADE: f32 = 0.15;
 
 /// Letting go with the drop button pushes off the wall this fast, m/s, so
-/// the fall clears the ledge it hung from (ours).
+/// the fall clears the ledge it hung from (ours: retail plays the drop clip,
+/// `xx_h_hangwall_tr_fall_a`, 0.30 m out in 0.333 s; the user wants the
+/// button to let go at once). A free hang drops straight down, as retail's
+/// `xx_h_hangfree_tr_fall_a` (no root motion) does.
 const RELEASE_PUSH: f32 = 0.5;
+/// `xx_h_hangwall_tr_fall_a` ends falling this fast, m/s (root motion over its
+/// last 1/30 s, `examples/jumpclips.rs`): the fall after it goes on from there.
+const HANGWALL_DROP_SPEED: f32 = 4.98;
 
 /// How long a standing mount takes, seconds. Ours (the user's playtest): the
 /// retail clip takes 0.87 s, which reads as charging up, so it plays at speed;
@@ -503,7 +509,10 @@ impl Climb {
     pub fn update(&mut self, clips: &ClimbClips, sk: &Skeleton, ground: &Ground, want: Option<Dir>, jump: bool, release: bool, run: bool, dt: f32) -> (Pose, Outcome) {
         let (pose, outcome) = self.step(clips, sk, ground, want, jump && want.is_some(), run, dt);
         let outcome = match outcome {
-            Outcome::Climbing if release && want.is_none() => Outcome::Release((self.hold.wall * RELEASE_PUSH).extend(0.0)),
+            Outcome::Climbing if release && want.is_none() => {
+                let push = if self.stance == Stance::HangFree { 0.0 } else { RELEASE_PUSH };
+                Outcome::Release((self.hold.wall * push).extend(0.0))
+            }
             o => o,
         };
         let pose = match &mut self.fade {
@@ -836,13 +845,15 @@ impl Climb {
                         return Some((seq(&["xx_h_hangwall_d_climb_1m"], to, y1, then), "hang down to climb"));
                     }
                 }
-                // let go
-                let (clip, to) = if hang == Stance::HangWall {
-                    ("xx_h_hangwall_tr_fall_a", self.pos + (n * 0.3).extend(0.0) - Vec3::Z * 1.0)
+                // let go: retail `HumanLedge::ReleaseToInAir` (00d86ac2) plays
+                // these drop actions and the fall goes on at the clip's end
+                // velocity (no push off the wall)
+                let (clip, to, v) = if hang == Stance::HangWall {
+                    ("xx_h_hangwall_tr_fall_a", self.pos + (n * 0.3).extend(0.0) - Vec3::Z * 1.0, -Vec3::Z * HANGWALL_DROP_SPEED)
                 } else {
-                    ("xx_h_hangfree_tr_fall_a", self.pos)
+                    ("xx_h_hangfree_tr_fall_a", self.pos, Vec3::ZERO)
                 };
-                Some((seq(&[clip], to, yaw, Then::Drop((n * 1.0).extend(0.0))), "drop"))
+                Some((seq(&[clip], to, yaw, Then::Drop(v)), "drop"))
             }
             (hang, side) => {
                 let sign = if side == Dir::Left { -1.0 } else { 1.0 };
