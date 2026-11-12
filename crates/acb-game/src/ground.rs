@@ -22,6 +22,15 @@ pub struct Ground {
     /// Per triangle: its collision material is `AIType_StepOff` (2): no
     /// standing on it (retail InAir StepOff, [`crate::human::in_air::step_off`]).
     no_stand: Vec<bool>,
+    /// Per triangle: its switchable group (0: none, always there). A chase
+    /// breaker's scene turns whole components on and off
+    /// ([`acb_world::breakers`]); every such (entity, component) is a group.
+    group: Vec<u16>,
+    /// Per hold, likewise (a `GuidanceSystem` a scene turns off).
+    hold_group: Vec<u16>,
+    /// Per group: (entity, component type hash) and whether it is off now.
+    group_keys: Vec<(u32, u32)>,
+    off: Vec<bool>,
     floor: HashMap<(i32, i32), Vec<u32>>,
     wall: HashMap<(i32, i32), Vec<u32>>,
     /// Freerun guidance edges with an upward face (ledges): ends.
@@ -79,8 +88,35 @@ const SUB_TYPE_POLE: u32 = 4;
 
 impl Ground {
     pub fn load(archive: &Archive) -> anyhow::Result<Ground> {
-        let mut g = Ground { tris: Vec::new(), no_stand: Vec::new(), floor: HashMap::new(), wall: HashMap::new(), ledges: Vec::new(), ledge_grid: HashMap::new(), holds: Vec::new(), hold_grid: HashMap::new(), pilotis_memo: Default::default() };
+        let mut g = Ground {
+            tris: Vec::new(),
+            no_stand: Vec::new(),
+            group: Vec::new(),
+            hold_group: Vec::new(),
+            group_keys: vec![(0, 0)],
+            off: vec![false],
+            floor: HashMap::new(),
+            wall: HashMap::new(),
+            ledges: Vec::new(),
+            ledge_grid: HashMap::new(),
+            holds: Vec::new(),
+            hold_grid: HashMap::new(),
+            pilotis_memo: Default::default(),
+        };
+        // what the map's scenes switch; anything else that is inactive in
+        // the data stays out for good (a lift's landed counterweight)
+        let switched: std::collections::HashSet<(u32, u32)> =
+            archive.breakers().iter().flat_map(|b| b.toggles.iter().map(|t| (t.entity, t.component))).collect();
+        let colliders = archive.colliders();
+        let dead_guidance: std::collections::HashSet<u32> =
+            colliders.iter().filter(|c| !c.active && c.guidance != 0 && !switched.contains(&(c.entity, c.component))).map(|c| c.guidance).collect();
+        let guidance_system = archive.schema().hash_of("GuidanceSystem").unwrap_or(0);
+        let mut hold_group = Vec::new();
         for e in archive.guidance_edges() {
+            if dead_guidance.contains(&e.system) {
+                continue;
+            }
+            let group = if switched.contains(&(e.entity, guidance_system)) { g.group_for(e.entity, guidance_system, true) } else { 0 };
             let wall = e.normals.iter().map(|n| Vec3::from(*n)).find(|n| n.z.abs() < 0.5 && n.truncate().length() > 0.5);
             // the underside of a surface is no hold either (retail EdgeFilter
             // GroundCeiling)
@@ -89,6 +125,7 @@ impl Ground {
             if let Some(w) = wall.filter(|_| !under || bar) {
                 let (a, b) = (Vec3::from(e.a), Vec3::from(e.b));
                 g.holds.push(Hold { a, b, wall: w.truncate().normalize(), top: e.normals.iter().any(|n| n[2] > 0.7), bar });
+                hold_group.push(group);
             }
             // keep edges with a walkable face on top
             if !e.normals.iter().any(|n| n[2] > 0.7) {
@@ -106,11 +143,18 @@ impl Ground {
         }
         let mut shapes: HashMap<u32, Option<CollisionMesh>> = HashMap::new();
         let mut step_off: HashMap<u32, bool> = HashMap::new();
-        for c in archive.colliders() {
+        for c in colliders {
             // camera-only proxies (haystack CamCol) and loose debris
             if c.layer == CAMERA_LAYER || !c.fixed {
                 continue;
             }
+            let group = if switched.contains(&(c.entity, c.component)) {
+                g.group_for(c.entity, c.component, c.active)
+            } else if c.active {
+                0
+            } else {
+                continue;
+            };
             let shape = shapes.entry(c.shape).or_insert_with(|| archive.collision_mesh(c.shape).ok().flatten());
             let Some(shape) = shape else { continue };
             let m = Mat4::from_cols_array(&c.matrix);
@@ -118,13 +162,16 @@ impl Ground {
                 let mat = shape.materials.get(k).copied().unwrap_or(0);
                 let no_stand = mat != 0
                     && *step_off.entry(mat).or_insert_with(|| archive.material_ai_type(mat) == Some(AI_TYPE_STEP_OFF));
-                g.add(t.map(|i| m.transform_point3(Vec3::from(shape.vertices[i as usize]))), no_stand);
+                g.add(t.map(|i| m.transform_point3(Vec3::from(shape.vertices[i as usize]))), no_stand, group);
             }
         }
         // needs the collision: only real holds go in (a long edge counts if
         // it is one anywhere along its length)
         let holds = std::mem::take(&mut g.holds);
-        g.holds = holds.into_iter().filter(|h| h.bar || [0.5, 0.25, 0.75].iter().any(|&t| g.hold_fault(h.at(t), h.wall).is_none())).collect();
+        let (holds, hold_group) =
+            holds.into_iter().zip(hold_group).filter(|(h, _)| h.bar || [0.5, 0.25, 0.75].iter().any(|&t| g.hold_fault(h.at(t), h.wall).is_none())).unzip();
+        g.holds = holds;
+        g.hold_group = hold_group;
         for (id, h) in g.holds.iter().enumerate() {
             let (lo, hi) = (cell(h.a.truncate().min(h.b.truncate())), cell(h.a.truncate().max(h.b.truncate())));
             for x in lo.0..=hi.0 {
@@ -136,7 +183,54 @@ impl Ground {
         Ok(g)
     }
 
-    fn add(&mut self, v: [Vec3; 3], no_stand: bool) {
+    /// The group of a switchable component, made on first use (`on`: its
+    /// state in the map data).
+    fn group_for(&mut self, entity: u32, component: u32, on: bool) -> u16 {
+        if let Some(i) = self.group_of(entity, component) {
+            return i;
+        }
+        self.group_keys.push((entity, component));
+        self.off.push(!on);
+        (self.off.len() - 1) as u16
+    }
+
+    /// The switchable group holding a component's collision or guidance.
+    pub fn group_of(&self, entity: u32, component: u32) -> Option<u16> {
+        self.group_keys.iter().skip(1).position(|k| *k == (entity, component)).map(|i| (i + 1) as u16)
+    }
+
+    /// Number of switchable groups plus one (group 0 is everything else).
+    pub fn groups(&self) -> usize {
+        self.off.len()
+    }
+
+    pub fn group_on(&self, group: u16) -> bool {
+        !self.off[group as usize]
+    }
+
+    /// Turns a group's triangles and holds on or off.
+    pub fn set_group(&mut self, group: u16, on: bool) {
+        if group != 0 && self.off[group as usize] == on {
+            self.off[group as usize] = !on;
+            if let Ok(mut m) = self.pilotis_memo.lock() {
+                m.clear();
+            }
+        }
+    }
+
+    /// Is the triangle there now (its group on)?
+    #[inline]
+    fn live(&self, i: u32) -> bool {
+        !self.off[self.group[i as usize] as usize]
+    }
+
+    /// Is the hold there now?
+    #[inline]
+    pub(crate) fn hold_live(&self, i: u32) -> bool {
+        !self.off[self.hold_group.get(i as usize).copied().unwrap_or(0) as usize]
+    }
+
+    fn add(&mut self, v: [Vec3; 3], no_stand: bool, group: u16) {
         let n = (v[1] - v[0]).cross(v[2] - v[0]);
         let len = n.length();
         if len < 1e-8 {
@@ -146,6 +240,7 @@ impl Ground {
         let id = self.tris.len() as u32;
         self.tris.push(v);
         self.no_stand.push(no_stand);
+        self.group.push(group);
         let lo = cell(v[0].truncate().min(v[1].truncate()).min(v[2].truncate()));
         let hi = cell(v[0].truncate().max(v[1].truncate()).max(v[2].truncate()));
         for x in lo.0..=hi.0 {
@@ -165,7 +260,7 @@ impl Ground {
             for y in lo.1..=hi.1 {
                 for grid in [&self.floor, &self.wall] {
                     for &i in grid.get(&(x, y)).into_iter().flatten() {
-                        if !seen.insert(i) {
+                        if !self.live(i) || !seen.insert(i) {
                             continue;
                         }
                         if let Some(t) = ray_tri(o, d, &self.tris[i as usize]).filter(|t| (0.0..=1.0).contains(t)) {
@@ -198,7 +293,7 @@ impl Ground {
             for y in lo.1..=hi.1 {
                 for grid in [&self.floor, &self.wall] {
                     for &i in grid.get(&(x, y)).into_iter().flatten() {
-                        if !self.no_stand[i as usize] || !seen.insert(i) {
+                        if !self.no_stand[i as usize] || !self.live(i) || !seen.insert(i) {
                             continue;
                         }
                         let t = &self.tris[i as usize];
@@ -247,6 +342,7 @@ impl Ground {
     pub fn floor_hit(&self, p: Vec3) -> Option<(f32, Vec3)> {
         let ids = self.floor.get(&cell(p.truncate()))?;
         ids.iter()
+            .filter(|&&i| self.live(i))
             .filter_map(|&i| ray_tri(p, -Vec3::Z, &self.tris[i as usize]).map(|t| (t, i)))
             .filter(|(t, _)| *t >= 0.0)
             .min_by(|a, b| a.0.total_cmp(&b.0))
@@ -270,7 +366,7 @@ impl Ground {
         for x in lo.0..=hi.0 {
             for y in lo.1..=hi.1 {
                 for map in [&self.floor, &self.wall] {
-                    for &i in map.get(&(x, y)).into_iter().flatten() {
+                    for &i in map.get(&(x, y)).into_iter().flatten().filter(|&&i| self.live(i)) {
                         let t = self.tris[i as usize].map(|v| {
                             let d = v - centre;
                             Vec3::new(d.dot(ax[0]), d.dot(ax[1]), d.dot(ax[2]))
@@ -299,7 +395,7 @@ impl Ground {
         let mut best: Option<(f32, u32)> = None;
         for x in lo.0..=hi.0 {
             for y in lo.1..=hi.1 {
-                for &i in self.wall.get(&(x, y)).into_iter().flatten() {
+                for &i in self.wall.get(&(x, y)).into_iter().flatten().filter(|&&i| self.live(i)) {
                     if let Some(t) = ray_tri(from, dir, &self.tris[i as usize]).filter(|t| (0.0..reach).contains(t)) {
                         if best.is_none_or(|(b, _)| t < b) {
                             best = Some((t, i));

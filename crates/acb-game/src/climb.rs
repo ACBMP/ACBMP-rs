@@ -1007,7 +1007,7 @@ impl Ground {
             (c0.0..=c1.0).flat_map(|x| (c0.1..=c1.1).map(move |y| (x, y))).filter_map(|k| self.hold_grid.get(&k)).flatten().copied().collect();
         ids.sort_unstable();
         ids.dedup();
-        ids.into_iter().map(|i| &self.holds[i as usize])
+        ids.into_iter().filter(|&i| self.hold_live(i)).map(|i| &self.holds[i as usize])
     }
 
     /// Holds with an edge point within `r` of `p` horizontally (debugging,
