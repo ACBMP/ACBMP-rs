@@ -19,6 +19,8 @@ const POINT_STEP: f32 = 0.005;
 #[derive(Debug, Clone)]
 pub struct GuidanceEdge {
     pub entity: u32,
+    /// Object id of the guidance component holding the edge.
+    pub system: u32,
     pub a: [f32; 3],
     pub b: [f32; 3],
     /// World-space normals of the two faces meeting at the edge.
@@ -57,6 +59,7 @@ impl Archive<'_> {
                 };
                 out.push(GuidanceEdge {
                     entity: e.id,
+                    system: c.id,
                     a,
                     b,
                     normals: [normal("DecN4Normal0"), normal("DecN4Normal1")],

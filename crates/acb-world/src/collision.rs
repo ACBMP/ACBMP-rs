@@ -18,6 +18,13 @@ pub struct Collider {
     pub entity: u32,
     /// Type hash of the component holding the rigid body.
     pub component: u32,
+    /// The component's `Active` flag: an inactive one collides with nothing
+    /// until something turns it on (a chase breaker door's blocker, see
+    /// [`crate::breakers`]).
+    pub active: bool,
+    /// The `GuidanceSystem` component the body's `GuidanceSystemPtr` names
+    /// (0: none): its edges go with the body.
+    pub guidance: u32,
     /// Shape root uid (or inline object id).
     pub shape: u32,
     pub layer: u32,
@@ -94,6 +101,8 @@ impl Archive<'_> {
                         out.push(Collider {
                             entity: ent,
                             component: c.type_hash,
+                            active: true,
+                            guidance: 0,
                             shape,
                             layer: 1,
                             fixed: true,
@@ -116,6 +125,8 @@ impl Archive<'_> {
                 out.push(Collider {
                     entity: e.id,
                     component: c.type_hash,
+                    active: self.field(c, "Active").and_then(Value::as_bool).unwrap_or(true),
+                    guidance: self.field(c, "GuidanceSystemPtr").and_then(Value::target_id).unwrap_or(0),
                     shape,
                     layer,
                     fixed: flag(rb, "IsFixed"),

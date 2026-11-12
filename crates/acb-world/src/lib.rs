@@ -16,6 +16,7 @@ use anvil_forge::{DataFile, Forge};
 use anvil_schema::Schema;
 
 pub mod ambiance;
+pub mod breakers;
 pub mod collision;
 pub mod guidance;
 pub mod localization;
@@ -26,6 +27,7 @@ pub mod skin;
 pub mod texture;
 
 pub use ambiance::{Ambiance, WorldLightMap};
+pub use breakers::{Breaker, Lift};
 pub use collision::{Collider, CollisionMesh};
 pub use guidance::GuidanceEdge;
 pub use mesh::StaticMesh;

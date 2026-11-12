@@ -48,7 +48,7 @@ fn hsv_saturate(c: [f32; 3], s: f32) -> [f32; 3] {
 }
 
 impl Archive<'_> {
-    fn f32_of(&self, o: &Obj, n: &str) -> f32 {
+    pub(crate) fn f32_of(&self, o: &Obj, n: &str) -> f32 {
         self.field(o, n).and_then(Value::as_f32s).and_then(|v| v.first().copied()).unwrap_or(0.0)
     }
 
