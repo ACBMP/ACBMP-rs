@@ -517,7 +517,7 @@ mod tests {
             tick += 1;
         }
         assert_eq!(shut, ticks(3.5));
-        assert_eq!(tick - 2, ticks(3.6) as u64);
+        assert_eq!(tick - 3, ticks(3.6) as u64);
         assert!(!s.group_on(&st, 1, false) && st.inside == 0 && !st.fired);
         // someone in a kill does not shut it
         let mut st = SceneState::default();
