@@ -211,6 +211,11 @@ pub struct Scene {
     /// The sky dome mesh (LayeredSky layer), kept centred on the eye and
     /// scaled out behind everything else.
     sky: Option<(usize, f32)>,
+    /// Per map entity: its instances as (mesh, instance, matrix in the
+    /// map data), for [`Scene::place_entity`].
+    entities: HashMap<u32, Vec<(usize, usize, Mat4)>>,
+    /// Entities moved by [`Scene::place_entity`], and how.
+    placed: HashMap<u32, Option<(Vec3, glam::Quat)>>,
 }
 
 impl Renderer {
@@ -818,6 +823,7 @@ impl Scene {
 
         // group instance matrices by mesh
         let mut by_mesh: HashMap<u32, Vec<[f32; 16]>> = HashMap::new();
+        let mut owners: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut order = Vec::new();
         let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for inst in archive.instances().into_iter().filter(|i| !i.out_of_bounds) {
@@ -829,6 +835,7 @@ impl Scene {
                 Vec::new()
             });
             by_mesh.get_mut(&inst.mesh).unwrap().push(inst.matrix);
+            owners.entry(inst.mesh).or_default().push(inst.entity);
         }
         // the sky dome: one instance, placed per frame
         if let Some((mesh, _)) = sky_layer.filter(|(m, _)| !by_mesh.contains_key(m)) {
@@ -838,6 +845,7 @@ impl Scene {
         let sky_uid = sky_layer.map(|l| l.0);
 
         let mut meshes = Vec::new();
+        let mut entities: HashMap<u32, Vec<(usize, usize, Mat4)>> = HashMap::new();
         let mut sky = None;
         for uid in order {
             let Some(mesh) = archive.static_mesh(uid)? else {
@@ -948,12 +956,15 @@ impl Scene {
             } else {
                 (None, None)
             };
+            for (k, e) in owners.get(&uid).into_iter().flatten().enumerate() {
+                entities.entry(*e).or_default().push((meshes.len(), k, Mat4::from_cols_array(&mats[k])));
+            }
             meshes.push(GpuMesh {
                 raw_vertices,
                 retail_instances,
                 vertices: init("vertices", bytemuck::cast_slice(&vertices), wgpu::BufferUsages::VERTEX),
                 indices: init("indices", bytemuck::cast_slice(&mesh.indices), wgpu::BufferUsages::INDEX),
-                instances: init("instances", bytemuck::cast_slice(mats), wgpu::BufferUsages::VERTEX),
+                instances: init("instances", bytemuck::cast_slice(mats), wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST),
                 instance_count: mats.len() as u32,
                 submeshes,
             });
@@ -974,8 +985,33 @@ impl Scene {
             environment,
             bounds: (lo, hi),
             sky,
+            entities,
+            placed: HashMap::new(),
         };
         Ok((scene, stats))
+    }
+
+    /// Moves everything drawn of a map entity from where the map data has
+    /// it: by `(translate, rotate)`, turning about its own origin (world
+    /// axes), or out of sight with `None`.
+    pub fn place_entity(&mut self, r: &Renderer, entity: u32, to: Option<(Vec3, glam::Quat)>) {
+        if self.placed.get(&entity).copied().unwrap_or(Some((Vec3::ZERO, glam::Quat::IDENTITY))) == to {
+            return;
+        }
+        self.placed.insert(entity, to);
+        for &(mesh, k, base) in self.entities.get(&entity).into_iter().flatten() {
+            let origin = base.w_axis.truncate();
+            let delta = match to {
+                Some((t, q)) => Mat4::from_translation(origin + t) * Mat4::from_quat(q) * Mat4::from_translation(-origin),
+                None => Mat4::from_translation(Vec3::new(0.0, 0.0, -1.0e4)),
+            };
+            let world = delta * base;
+            let m = &mut self.meshes[mesh];
+            r.queue.write_buffer(&m.instances, (k * 64) as u64, bytemuck::cast_slice(&world.to_cols_array()));
+            if let Some((_, worlds)) = &mut m.retail_instances {
+                worlds[k] = world;
+            }
+        }
     }
 
     /// A scene with nothing in it yet, drawn with the retail shaders.
@@ -992,6 +1028,8 @@ impl Scene {
             environment: Environment::default(),
             bounds: (Vec3::ZERO, Vec3::ZERO),
             sky: None,
+            entities: HashMap::new(),
+            placed: HashMap::new(),
         }
     }
 

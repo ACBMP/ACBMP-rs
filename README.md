@@ -192,6 +192,19 @@ means hidden, not stuck; any move key hops out. Walking slowly among the crowd b
 or walk (low profile) next to a bench seat and press F to sit (blended);
 E kills a passer-by from the bench, a fresh move key stands up.
 
+Chase breakers (San Donato has two double doors, two portcullises, two hanging
+platforms and four lifts): doors stand open and shut behind whoever runs
+through (Shift or Space held; walking through leaves them open): the double
+doors for 3.5 s, the portcullises for 4.8 s (try `--at=-15.5,-13.47,0,90` with
+Shift + W, then turn round). A hanging platform drops about a second after
+someone steps on it or runs over it and is gone for 4.5 s, with its edges:
+whoever stands or hangs on it falls (try `--at=-38.16,-2.55,3.04,0` and wait).
+Run (Shift or Space) into a lift's rope to ride it to the roof (try
+`--at=18.5,12.09,0,90` with Shift + W); you cannot be killed on the way up, and
+the lift takes nobody else until it has rewound (5.6 s from the start for an 8 m
+lift, 5.9 s for a 12 m one). The lift's rope and counterweight are not animated
+yet.
+
 HUD: drawn as text at the top of the screen (and in the window title):
 target, distance, compass fill, who is hunting you, score, time and the last
 event. In Escort, hunters also get a gold arrow in a ring under the text

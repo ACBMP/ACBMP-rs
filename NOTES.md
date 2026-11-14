@@ -1816,3 +1816,76 @@ Ours:
   the lower edge), identical at 60 and 144 fps. Test `jump_map.rs` `wall_runner_reaches_higher`. On San Donato, 67 tops
   stand 4.7-5.8 m over the floor 1 m out. Other gates, kills 8 and duel 100/0 are unchanged. Loadouts are empty by
   default and online has no loadout choice yet, so a match only gets the perk through `Match::set_loadout`.
+
+## Chase breakers (2026-11-14, phase3-movement-feedback)
+
+Before: `Archive::colliders()` ignored the component `Active` flag, so a door's blocker (an `InertComponent` that is
+off in the map data) was a wall for good, platforms never fell and lifts were scenery. Now `Ground` keeps every
+(entity, component) a scene switches as a group that can be turned on and off, `acb-world/src/breakers.rs` reads the
+data and `acb-game/src/breakers.rs` runs it.
+
+Retail (data, read the same way on every map):
+- A door or platform is an `EntityGroup` with a `TriggerComponent` and a `Scene`. The trigger's seeds turn the Scene
+  on; the Scene's `ActivateClip`s switch components, its `BlendPosClip`s move entities (target type 1,
+  RelativeWorld), and its last clip turns the trigger back on.
+- Trigger: `TriggerComponentSettings::UpdateOverlappedEntities` 0080c990, `OnUpdate` 007d5c00, `OnCondition` 007d5c80,
+  `TriggerZone::IsGlobalPositionInZone` 0080be40. `WatchType` 0 INSIDE / 2 ENTER / 3 EXIT.
+- Doors (`ChaseBreakerEvent::Type` 0): zone box half 1.5 x 0.5 x 2.0 m, watch EXIT, update every 0.5 s, condition
+  delay 0 with All[Not ActorState(58 Walk), Not ActorState(158 WaitLow), Not InConflict]. So a door shuts behind
+  someone who leaves its zone running, and stays open for a walker.
+  - `door_34` (double door; -18.00 -13.47 0.00 and -20.63 37.00 3.54): scene 3.6 s, blocker on 0-3.5 s, the two leaves
+    turn a quarter about Z over 0-0.3 s and back over 3.3-3.6 s.
+  - `Door_36` (portcullis; 10.51 -16.36 0.31 and -3.07 14.25 0.00): scene 5.4 s, blocker on 0-4.8 s, the gate moves
+    3 m down in 0.4 s and back up over 4.4-5.4 s.
+- Platforms (type 4; -38.16 -2.55 3.00 and 24.00 -48.32 3.77): watch INSIDE, update every 0.5 s, `OnEnter` 1.0 s,
+  `OnUpdate` 0.8 s. Scene 4.7 s: collision and guidance off at 0, `Visual` off at 0.5 s, all back on at 4.5 s; the
+  platform moves 4 m down over 0-0.5 s and back over 4.4-4.5 s.
+- Lifts (`ElevatorComponent`, 4 on San Donato, 8 m and 12 m): `IsInDetectionZone` 011510c2 (sphere, radius 1.2 m
+  around a point 1.5 m up, facing within `MaxAngle` of the lift), tested from the HumanGround Move state 00fceeac;
+  `EnterElevatorRaise` 00fc60e6 puts the rider on the start point; `EnterHumanElevator` 00f791e4 makes the rider
+  unkillable; `ElevatorComponent::ActivateElevator` 0111f7e0 plays the prop's animation 1 (up), `UpdateAfter`
+  01132804 then 3 (rewind), then 0, and only then is the lift free again. Reload = lengths of animations 1 + 3:
+  1.600 + 4.000 = 5.6 s (8 m), 1.833 + 4.100 = 5.933 s (12 m).
+- Ride clips: `IDxx_ChaseBreaker_Lift_positionf` 0.567 s, `..._Up0800` 0.433 s / `..._Up1200` 0.600 s
+  (`xx_lift_1600_cycle`, `xx_lift_2000_cycle` for higher lifts), `IDxx_ChaseBreaker_Lift_out` 0.733 s. The 8 m ride
+  is 1.733 s and lets go 8.61 m over the start point, in the air over the roof edge.
+
+Ours:
+- Zones test a point `ENTITY_HEIGHT` 0.96 m over the feet (the idle's pelvis height). Retail tests the entity
+  position; the lift sphere does not reach the floor, so that position is not the feet.
+- Triggers watch players only (no crowd, no VIPs).
+- A trigger stops watching from the tick a seed fires until its scene ends, and starts over with nobody inside.
+- The trigger's update phase is the world tick (every 30th tick).
+- Walk = on the ground with 0.1 < moved < `RUN_SPEED`, WaitLow = moved <= 0.1; InConflict = in a kill, or the body
+  is scripted (being killed or stunned).
+- A lift wants a move key and run or sprint held: the sender of the HumanGround command `ActivateElevator` was not
+  read.
+- A lift takes a runner from up to `LIFT_AHEAD` (= `climb::WALLING_RAY_DEPTH`, 1.5 m) before its sphere along the
+  facing. Without it our climb mount onto the lift's 0.96 m base starts 1.23 m out, before the sphere is reached.
+- Ride clips are picked by root motion (the action-to-clip table was not read); always the front entry, the side
+  entries (`..._positionl` / `r`) are not used.
+- The landed counterweight (inactive in the data) never collides and does no damage (`SendCounterWeightDamage`
+  01167d20 not ported).
+- A climber whose hold vanishes with a platform is dropped (`Player::lose_hold`); whoever stands on it falls.
+- Drawing: `Breakers::entity_poses` gives each moved or hidden entity's offset; `acb_render::Scene::place_entity`
+  rewrites its instance matrices. Moves are linear over the clip and turn about the entity's own origin (blend curve
+  and pivot not read). The lift prop is not animated.
+
+State: `World::breaker_state` (per scene: who is inside, pending seed, scene tick; per lift: reload ticks left) is in
+`Saved`, and `restore` re-applies the collision groups, so clients replay it. No wire-format change.
+
+Tests: unit `a_door_shuts_behind_a_runner_only`, `a_platform_falls_a_second_after_someone_is_on`,
+`a_scene_moves_and_hides_what_it_draws`; map `breakers_map.rs`: `a_door_shuts_behind_a_runner` (walker leaves it
+open; shut exactly 3.5 s, holds against the return, then lets through), `a_platform_falls_under_its_load` (gone
+0.8-1.0 s after standing on it, holds gone, lands below, back exactly 4.5 s later), `a_lift_takes_a_runner_and_reloads`
+(walker not taken; ride 1.733 s; off 8.61 m up; lands on the roof; free again exactly 5.6 s after the start),
+`breakers_restore_with_the_world`. `cargo run --release -p acb-game --example breakers` lists a map's breakers.
+Viewer frames (`--capture`) checked: double door shut and reopened, portcullis down, platform gone and back.
+
+Gates: no changes (all 13 runs identical at 60 and 144 fps). Kills 8, duel 100/0 with 0 desync, escort 0 desync.
+`acb-net` `match_over_lossy_localhost` is flaky: it failed once (`rollbacks >= 1`, got 0), the same way with the
+sources from before this work (ba901f0), and passed on the next full run. Not from the breakers.
+
+Next: animate the lift prop (its `AnimComponent` clips 1 and 3, skeletal); `SendCounterWeightDamage`; find what
+sends `ActivateElevator`; crowd and VIPs in the triggers; side-entry ride clips; the beam/pole and corner breaker
+types (1, 3) on maps that have them.

@@ -45,6 +45,10 @@
 //!   (`..._positionl` / `r`) are not used.
 //! - the lift's landed counterweight (inactive in the map data) never
 //!   collides and does no damage (`SendCounterWeightDamage` 01167d20).
+//! - drawing ([`Breakers::entity_poses`]): a scene's `BlendPosClip`s are
+//!   applied linearly over their duration, turning the entity about its
+//!   own origin (the blend curve and the pivot were not read). The lift
+//!   prop itself (rope, counterweight) is not animated.
 
 use acb_anim::pose::{Clip, Skeleton};
 use acb_anim::BuiltinTracks;
@@ -84,6 +88,20 @@ pub struct Scene {
     length: u32,
     /// Ticks between the trigger's periodic updates.
     every: u32,
+    /// Entities the scene moves or hides, with their `Visual` switches
+    /// (time, on) (for drawing only).
+    shown: Vec<(u32, Vec<(f32, bool)>)>,
+}
+
+/// Where a scene has an entity it moves or hides, for drawing: moved by
+/// `translate` and turned by `rotate` about its own origin (world axes)
+/// from its place in the map data.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EntityPose {
+    pub entity: u32,
+    pub translate: Vec3,
+    pub rotate: Quat,
+    pub visible: bool,
 }
 
 /// What changes in a trigger + scene breaker.
@@ -134,7 +152,19 @@ fn holds(c: &Condition, w: &Watched) -> bool {
 }
 
 impl Scene {
-    fn new(b: Breaker, ground: &Ground, trigger: u32) -> Scene {
+    fn new(b: Breaker, ground: &Ground, trigger: u32, visual: u32) -> Scene {
+        let mut shown: Vec<(u32, Vec<(f32, bool)>)> = Vec::new();
+        for m in &b.moves {
+            if !shown.iter().any(|s| s.0 == m.entity) {
+                shown.push((m.entity, Vec::new()));
+            }
+        }
+        for t in b.toggles.iter().filter(|t| t.component == visual) {
+            match shown.iter_mut().find(|s| s.0 == t.entity) {
+                Some(s) => s.1.push((t.time, t.on)),
+                None => shown.push((t.entity, vec![(t.time, t.on)])),
+            }
+        }
         let mut switches = Vec::new();
         let mut groups: Vec<(u16, bool)> = Vec::new();
         for t in &b.toggles {
@@ -154,7 +184,29 @@ impl Scene {
             groups,
             length: ticks(rearm).max(1),
             every: ticks(b.update_frequency).max(1),
+            shown,
             data: b,
+        }
+    }
+
+    /// The entities the scene moves or hides, `time` seconds into it
+    /// (`BlendPosClip`s relative to where the entity is, linear).
+    fn poses(&self, time: f32, out: &mut Vec<EntityPose>) {
+        for (entity, visual) in &self.shown {
+            let mut pose = EntityPose { entity: *entity, translate: Vec3::ZERO, rotate: Quat::IDENTITY, visible: true };
+            for m in self.data.moves.iter().filter(|m| m.entity == *entity) {
+                let f = if m.duration > 0.0 { ((time - m.start) / m.duration).clamp(0.0, 1.0) } else { f32::from(time >= m.start) };
+                if let Some(t) = m.translate {
+                    pose.translate += Vec3::from(t) * f;
+                }
+                if let Some(q) = m.rotate {
+                    pose.rotate = Quat::IDENTITY.slerp(Quat::from_array(q).normalize(), f) * pose.rotate;
+                }
+            }
+            if let Some(v) = visual.iter().filter(|v| v.0 <= time).last() {
+                pose.visible = v.1;
+            }
+            out.push(pose);
         }
     }
 
@@ -291,7 +343,8 @@ impl Breakers {
     /// scenes switch.
     pub fn load(archive: &Archive, ground: &Ground, builtins: Option<&BuiltinTracks>) -> Breakers {
         let trigger = archive.schema().hash_of("TriggerComponent").unwrap_or(0);
-        let scenes = archive.breakers().into_iter().map(|b| Scene::new(b, ground, trigger)).collect();
+        let visual = archive.schema().hash_of("Visual").unwrap_or(0);
+        let scenes = archive.breakers().into_iter().map(|b| Scene::new(b, ground, trigger, visual)).collect();
         let mut lifts = Vec::new();
         for l in archive.lifts() {
             // `Animations`: wait, up, wait at the top, rewind
@@ -338,6 +391,21 @@ impl Breakers {
                 ground.set_group(g, scene.group_on(s, g, initial));
             }
         }
+    }
+
+    /// Where the scenes have the entities they move or hide, `alpha` of a
+    /// tick past the state (for drawing).
+    pub fn entity_poses(&self, st: &State, alpha: f32) -> Vec<EntityPose> {
+        let mut out = Vec::new();
+        for (scene, s) in self.scenes.iter().zip(&st.scenes) {
+            let time = match (s.playing, s.played) {
+                (Some(k), _) => (k as f32 + alpha) / TICK_HZ as f32,
+                (None, true) => f32::MAX,
+                (None, false) => 0.0,
+            };
+            scene.poses(time, &mut out);
+        }
+        out
     }
 
     /// The lift that takes a character at `pos` (feet) facing `facing`
@@ -484,7 +552,7 @@ mod tests {
             moves: Vec::new(),
             length: 3.6,
         };
-        Scene { to_zone: Mat4::from_cols_array(&b.matrix).inverse(), switches: vec![(0, 1, true), (ticks(3.5), 1, false)], groups: vec![(1, false)], length: ticks(3.6), every: 30, data: b }
+        Scene { to_zone: Mat4::from_cols_array(&b.matrix).inverse(), switches: vec![(0, 1, true), (ticks(3.5), 1, false)], groups: vec![(1, false)], length: ticks(3.6), every: 30, shown: vec![(7, vec![(0.5, false), (4.5, true)])], data: b }
     }
 
     fn at(x: f32, walking: bool) -> Watched {
@@ -524,6 +592,26 @@ mod tests {
         s.tick(&mut st, 0, &[Watched { conflict: true, ..at(10.0, false) }]);
         s.tick(&mut st, 1, &[Watched { conflict: true, ..at(11.0, false) }]);
         assert!(st.playing.is_none());
+    }
+
+    #[test]
+    fn a_scene_moves_and_hides_what_it_draws() {
+        let mut s = door();
+        let mv = |start, duration, z: f32, turn: f32| data::Move { start, duration, entity: 7, translate: Some([0.0, 0.0, z]), rotate: Some(Quat::from_rotation_z(turn).to_array()), target: 1 };
+        s.data.moves = vec![mv(0.0, 0.5, -4.0, 1.0), mv(4.4, 0.1, 4.0, -1.0)];
+        let at = |t: f32| {
+            let mut out = Vec::new();
+            s.poses(t, &mut out);
+            out[0]
+        };
+        assert_eq!(at(0.0), EntityPose { entity: 7, translate: Vec3::ZERO, rotate: Quat::IDENTITY, visible: true });
+        let half = at(0.25);
+        assert!((half.translate.z + 2.0).abs() < 1e-5 && half.rotate.angle_between(Quat::from_rotation_z(0.5)) < 1e-4 && half.visible);
+        let down = at(2.0);
+        assert!((down.translate.z + 4.0).abs() < 1e-5 && !down.visible);
+        // back where it was, and shown, once the scene has played
+        let end = at(f32::MAX);
+        assert!(end.translate.length() < 1e-5 && end.rotate.angle_between(Quat::IDENTITY) < 1e-3 && end.visible);
     }
 
     #[test]

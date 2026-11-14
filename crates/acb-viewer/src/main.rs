@@ -639,6 +639,12 @@ impl App {
             let globals = b.character.skeleton.globals(&pose);
             pose_skin(&mut g.scene, &g.renderer, &b.character, skin, &globals, world, dt);
         }
+        // door leaves, portcullises and platforms where their scenes have them
+        if let Some(b) = &w.breakers {
+            for e in b.entity_poses(&w.breaker_state, alpha - 1.0) {
+                g.scene.place_entity(&g.renderer, e.entity, e.visible.then_some((e.translate, e.rotate)));
+            }
+        }
         self.alpha = alpha;
         let climbing = self.world.as_ref().and_then(|w| w.players.get(self.me())).is_some_and(|p| p.climb.is_some());
         self.orbit.ease_climb(climbing, dt);

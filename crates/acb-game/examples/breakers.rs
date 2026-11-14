@@ -23,6 +23,15 @@ fn main() -> anyhow::Result<()> {
             println!("    {:5.2} s +{:.2} s move {:#010x} by {:.2?} turn {:.3?} (target type {})", m.start, m.duration, m.entity, m.translate, m.rotate, m.target);
         }
     }
+    // what is drawn of the entities the scenes move or hide
+    let instances = archive.instances();
+    let mut moved: Vec<u32> = breakers.iter().flat_map(|b| b.moves.iter().map(|m| m.entity).chain(b.toggles.iter().map(|t| t.entity))).collect();
+    moved.sort_unstable();
+    moved.dedup();
+    for e in moved {
+        let drawn: Vec<String> = instances.iter().filter(|i| i.entity == e).map(|i| format!("mesh {:#010x} at {:.2?}", i.mesh, &i.matrix[12..15])).collect();
+        println!("entity {e:#010x}: {} instances {}", drawn.len(), drawn.join(", "));
+    }
     let lifts = archive.lifts();
     println!("{} lifts", lifts.len());
     for l in &lifts {
