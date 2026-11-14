@@ -224,6 +224,12 @@ impl Ground {
         !self.off[self.group[i as usize] as usize]
     }
 
+    /// Has the hold gone (a scene turned its guidance off)? For whoever
+    /// hangs on it.
+    pub fn hold_gone(&self, h: &crate::climb::Hold) -> bool {
+        self.hold_group.iter().enumerate().any(|(i, &g)| g != 0 && self.off[g as usize] && self.holds[i].a == h.a && self.holds[i].b == h.b)
+    }
+
     /// Is the hold there now?
     #[inline]
     pub(crate) fn hold_live(&self, i: u32) -> bool {

@@ -95,6 +95,9 @@ pub enum Stance {
     Seated,
     /// Being killed, stunned or dead: nobody can act on it.
     Down,
+    /// Riding a lift: cannot act, cannot be killed or stunned (retail
+    /// `EnterHumanElevator` 00f791e4 sets the player unkillable).
+    Lift,
 }
 
 /// A character's state for the rules.

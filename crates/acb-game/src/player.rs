@@ -67,6 +67,8 @@ pub struct Player {
     /// The Wall Runner perk is equipped (set by the match each tick): wall
     /// runs reach higher (`Ground::wall_run_hold`).
     pub wall_runner: bool,
+    /// Riding a lift (`breakers.rs`): its clips, no control, unkillable.
+    pub lift: Option<crate::breakers::Ride>,
 }
 
 /// Low profile stops at a drop deeper than this instead of walking off
@@ -77,11 +79,36 @@ pub const LEDGE_STOP: f32 = human::ground::BREAK_HARD_DEPTH;
 
 impl Player {
     pub fn new(body: usize, pos: Vec3, yaw: f32, loco: Locomotion) -> Player {
-        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air { respawn: true, ..Air::start(pos.z, Some(0.0)) }, edge: None, obstacle: None, legs: human::Legs::default(), drop_held: false, time_scale: 1.0, wall_runner: false }
+        Player { body, pos, yaw, loco, vel: Vec3::ZERO, fall_from: pos.z, flight: None, kill: None, climb: None, approach: None, prev_pos: pos, catch_block: 0.0, landing: None, hidden: false, hide: None, blended: false, moved: 0.0, air: Air { respawn: true, ..Air::start(pos.z, Some(0.0)) }, edge: None, obstacle: None, legs: human::Legs::default(), drop_held: false, time_scale: 1.0, wall_runner: false, lift: None }
     }
 
     pub fn entity(&self) -> Mat4 {
         Mat4::from_rotation_translation(Quat::from_rotation_z(self.yaw), self.pos)
+    }
+
+    /// On the ground in control: no kill, climb, hiding spot, flight or
+    /// lift ride, and not on a beam.
+    pub fn free_on_ground(&self) -> bool {
+        self.lift.is_none()
+            && self.kill.is_none()
+            && self.approach.is_none()
+            && self.climb.is_none()
+            && self.hide.is_none()
+            && self.flight.is_none()
+            && !self.loco.airborne()
+            && !self.loco.on_beam()
+    }
+
+    /// Lets go of a hold that is no longer there (a platform fell): into
+    /// a fall from the pose shown.
+    pub fn lose_hold(&mut self, pose: crate::Pose) {
+        self.climb = None;
+        self.loco.resume(pose);
+        self.loco.start_fall();
+        self.vel = Vec3::ZERO;
+        self.fall_from = self.pos.z;
+        self.air = Air::start(self.pos.z, Some(0.0));
+        self.catch_block = RELEASE_NO_CATCH;
     }
 
     /// Position between the last two ticks (`alpha` 0 = previous, 1 = last).
@@ -100,6 +127,8 @@ impl Player {
     pub fn trace_state(&self) -> (&'static str, &'static str) {
         if self.kill.is_some() {
             ("kill", "")
+        } else if self.lift.is_some() {
+            ("lift", "HumanElevator")
         } else if self.hide.as_ref().is_some_and(|h| h.seated()) {
             ("sit", "")
         } else if self.hide.is_some() {
@@ -121,6 +150,8 @@ impl Player {
     pub fn actor(&self) -> rules::Actor {
         let stance = if self.kill.is_some() {
             rules::Stance::Down
+        } else if self.lift.is_some() {
+            rules::Stance::Lift
         } else if self.climb.is_some() {
             rules::Stance::Climb
         } else if self.loco.airborne() || self.flight.is_some() {
@@ -371,11 +402,32 @@ pub(crate) fn drive(
         p.climb = None;
         p.flight = None;
         p.hide = None;
+        p.lift = None;
         p.hidden = false;
         p.vel = Vec3::ZERO;
         if free {
             bodies[me].scripted = None;
             p.loco.resume(pose.clone());
+        }
+        bodies[me].show(world, pose);
+        return;
+    }
+    // riding a lift: its clips, no control, then in the air over the roof
+    if let (Some(r), Some(lift)) = (&mut p.lift, &clipset.lifts) {
+        let (pose, world, pos, yaw, out) = r.update(lift, sk, dt);
+        p.pos = pos;
+        p.yaw = crate::locomotion::norm_yaw(yaw);
+        p.vel = Vec3::ZERO;
+        p.approach = None;
+        if out {
+            if crate::trace() {
+                eprintln!("lift: off at {:.2} {:.2} {:.2}", p.pos.x, p.pos.y, p.pos.z);
+            }
+            p.lift = None;
+            p.loco.resume(pose.clone());
+            p.loco.start_fall();
+            p.fall_from = p.pos.z;
+            p.air = Air::start(p.pos.z, Some(0.0));
         }
         bodies[me].show(world, pose);
         return;

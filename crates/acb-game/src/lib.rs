@@ -20,6 +20,7 @@ pub mod mode;
 pub mod abilities;
 pub mod action;
 pub mod bonus;
+pub mod breakers;
 pub mod player;
 pub mod rounds;
 pub mod rules;
@@ -224,6 +225,8 @@ pub struct Clipset {
     pub climbs: Option<ClimbClips>,
     /// Hiding spots and their clips (`hide.rs`).
     pub hide: Option<hide::Hide>,
+    /// The lift ride (`breakers.rs`).
+    pub lifts: Option<breakers::LiftClips>,
 }
 
 /// The crowd: the navmesh and the clips wanderers blend.
@@ -302,6 +305,9 @@ pub struct World {
     /// Escort team spawns (TeamIndex, position, yaw); team `t` starts every
     /// round on TeamIndex `t + 1` (our reading, as [`World::escort`]).
     pub team_spawns: Vec<(u32, Vec3, f32)>,
+    /// The map's chase breakers (static) and where they are now (saved).
+    pub breakers: Option<breakers::Breakers>,
+    pub breaker_state: breakers::State,
 }
 
 /// An Entity or EntityBuilder by name.
@@ -374,7 +380,7 @@ impl World {
         let mut w = World {
             ground: None,
             crowd: None,
-            clips: Clipset { loco: None, kills: None, climbs: None, hide: None },
+            clips: Clipset { loco: None, kills: None, climbs: None, hide: None, lifts: None },
             clip: None,
             wander: setup.wander,
             bodies: Vec::new(),
@@ -385,6 +391,8 @@ impl World {
             seen: Default::default(),
             vip_ways: Vec::new(),
             team_spawns: Vec::new(),
+            breakers: None,
+            breaker_state: Default::default(),
         };
         let characters = &setup.characters;
         if characters.is_empty() {
@@ -492,6 +500,10 @@ impl World {
             let t = std::time::Instant::now();
             let g = Ground::load(archive)?;
             eprintln!("ground: {} triangles in {:.1}s", g.triangles(), t.elapsed().as_secs_f64());
+            let b = breakers::Breakers::load(archive, &g, builtins);
+            eprintln!("breakers: {} doors and platforms, {} lifts", b.scenes.len(), b.lifts.len());
+            w.breaker_state = b.state();
+            w.breakers = Some(b);
             w.ground = Some(g);
         }
         if let (Some(p), Some(g)) = (w.players.first_mut(), &w.ground) {
@@ -538,7 +550,11 @@ impl World {
         } else {
             None
         };
-        w.clips = Clipset { loco, kills, climbs, hide };
+        let lifts = if setup.play { breakers::LiftClips::load(archive, builtins) } else { None };
+        if setup.play && lifts.is_none() && w.breakers.as_ref().is_some_and(|b| !b.lifts.is_empty()) {
+            eprintln!("breakers: lift ride clips not found");
+        }
+        w.clips = Clipset { loco, kills, climbs, hide, lifts };
         Ok(w)
     }
 
@@ -753,6 +769,30 @@ impl World {
                 p.wall_runner = m.abilities[i].has_perk(abilities::Perk::WallRunner);
             }
         }
+        // chase breakers: the triggers watch where everyone ended last tick
+        if let (Some(b), Some(g)) = (&self.breakers, &mut self.ground) {
+            let watched: Vec<breakers::Watched> = self
+                .players
+                .iter()
+                .map(|p| {
+                    let ground = p.actor().stance == rules::Stance::Ground;
+                    breakers::Watched {
+                        pos: p.pos,
+                        walking: ground && p.moved > 0.1 && p.moved < rules::RUN_SPEED,
+                        idle: ground && p.moved <= 0.1,
+                        conflict: p.kill.is_some() || self.bodies.get(p.body).is_some_and(|b| b.scripted.is_some()),
+                    }
+                })
+                .collect();
+            b.tick(&mut self.breaker_state, self.tick, &watched);
+            b.apply(&self.breaker_state, g);
+            // whoever hangs on a platform falls with it
+            for p in &mut self.players {
+                if p.climb.as_ref().is_some_and(|c| g.hold_gone(&c.hold)) {
+                    p.lose_hold(self.bodies[p.body].pose.clone());
+                }
+            }
+        }
         for (i, p) in self.players.iter_mut().enumerate() {
             let input = if in_control[i] { inputs.get(i).copied().unwrap_or_default() } else { PlayerInput { cam_yaw: inputs.get(i).map_or(0.0, |x| x.cam_yaw), ..Default::default() } };
             let relation = |j: usize| relations.as_ref().map_or(rules::Relation::Npc, |r| r[i][j]);
@@ -765,6 +805,20 @@ impl World {
             // bone rotation, radians), to spot clips that snap or reset
             let before = trace_pose().then(|| p.loco.last_pose().clone());
             p.landing = None;
+            // a lift takes a runner in its detection zone
+            if let (Some(b), Some(_)) = (&self.breakers, &self.clips.lifts) {
+                let moving = input.forward || input.back || input.left || input.right;
+                if moving && (input.run || input.sprint) && p.free_on_ground() && self.bodies[p.body].scripted.is_none() {
+                    let facing = glam::Vec2::new(-p.yaw.sin(), p.yaw.cos());
+                    if let Some(k) = b.lift_for(&self.breaker_state, p.pos, facing) {
+                        let body = &self.bodies[p.body];
+                        p.lift = Some(b.ride(&mut self.breaker_state, k, body.pose.clone(), body.world));
+                        if trace() {
+                            eprintln!("lift: {k} takes player {i} at {:.2} {:.2} {:.2}", p.pos.x, p.pos.y, p.pos.z);
+                        }
+                    }
+                }
+            }
             player::drive(p, &mut self.bodies, &self.clips, self.ground.as_ref(), &input, &act_rules, &relation, &seen, t, DT);
             if relations.is_some() && p.kill.is_some() && !was_attacking {
                 if let Some(v) = (0..n_players).find(|&j| j != p.body && !was_scripted[j] && self.bodies[j].scripted.is_some()) {
@@ -943,6 +997,7 @@ fn respawn(p: &mut player::Player, bodies: &mut [Body]) {
     p.climb = None;
     p.flight = None;
     p.hide = None;
+    p.lift = None;
     p.hidden = false;
     p.vel = Vec3::ZERO;
     p.loco.resume(b.pose.clone());
